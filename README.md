@@ -1,6 +1,6 @@
 # Uncharted: The Nathan Drake Collection for Windows
 
-**Uncharted 1, 2 and 3 from the PS4 collection running natively on Windows 10 and 11, by [SuperMedo](https://github.com/Supermedo).**
+**Uncharted 1, 2 and 3 from the PS4 collection running natively on Windows 10 and 11, by [SuperMedo](https://github.com/Supermedo).** Mohammed Albarghouthi
 
 Same idea as my [Bloodborne port](https://github.com/Supermedo/bloodborne_pc): the original PS4 game
 code runs directly on your PC and the graphics are translated to Vulkan. Unpack the zip, start
