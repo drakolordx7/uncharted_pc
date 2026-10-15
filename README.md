@@ -25,7 +25,9 @@ code runs directly on your PC and the graphics are translated to Vulkan. Unpack 
 ## Requirements
 
 - Windows 10 (1903 or later) or Windows 11, 64-bit.
-- A graphics card with Vulkan 1.3 and a current driver.
+- A graphics card with Vulkan 1.3 and a current driver, with **6 GB of video memory or more**.
+  4 GB cards (GTX 1650, RX 570) run out of video memory and crash after a while; on those, keep
+  Anti-aliasing and Frame generation off.
 - About 8 GB of free memory (RAM + page file).
 
 ## Known problems
@@ -40,6 +42,11 @@ code runs directly on your PC and the graphics are translated to Vulkan. Unpack 
   (mostly U1 after the first cutscene): the game expected the GPU side to be done with a frame it
   wanted to reuse, and stopped when it wasn't yet (shaders building on a first run). Fixed in
   0.3.2: the game now waits for it. If you still see it, open an issue with your log.
+- **Intel HD / UHD graphics:** a black screen on the HD 630 is fixed in 0.3.3. Older Intel chips
+  (HD 520) can still crash inside Intel's own driver.
+- **Uncharted 2 streaming crash** (`iSubMesh < m_numSubMeshInstances`, white textures first) and the
+  **Uncharted 3 London bar crash** (fault at `0xd9c59b`): both seen on the US version 1.02
+  (CUSA02320). Being looked at.
 - Frame rates above 120 are experimental.
 
 ## Building
