@@ -36,10 +36,10 @@ code runs directly on your PC and the graphics are translated to Vulkan. Unpack 
   60 on the Display page and open an issue with your `user\last_run.log`.
 - **Uncharted 3:** green or black shapes flash for a single frame on some characters (Sully's
   shirt in Cartagena). It happens in shadPS4 too, so it's a shader translation problem. Not fixed yet.
-- **Crash with "ASSERTION: GetRenderFrameParams(frameToFreeInstancesFor)->m_gfxEopTick":** the
-  game got too many frames ahead of the GPU side while it was busy (building shaders on a first
-  run). 0.3.1 holds the game at most one frame ahead, like on PS4. If you still see it, open an
-  issue with your log.
+- **Crash with "ASSERTION: GetRenderFrameParams(frameToFreeInstancesFor)->m_gfxEopTick"**
+  (mostly U1 after the first cutscene): the game expected the GPU side to be done with a frame it
+  wanted to reuse, and stopped when it wasn't yet (shaders building on a first run). Fixed in
+  0.3.2: the game now waits for it. If you still see it, open an issue with your log.
 - Frame rates above 120 are experimental.
 
 ## Building

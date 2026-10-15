@@ -621,6 +621,41 @@ static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t imag
         printf("Callbacks: %s at %#" PRIx64 "\n",c->name,c->offset);
     }
 }
+/* Naughty Dog's FrameBegin (ndlib/render/fg-draw-mgr.cpp) asserts that the frame it recycles,
+ * three back, has its GPU end-of-pipe tick (set by the game's EOP interrupt handler). It never
+ * waits: on PS4 the GPU always keeps up. Here the GPU side can fall behind (shaders building on a
+ * first run, an upscaler starting) and the game stopped right after U1's first cutscene. The
+ * assertion's branch is found through its message, in any version of the three games, and the
+ * failed check now waits (pause, check again) instead. */
+static void patch_eop_tick_wait(uint64_t image_size) {
+    static const char message[]="GetRenderFrameParams(frameToFreeInstancesFor)->m_gfxEopTick";
+    unsigned char *text=NULL;
+    for (uint64_t i=0;i+sizeof(message)<=image_size;++i)
+        if (image[i]=='G' && !memcmp(image+i,message,sizeof(message))) { text=image+i; break; }
+    if (!text) return;
+    int patched=0;
+    for (uint64_t at=0;at+7<=image_size;++at) {
+        /* lea rdi, [rip+rel32] -> the message */
+        if (image[at]!=0x48 || image[at+1]!=0x8d || image[at+2]!=0x3d) continue;
+        int32_t rel; memcpy(&rel,image+at+3,4);
+        if (image+at+7+rel!=text) continue;
+        /* Up to 64 bytes before: cmp qword [reg+disp32], 0 (48/49 83 /7, mod 10) ; jne past it */
+        for (uint64_t back=10;back<=64 && back<=at;++back) {
+            unsigned char *c=image+at-back;
+            if ((c[0]!=0x48 && c[0]!=0x49) || c[1]!=0x83 || (c[2]&0xf8)!=0xb8 || (c[2]&7)==4 ||
+                c[7]!=0x00 || c[8]!=0x75) continue;
+            unsigned char *jne=c+8, *ok=jne+2+(int8_t)jne[1];
+            if (ok<=image+at || jne[2]!=0xe8) continue;
+            /* after the jne: pause; jmp back to the cmp */
+            jne[2]=0xf3; jne[3]=0x90; jne[4]=0xeb; jne[5]=(unsigned char)(int8_t)(c-(jne+6));
+            printf("Frame pacing: the EOP tick check at %#" PRIx64 " waits for the GPU\n",
+                   (uint64_t)(c-image));
+            ++patched;
+            break;
+        }
+    }
+    if (!patched) printf("Frame pacing: EOP tick check not found\n");
+}
 /* Restarts the game through run.sh (the settings menu: a new render resolution is a patch
  * applied at start). Descriptors are closed first so the old GPU device and its memory are
  * released before the new process opens its own. */
@@ -901,6 +936,7 @@ int main(int argc, char **argv) {
         uint64_t image_end=0;
         for (uint64_t s=0;s<ns;++s) if (segments[s].address+segments[s].size>image_end) image_end=segments[s].address+segments[s].size;
         install_game_callbacks(segments, ns, image_end);
+        patch_eop_tick_wait(image_end);
     }
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
