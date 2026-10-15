@@ -62,6 +62,7 @@ Fixes and features in this build, by contributor. Pull request links go to the o
 - [Hugo Borges](https://github.com/hugouchoasborges) ([fork](https://github.com/hugouchoasborges/uncharted_pc)): compute dispatches above 65535 groups, sparse-capable queue selection, frame rate cap presets
 - [sid1552](https://github.com/sid1552) ([fork](https://github.com/sid1552/uncharted_pc)): MP3 audio decoding, GPU crash report on device loss, buffer cache per 64-byte block, current MSYS2 build
 - [EdouardSence](https://github.com/EdouardSence) ([fork](https://github.com/EdouardSence/uncharted_pc)): large command data no longer stops the game, GPU copies mark textures dirty, overlay cleanup, Linux window icon
+- [Pepin208](https://github.com/Pepin208) ([fork](https://github.com/Pepin208/uncharted_pc_linux)): in-game display mode switch (windowed, borderless, exclusive fullscreen) applied while playing, in-game menu kept inside the game window
 - [soni424](https://github.com/soni424) ([fork](https://github.com/soni424/uncharted_pc)): dark launcher title bar, null shader binding guard
 - [eduardoghi](https://github.com/eduardoghi): numpad bindings ([#473](https://github.com/Supermedo/uncharted_pc/pull/473)), zip that extracts on Linux ([#404](https://github.com/Supermedo/uncharted_pc/pull/404))
 - [parsifal295](https://github.com/parsifal295) and [devilismyfriend](https://github.com/devilismyfriend): texture collector frees textures again (video memory growth)

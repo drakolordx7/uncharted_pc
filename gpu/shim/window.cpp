@@ -9,6 +9,7 @@
 #include "sdl_window.h"
 #include "bbport_overlay.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
+#include "bbport_settings.h"
 
 namespace {
 // bbport: mouse input for runtime_pad.c (keyboard and mouse controls). The window thread adds
@@ -69,7 +70,50 @@ void SetWindowIcon(SDL_Window* window) {
 #else
 void SetWindowIcon(SDL_Window*) {}
 #endif
+/// Switches the window between the three modes of bbport_settings.h. SDL wants window calls on
+/// the thread that owns the window, so the in-game menu only posts a request
+/// (bbgpu_display_mode_request) and the event pump, which runs on that thread, applies it here.
+void ApplyDisplayMode(SDL_Window* window, int mode) {
+    switch (mode) {
+    case BbSettings::DisplayBorderless:
+        // The desktop mode as it is, the window covering the screen (no mode switch).
+        SDL_SetWindowFullscreenMode(window, nullptr);
+        SDL_SetWindowFullscreen(window, true);
+        break;
+    case BbSettings::DisplayExclusive: {
+        // A mode of the display's own: the panel's native one, so the desktop does not scale the
+        // picture twice (the upscaler does the scaling). Asking for the mode closest to the
+        // window's current size picks small modes (1600x900 on a 1080p screen), so use the
+        // desktop's. Wayland compositors may refuse the switch and leave it borderless. On Windows
+        // SDL then owns the display mode (ChangeDisplaySettingsEx when it differs from the
+        // desktop's) and minimizes the window on focus loss, which gives the mode back; the
+        // presenter skips presenting while the window is minimized (0x0).
+        const SDL_DisplayID display = SDL_GetDisplayForWindow(window);
+        static SDL_DisplayMode chosen; // SDL copies it; kept static for older SDL versions
+        if (const SDL_DisplayMode* native = SDL_GetDesktopDisplayMode(display)) {
+            chosen = *native;
+            if (!SDL_SetWindowFullscreenMode(window, &chosen)) {
+                std::printf("Window: exclusive mode %dx%d@%.2f refused (%s), staying borderless\n",
+                            chosen.w, chosen.h, chosen.refresh_rate, SDL_GetError());
+                SDL_SetWindowFullscreenMode(window, nullptr);
+            }
+        }
+        SDL_SetWindowFullscreen(window, true);
+        break;
+    }
+    default:
+        SDL_SetWindowFullscreen(window, false);
+        break;
+    }
+    SDL_SyncWindow(window); // so the new size is known before the next frame
+}
+
+std::atomic<int> requested_mode{-1};
 } // namespace
+
+extern "C" void bbgpu_display_mode_request(int mode) {
+    requested_mode = mode;
+}
 
 extern "C" void bbgpu_mouse_configure(int look) {
     mouse_look = look != 0;
@@ -126,13 +170,18 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, height_);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_VULKAN_BOOLEAN, true);
-    const char* fullscreen = std::getenv("BB_FULLSCREEN");
-    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_FULLSCREEN_BOOLEAN, fullscreen && fullscreen[0] == '1');
+    // The mode comes from the settings: the in-game menu (bbport.ini) or BB_FULLSCREEN=1.
+    const int display_mode = BbSettings::Get().display_mode;
+    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_FULLSCREEN_BOOLEAN,
+                           display_mode != BbSettings::DisplayWindowed);
     base_title = title;
     window = SDL_CreateWindowWithProperties(props);
     SDL_DestroyProperties(props);
     ASSERT_MSG(window, "Failed to create window: {}", SDL_GetError());
     SetWindowIcon(window);
+    if (display_mode == BbSettings::DisplayExclusive) {
+        ApplyDisplayMode(window, display_mode);
+    }
 
     const char* driver = SDL_GetCurrentVideoDriver();
     const SDL_PropertiesID wp = SDL_GetWindowProperties(window);
@@ -157,7 +206,8 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     SDL_GetWindowSizeInPixels(window, &w, &h);
     width = w;
     height = h;
-    LOG_INFO(Frontend, "Window {}x{} on {}", w, h, driver);
+    LOG_INFO(Frontend, "Window {}x{} on {} ({})", w, h, driver, BbSettings::DisplayModeName(display_mode));
+    std::printf("Window: %dx%d on %s (%s)\n", w, h, driver, BbSettings::DisplayModeName(display_mode));
 }
 
 WindowSDL::~WindowSDL() {
@@ -186,6 +236,11 @@ void WindowSDL::UpdateTextTitle() {
 }
 
 bool WindowSDL::PollEvents() {
+    if (const int mode = requested_mode.exchange(-1); mode >= 0) { // the in-game menu asked
+        ApplyDisplayMode(window, mode);
+        LOG_INFO(Frontend, "Display mode: {}", BbSettings::DisplayModeName(mode));
+        std::printf("Window: display mode -> %s\n", BbSettings::DisplayModeName(mode));
+    }
     {
         std::scoped_lock lock{text_mutex};
         if (text_requested) { // SDL text input must be toggled from the window thread
