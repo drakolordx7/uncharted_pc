@@ -27,6 +27,12 @@ void NoteMovieFrame();
 /// bbport diagnosis: the time (ns) between the guest's last two flip submissions.
 s64 LastFlipIntervalNs();
 
+/// bbport: end-of-pipe flips the GPU side has reached so far (counted by SubmitFlip).
+u64 EopFlipsReached();
+
+/// bbport: waits until the GPU side has reached `count` end-of-pipe flips (at most `timeout_ms`).
+void WaitEopFlipsReached(u64 count, u32 timeout_ms);
+
 struct VideoOutPort {
     SceVideoOutResolutionStatus resolution;
     std::array<VideoOutBuffer, MaxDisplayBuffers> buffer_slots;

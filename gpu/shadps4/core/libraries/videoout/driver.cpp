@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <atomic>
+#include <condition_variable>
+#include <mutex>
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -549,6 +551,12 @@ namespace {
 std::atomic<s64> last_flip_submit_ns{0}, last_flip_interval_ns{0};
 } // namespace
 
+namespace {
+std::atomic<u64> eop_flips_reached{0};
+std::mutex eop_flip_mutex;
+std::condition_variable eop_flip_cv;
+} // namespace
+
 bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
                                 bool is_eop /*= false*/) {
     if (index != -1) {
@@ -594,9 +602,25 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
         liverpool->SendCommand([=, this]() { SubmitFlipInternal(port, index, flip_arg, is_eop); });
     } else {
         SubmitFlipInternal(port, index, flip_arg, is_eop);
+        {
+            std::scoped_lock lock{eop_flip_mutex};
+            eop_flips_reached.fetch_add(1, std::memory_order_relaxed);
+        }
+        eop_flip_cv.notify_all();
     }
 
     return true;
+}
+
+u64 EopFlipsReached() {
+    return eop_flips_reached.load(std::memory_order_relaxed);
+}
+
+void WaitEopFlipsReached(u64 count, u32 timeout_ms) {
+    std::unique_lock lock{eop_flip_mutex};
+    eop_flip_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [count] {
+        return eop_flips_reached.load(std::memory_order_relaxed) >= count;
+    });
 }
 
 void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop) {
