@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <magic_enum/magic_enum.hpp>
 #include "common/logging/classes.h"
 #include "shader_recompiler/frontend/control_flow_graph.h"
 #include "shader_recompiler/frontend/decode.h"
@@ -76,6 +80,43 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
     program.ins_list.reserve(code.size());
     while (!slice.atEnd()) {
         program.ins_list.emplace_back(decoder.decodeInstruction(slice));
+    }
+    // bbport diagnosis: BB_DUMP_GCN=<dir>: the decoded PS4 instructions of each translated shader
+    // (<dir>/<stage>_<hash>.gcn.txt), with operand fields, codes and modifiers.
+    if (const char* dump_dir = std::getenv("BB_DUMP_GCN")) {
+        const std::string path = std::string(dump_dir) + "/" +
+                                 std::string(magic_enum::enum_name(info.hw_stage)) + "_" +
+                                 std::to_string(info.pgm_hash) + ".gcn.txt";
+        if (FILE* f = std::fopen(path.c_str(), "w")) {
+            u32 pc = 0;
+            const auto operand = [](const Gcn::InstOperand& o) {
+                std::string text{magic_enum::enum_name(o.field)};
+                if (o.field == Gcn::OperandField::ScalarGPR ||
+                    o.field == Gcn::OperandField::VectorGPR ||
+                    o.field == Gcn::OperandField::LiteralConst ||
+                    o.field == Gcn::OperandField::SignedConstIntPos ||
+                    o.field == Gcn::OperandField::SignedConstIntNeg) {
+                    text += std::to_string(o.code);
+                }
+                if (o.input_modifier.neg) text = "-" + text;
+                if (o.input_modifier.abs) text = "|" + text + "|";
+                if (o.output_modifier.clamp) text += " clamp";
+                if (o.output_modifier.multiplier != 0.f && o.output_modifier.multiplier != 1.f) {
+                    text += " omod" + std::to_string(o.output_modifier.multiplier);
+                }
+                return text;
+            };
+            for (const auto& inst : program.ins_list) {
+                std::string line = std::to_string(pc) + ": " +
+                                   std::string(magic_enum::enum_name(inst.opcode));
+                for (u32 i = 0; i < inst.dst_count; ++i) line += " " + operand(inst.dst[i]);
+                line += " <-";
+                for (u32 i = 0; i < inst.src_count; ++i) line += " " + operand(inst.src[i]);
+                std::fprintf(f, "%s\n", line.c_str());
+                pc += inst.length;
+            }
+            std::fclose(f);
+        }
     }
 
     // Clear any previous pooled data.

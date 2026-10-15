@@ -13,6 +13,9 @@
 #define VK_USE_PLATFORM_XLIB_KHR
 #endif
 
+#include <cstdio>
+#include <cstdlib>
+#include <mutex>
 #include <vector>
 #include <fmt/ranges.h>
 
@@ -425,6 +428,114 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
     VULKAN_HPP_DEFAULT_DISPATCHER.init(*instance);
 
     return std::move(instance);
+}
+
+// bbport: BB_GPU_ADDRESS_REPORT=1 records every GPU address range the driver binds or unbinds
+// (VK_EXT_device_address_binding_report), so a device-lost fault address can be matched to
+// the buffer or image that owns or owned it.
+namespace {
+struct AddressBinding {
+    u64 base, size, handle;
+    u32 object_type;
+    bool bound;
+    u64 sequence;
+};
+std::mutex address_mutex;
+std::vector<AddressBinding> address_bindings;
+u64 address_sequence;
+
+VKAPI_ATTR VkBool32 VKAPI_CALL AddressBindingCallback(
+    vk::DebugUtilsMessageSeverityFlagBitsEXT, vk::DebugUtilsMessageTypeFlagsEXT type,
+    const vk::DebugUtilsMessengerCallbackDataEXT* data, void*) {
+    if (!(type & vk::DebugUtilsMessageTypeFlagBitsEXT::eDeviceAddressBinding) || !data) {
+        return VK_FALSE;
+    }
+    for (auto* next = static_cast<const VkBaseInStructure*>(data->pNext); next; next = next->pNext) {
+        if (next->sType != VK_STRUCTURE_TYPE_DEVICE_ADDRESS_BINDING_CALLBACK_DATA_EXT) {
+            continue;
+        }
+        const auto* binding = reinterpret_cast<const VkDeviceAddressBindingCallbackDataEXT*>(next);
+        const u64 handle = data->objectCount ? data->pObjects[0].objectHandle : 0;
+        const u32 object_type =
+            data->objectCount ? static_cast<u32>(data->pObjects[0].objectType) : 0;
+        std::scoped_lock lk{address_mutex};
+        if (address_bindings.size() >= 400000) {
+            address_bindings.erase(address_bindings.begin(), address_bindings.begin() + 100000);
+        }
+        address_bindings.push_back({binding->baseAddress, binding->size, handle, object_type,
+                                    binding->bindingType == VK_DEVICE_ADDRESS_BINDING_TYPE_BIND_EXT,
+                                    ++address_sequence});
+    }
+    return VK_FALSE;
+}
+} // namespace
+
+bool AddressReportEnabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_GPU_ADDRESS_REPORT");
+        return env && env[0] == '1';
+    }();
+    return enabled;
+}
+
+vk::UniqueDebugUtilsMessengerEXT CreateAddressReportCallback(vk::Instance instance) {
+    const vk::DebugUtilsMessengerCreateInfoEXT msg_ci = {
+        .messageSeverity = vk::DebugUtilsMessageSeverityFlagBitsEXT::eInfo |
+                           vk::DebugUtilsMessageSeverityFlagBitsEXT::eVerbose,
+        .messageType = vk::DebugUtilsMessageTypeFlagBitsEXT::eDeviceAddressBinding,
+        .pfnUserCallback = AddressBindingCallback,
+    };
+    auto [result, messenger] = instance.createDebugUtilsMessengerEXTUnique(msg_ci);
+    ASSERT_MSG(result == vk::Result::eSuccess, "Failed to create address report callback: {}",
+               vk::to_string(result));
+    return std::move(messenger);
+}
+
+void DumpAddressBindings(u64 address) {
+    std::scoped_lock lk{address_mutex};
+    std::printf("GPU crash: address bindings covering 0x%llx (%zu recorded):\n",
+                static_cast<unsigned long long>(address), address_bindings.size());
+    u32 shown = 0;
+    for (const auto& b : address_bindings) {
+        if (address >= b.base && address < b.base + b.size && shown++ < 40) {
+            std::printf("GPU crash:   #%llu %s object type %u handle 0x%llx: 0x%llx-0x%llx\n",
+                        static_cast<unsigned long long>(b.sequence), b.bound ? "bind  " : "unbind",
+                        b.object_type, static_cast<unsigned long long>(b.handle),
+                        static_cast<unsigned long long>(b.base),
+                        static_cast<unsigned long long>(b.base + b.size));
+        }
+    }
+    const size_t first = address_bindings.size() > 12 ? address_bindings.size() - 12 : 0;
+    for (size_t i = first; i < address_bindings.size(); ++i) {
+        const auto& b = address_bindings[i];
+        std::printf("GPU crash:   latest #%llu %s object type %u handle 0x%llx: 0x%llx-0x%llx\n",
+                    static_cast<unsigned long long>(b.sequence), b.bound ? "bind  " : "unbind",
+                    b.object_type, static_cast<unsigned long long>(b.handle),
+                    static_cast<unsigned long long>(b.base),
+                    static_cast<unsigned long long>(b.base + b.size));
+    }
+    if (!shown) {
+        // Nothing ever covered it: the nearest ranges below and above.
+        const AddressBinding* below = nullptr;
+        const AddressBinding* above = nullptr;
+        for (const auto& b : address_bindings) {
+            if (b.base + b.size <= address && (!below || b.base + b.size > below->base + below->size)) {
+                below = &b;
+            }
+            if (b.base > address && (!above || b.base < above->base)) {
+                above = &b;
+            }
+        }
+        for (const auto* b : {below, above}) {
+            if (b) {
+                std::printf("GPU crash:   nearest %s object type %u handle 0x%llx: 0x%llx-0x%llx\n",
+                            b->bound ? "bind" : "unbind", b->object_type,
+                            static_cast<unsigned long long>(b->handle),
+                            static_cast<unsigned long long>(b->base),
+                            static_cast<unsigned long long>(b->base + b->size));
+            }
+        }
+    }
 }
 
 vk::UniqueDebugUtilsMessengerEXT CreateDebugCallback(vk::Instance instance) {

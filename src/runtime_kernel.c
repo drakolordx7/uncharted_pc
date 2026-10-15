@@ -151,8 +151,35 @@ static ABI int32_t kernel_gettimeofday(GuestTimeval *tv) {
     return posix_gettimeofday(tv,NULL);
 }
 static ABI int64_t posix_time(int64_t *out) { int64_t t=(int64_t)time(NULL); if (out) *out=t; return t; }
+static int64_t utc_offset(int64_t at) {
+#ifdef _WIN32
+    return compat_utc_offset((time_t)at);
+#else
+    time_t t=(time_t)at; struct tm local; localtime_r(&t,&local); return local.tm_gmtoff;
+#endif
+}
+typedef struct { int64_t t; uint32_t west_sec, dst_sec; } GuestTimesec;
+/* west_sec carries the offset east of UTC in seconds, as libkernel fills it. */
+static ABI int32_t convert_utc_to_local(int64_t utc,int64_t *local,GuestTimesec *st,uint64_t *dst) {
+    int64_t offset=utc_offset(utc);
+    if (local) *local=utc+offset;
+    if (st) { st->t=utc; st->west_sec=(uint32_t)offset; st->dst_sec=0; }
+    if (dst) *dst=0;
+    return 0;
+}
+static ABI int32_t convert_local_to_utc(int64_t local,int64_t unused,int64_t *utc,GuestTimezone *tz,int32_t *dst) {
+    (void)unused;
+    int64_t offset=utc_offset(local);
+    if (utc) *utc=local-offset;
+    if (tz) { tz->minuteswest=(int32_t)(-offset/60); tz->dsttime=0; }
+    if (dst) *dst=0;
+    return 0;
+}
 
 /* ---- process ---- */
+/* Debugger range names and page locking have no effect on a PC (memory is never paged to disc). */
+static ABI int32_t name_range(void *address,uint64_t size,const char *name) { (void)address; (void)size; (void)name; return 0; }
+static ABI int32_t lock_range(void *address,uint64_t size) { (void)address; (void)size; return 0; }
 static ABI int32_t get_pagesize(void) { return PAGE; }
 static ABI int32_t get_pid(void) { return 1000; }
 static ABI int32_t yield(void) { sched_yield(); return 0; }
@@ -305,6 +332,8 @@ static const RuntimeExport exports[]={
     {"sceKernelGettimezone",kernel_gettimezone}, {"gettimeofday",posix_gettimeofday},
     {"sceKernelGettimeofday",kernel_gettimeofday},
     {"time",posix_time},
+    {"sceKernelConvertUtcToLocaltime",convert_utc_to_local}, {"sceKernelConvertLocaltimeToUtc",convert_local_to_utc},
+    {"sceKernelSetVirtualRangeName",name_range}, {"sceKernelMlock",lock_range},
     {"getpagesize",get_pagesize}, {"getpid",get_pid}, {"sched_yield",yield},
     {"_exit",hard_exit},
     {"sceKernelDebugRaiseException",raise_exception},

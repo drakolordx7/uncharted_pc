@@ -98,6 +98,14 @@ public:
         }
         if constexpr (enable) {
             bits.SetRange(start_page, end_page);
+            if constexpr (type == Type::GPU) {
+                const u32 frame = g_guest_frames.load(std::memory_order_relaxed);
+                const u64 tick = g_gpu_write_done_tick ? g_gpu_write_done_tick() : 0;
+                for (size_t page = start_page; page < end_page; ++page) {
+                    gpu_frame[page] = frame;
+                    gpu_tick[page] = tick;
+                }
+            }
         } else {
             bits.UnsetRange(start_page, end_page);
         }
@@ -106,6 +114,40 @@ public:
         } else if (EmulatorSettings.GetReadbacksMode() == GpuReadbacksMode::Precise) {
             UpdateProtection<enable, true>();
         }
+    }
+
+    /// bbport: the latest guest frame in which the GPU wrote a GPU-modified page of the range
+    /// (0 when none is GPU-modified).
+    u32 LatestGpuWriteFrame(VAddr addr, u64 size) const {
+        const size_t offset = addr - cpu_addr;
+        const size_t start_page = SanitizeAddress(offset) / TRACKER_BYTES_PER_PAGE;
+        const size_t end_page = std::min<size_t>(
+            Common::DivCeil(SanitizeAddress(offset + size), TRACKER_BYTES_PER_PAGE),
+            NUM_PAGES_PER_REGION);
+        u32 latest = 0;
+        for (size_t page = start_page; page < end_page; ++page) {
+            if (gpu.Get(page)) {
+                latest = std::max(latest, gpu_frame[page]);
+            }
+        }
+        return latest;
+    }
+
+    /// bbport: the tick the GPU reaches once every GPU-modified page of the range is written
+    /// (0 when none is GPU-modified).
+    u64 LatestGpuWriteTick(VAddr addr, u64 size) const {
+        const size_t offset = addr - cpu_addr;
+        const size_t start_page = SanitizeAddress(offset) / TRACKER_BYTES_PER_PAGE;
+        const size_t end_page = std::min<size_t>(
+            Common::DivCeil(SanitizeAddress(offset + size), TRACKER_BYTES_PER_PAGE),
+            NUM_PAGES_PER_REGION);
+        u64 latest = 0;
+        for (size_t page = start_page; page < end_page; ++page) {
+            if (gpu.Get(page)) {
+                latest = std::max(latest, gpu_tick[page]);
+            }
+        }
+        return latest;
     }
 
     /// bbport: after a guest write fault, also unprotects the other pages of the window that
@@ -287,6 +329,8 @@ private:
     RegionBits cpu;
     RegionBits gpu;
     RegionBits writeable;
+    std::array<u32, NUM_PAGES_PER_REGION> gpu_frame{}; ///< bbport: g_guest_frames at the last GPU write
+    std::array<u64, NUM_PAGES_PER_REGION> gpu_tick{}; ///< bbport: g_gpu_write_done_tick() then
     RegionBits readable;
 };
 

@@ -13,4 +13,7 @@ namespace Shader::Backend::SPIRV {
 [[nodiscard]] std::vector<u32> EmitSPIRV(const Profile& profile, const RuntimeInfo& runtime_info,
                                          const IR::Program& program, Bindings& binding);
 
+/// bbport diagnosis: the shader BB_FORCE_IMAGE changes (not loaded from or saved to the cache).
+[[nodiscard]] bool IsForcedShader(u64 hash);
+
 } // namespace Shader::Backend::SPIRV

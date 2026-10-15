@@ -3,13 +3,18 @@
 
 #pragma once
 
+#include <array>
+#include <atomic>
+#include <chrono>
 #include <deque>
+#include <memory>
 
 #include <condition_variable>
 
 #include "core/libraries/videoout/buffer.h"
 #include "video_core/renderer_vulkan/host_passes/fsr_pass.h"
 #include "video_core/renderer_vulkan/host_passes/pp_pass.h"
+#include "video_core/renderer_vulkan/vk_frame_generation.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -38,6 +43,15 @@ struct Frame {
     bool is_hdr{false};
     u8 id{};
 
+    /// bbport: frame generation: frames between the previous game frame and this one,
+    /// presented before it (FrameGenerator), the first `generated_count` of them.
+    struct Generated {
+        VmaAllocation allocation{};
+        vk::Image image{};
+        vk::ImageView view{};
+    };
+    std::array<Generated, FrameGenerator::MaxGenerated> generated{};
+    u32 generated_count{};
 };
 
 enum SchedulerType {
@@ -105,6 +119,13 @@ private:
     Frame* GetRenderFrame();
 
     void RecreateFrame(Frame* frame, u32 width, u32 height);
+    /// bbport: the images frame generation writes for `frame` (its size, made once).
+    void EnsureGenerated(Frame* frame);
+    void DestroyGenerated(Frame* frame);
+    /// bbport: blits `image` (General layout) into a swapchain image with the overlay and
+    /// presents it. `last`: the game frame itself, which also signals the frame's fence.
+    /// False when the swapchain could not give an image.
+    bool PresentImage(Frame* frame, vk::Image image, bool last);
 
     void SetExpectedGameSize(s32 width, s32 height);
 
@@ -136,6 +157,13 @@ private:
     std::condition_variable free_cv;
     std::condition_variable_any frame_cv;
     std::vector<VAddr> vo_buffers_addr;
+    /// bbport: frame generation, and the interval of the game's frames its frames are paced
+    /// in (present thread).
+    std::unique_ptr<FrameGenerator> frame_generator;
+    /// The game's picture before its UI, through the same passes as the frame.
+    Frame hudless_frame{};
+    std::chrono::steady_clock::time_point last_game_present{};
+    std::atomic<double> game_frame_ms{16.7}; ///< written by the present thread
 };
 
 } // namespace Vulkan

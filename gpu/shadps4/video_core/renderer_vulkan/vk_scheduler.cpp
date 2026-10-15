@@ -4,6 +4,9 @@
 #include <thread>
 #include <algorithm>
 #include <cstdio>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include <cstdlib>
 #include <unordered_map>
 #ifndef _WIN32
@@ -26,8 +29,58 @@ namespace Vulkan {
 
 std::mutex Scheduler::submit_mutex;
 
+extern void (*g_gpu_stall_report)();
+bool (*g_draw_pipe_busy)() = nullptr;
+
+namespace {
+// bbport: the last submissions to the graphics queue (all schedulers share it), printed when a
+// GPU wait stalls: which timeline value each one signals and which semaphores it waits for.
+struct SubmitRecord {
+    const Scheduler* scheduler;
+    VkSemaphore timeline;
+    u64 signal;
+    u32 waits;
+    std::array<VkSemaphore, 4> wait_semaphore;
+    std::array<u64, 4> wait_value;
+};
+std::mutex g_recent_mutex;
+std::array<SubmitRecord, 32> g_recent;
+u64 g_recent_count;
+std::vector<std::pair<const Scheduler*, const Instance*>> g_schedulers;
+} // namespace
+
+void Scheduler::ReportStall() {
+    std::scoped_lock lk{g_recent_mutex};
+    for (const auto& [scheduler, inst] : g_schedulers) {
+        const VkSemaphore timeline = scheduler->work_semaphore.Handle();
+        const auto [result, value] = inst->GetDevice().getSemaphoreCounterValue(timeline);
+        std::printf("GPU stall: scheduler %p timeline %p: GPU reached %llu, next tick %llu\n",
+                    static_cast<const void*>(scheduler), static_cast<void*>(timeline),
+                    static_cast<unsigned long long>(value),
+                    static_cast<unsigned long long>(scheduler->work_semaphore.CurrentTick()));
+    }
+    const u64 count = std::min<u64>(g_recent_count, g_recent.size());
+    for (u64 i = g_recent_count - count; i < g_recent_count; ++i) {
+        const auto& r = g_recent[i % g_recent.size()];
+        std::printf("GPU stall: submit #%llu scheduler %p signals %p=%llu, waits",
+                    static_cast<unsigned long long>(i), static_cast<const void*>(r.scheduler),
+                    static_cast<void*>(r.timeline), static_cast<unsigned long long>(r.signal));
+        for (u32 w = 0; w < r.waits; ++w) {
+            std::printf(" %p=%llu", static_cast<void*>(r.wait_semaphore[w]),
+                        static_cast<unsigned long long>(r.wait_value[w]));
+        }
+        std::printf("\n");
+    }
+    std::fflush(stdout);
+}
+
 Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
     : instance{instance}, work_semaphore{instance}, command_pool{instance, &work_semaphore} {
+    {
+        std::scoped_lock lk{g_recent_mutex};
+        g_schedulers.emplace_back(this, &instance);
+        g_gpu_stall_report = &Scheduler::ReportStall;
+    }
     // bbport: BB_VK_RECORD_THREAD=0 records on the calling thread.
     const char* env = std::getenv("BB_VK_RECORD_THREAD");
     if (threaded_recording && !(env && env[0] == '0')) {
@@ -44,6 +97,10 @@ Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
 }
 
 Scheduler::~Scheduler() {
+    {
+        std::scoped_lock lk{g_recent_mutex};
+        std::erase_if(g_schedulers, [this](const auto& entry) { return entry.first == this; });
+    }
     if (recorder_thread.joinable()) {
         SyncRecording();
         recorder_thread.request_stop();
@@ -396,6 +453,45 @@ void Scheduler::AllocateWorkerCommandBuffers() {
 
 void Scheduler::SubmitExecution(SubmitInfo& info) {
     std::scoped_lock lk{submit_mutex};
+    // bbport: BB_SUBMIT_THREADS=1 names each thread that submits through this scheduler (once).
+    static const bool submit_threads = std::getenv("BB_SUBMIT_THREADS") != nullptr;
+    if (submit_threads) {
+        static std::mutex seen_mutex;
+        static std::vector<std::pair<const Scheduler*, u32>> seen;
+        const u32 tid = static_cast<u32>(GetCurrentThreadId());
+        std::scoped_lock seen_lk{seen_mutex};
+        if (std::ranges::find(seen, std::pair<const Scheduler*, u32>{this, tid}) == seen.end()) {
+            seen.emplace_back(this, tid);
+            PWSTR description = nullptr;
+            char name[64] = "?";
+            if (SUCCEEDED(GetThreadDescription(GetCurrentThread(), &description)) && description) {
+                WideCharToMultiByte(CP_UTF8, 0, description, -1, name, sizeof(name), nullptr, nullptr);
+                LocalFree(description);
+            }
+            std::printf("Scheduler %p: first submission from thread %u '%s'%s\n",
+                        static_cast<const void*>(this), tid, name, on_submit ? " (draw scheduler)" : "");
+        }
+    }
+    // bbport: the GPU command thread must not submit while the draw recording thread still has
+    // work in this command buffer (its sparse binds would miss this submission). Reported once
+    // per caller with a stack (module offsets for llvm-symbolizer).
+    if (on_submit && g_draw_pipe_busy && g_draw_pipe_busy()) {
+        static std::mutex report_mutex;
+        static std::vector<void*> reported;
+        void* frames[24]{};
+        const u16 count = CaptureStackBackTrace(1, 24, frames, nullptr);
+        std::scoped_lock report_lk{report_mutex};
+        if (count > 2 && std::ranges::find(reported, frames[1]) == reported.end()) {
+            reported.push_back(frames[1]);
+            const auto base = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
+            std::printf("Scheduler: GPU thread submits while the draw pipe is busy:");
+            for (u16 i = 0; i < count; ++i) {
+                std::printf(" %llx", static_cast<unsigned long long>(
+                                         reinterpret_cast<uintptr_t>(frames[i]) - base));
+            }
+            std::printf("\n");
+        }
+    }
     const u64 signal_value = work_semaphore.NextTick();
 
 #if TRACY_GPU_ENABLED
@@ -446,6 +542,15 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         .pSignalSemaphores = info.signal_semas.data(),
     };
 
+    {
+        std::scoped_lock lk{g_recent_mutex};
+        auto& record = g_recent[g_recent_count++ % g_recent.size()];
+        record = {this, timeline, signal_value, info.num_wait_semas, {}, {}};
+        for (u32 w = 0; w < info.num_wait_semas && w < 4; ++w) {
+            record.wait_semaphore[w] = info.wait_semas[w];
+            record.wait_value[w] = info.wait_ticks[w];
+        }
+    }
     ImGui::Core::TextureManager::Submit();
     auto submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
     ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");

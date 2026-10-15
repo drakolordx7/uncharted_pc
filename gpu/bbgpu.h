@@ -32,6 +32,14 @@ int bbgpu_text_input_begin(const char *initial_utf8, const char *prompt_utf8);
 int bbgpu_text_input_poll(char *out_utf8, uint64_t size);
 /* 1 while the in-game settings menu is open: the game's pad input is held neutral. */
 int bbgpu_overlay_captures_input(void);
+/* Mouse controls: look=1 captures the cursor while the game window has the focus (relative
+ * mode). sample returns the motion (pixels) and wheel steps since the last call and the held
+ * buttons (1 left, 2 right, 4 middle, 8 X1, 16 X2); 1 while the cursor is captured. */
+void bbgpu_mouse_configure(int look);
+/* Heading (degrees, about the vertical axis) of the camera the game last rendered with and how old
+ * it is; 0 before the first frame with a known camera. */
+int bbgpu_camera_yaw(float *yaw_degrees, double *age_seconds);
+int bbgpu_mouse_sample(float *dx, float *dy, uint32_t *buttons, int *wheel);
 /* Number of symbols registered by the vendored libraries (diagnostics). */
 unsigned bbgpu_symbol_count(void);
 #ifdef __cplusplus

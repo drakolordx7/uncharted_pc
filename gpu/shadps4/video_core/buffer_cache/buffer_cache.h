@@ -6,6 +6,9 @@
 #include "bbport_copy.h"
 
 #include <deque>
+#include <mutex>
+#include <unordered_map>
+#include <vector>
 #include <boost/container/small_vector.hpp>
 
 #include "common/interval_set.h"
@@ -83,6 +86,10 @@ public:
     /// Invalidates any buffer in the logical page range.
     void InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks = false);
 
+    /// bbport diagnosis (BB_FORCE_VB_UPLOAD): the next ObtainBuffer copies this range from guest
+    /// memory again (regions the GPU did not write).
+    void ForceUpload(VAddr device_addr, u64 size);
+
     /// bbport: a guest write fault at `device_addr` was handled; unprotect its neighbourhood.
     void ExtendWriteFault(VAddr device_addr);
 
@@ -94,6 +101,10 @@ public:
                                                              bool is_written,
                                                              bool is_texel_buffer = false);
 
+    /// bbport diagnosis (BB_STABLE_CHECK=1): at an end-of-pipe fence, reports read-only
+    /// bindings since the last one whose guest data changed meanwhile.
+    void CheckStableBindings();
+
     /// Attempts to obtain a buffer without modifying the cache contents.
     [[nodiscard]] std::pair<const Buffer*, u64> ObtainBufferForImage(VAddr device_addr, u32 size);
 
@@ -103,6 +114,17 @@ public:
     /// Return true when a region is modified from the GPU
     [[nodiscard]] bool IsRegionGpuModified(VAddr addr, size_t size);
 
+    /// bbport: whether buffers the GPU wrote cover any byte of the range. The page tracker
+    /// (IsRegionGpuModified) flags whole 4 KiB pages, and so the bytes next to GPU data.
+    [[nodiscard]] bool IsRangeGpuWritten(VAddr addr, size_t size) const {
+        return gpu_modified_ranges.Intersects(addr, size);
+    }
+
+    /// bbport: writes the image that starts at `addr` (its current GPU contents, tiled as in
+    /// guest memory) into the buffer of that range, before a shader copies the range as plain
+    /// memory. False when no image starts there.
+    bool SyncImageToBuffer(VAddr addr, u32 size);
+
     /// Processes the fault buffer.
     void ProcessFaultBuffer();
 
@@ -111,6 +133,10 @@ public:
 
     /// Commits pending sparse buffer memory binds. Must be called before every scheduler submit.
     void SubmitPendingArenaBinds(Vulkan::SubmitInfo& info);
+
+    /// bbport: the arenas' guest and GPU address ranges and the resident block ranges (GPU
+    /// crash report).
+    void DumpArenas() const;
 
 private:
     struct ArenaBinds {
@@ -163,6 +189,24 @@ private:
     StreamBuffer stream_buffer;
     Buffer gds_buffer;
     RangeSet gpu_modified_ranges;
+    /// bbport: pages the guest writes while they hold recent GPU data (InvalidateMemory): the
+    /// guest bytes of their GPU-written ranges as the write began. An upload sends only the bytes
+    /// the guest changed since (the rest keeps the GPU's data); a read-back keeps those bytes.
+    struct ShadowRange {
+        VAddr start;
+        std::vector<u8> bytes;
+    };
+    std::mutex shadow_mutex;
+    std::unordered_map<VAddr, std::vector<ShadowRange>> shadows;
+    std::atomic<u32> shadow_pages{0};
+    void ShadowGpuData(VAddr page, u64 length);
+
+    /// bbport: GPU data a guest write lands on, written by GPU work that has completed: read
+    /// back on a second queue of the graphics family, which waits for nothing queued since
+    /// (Finish waits for the whole queue). False when unavailable.
+    struct SideQueue;
+    std::unique_ptr<SideQueue> side_queue;
+    bool DownloadOnSideQueue(VAddr page, u64 length);
 
     std::unique_ptr<FaultManager> fault_manager;
     std::unique_ptr<Buffer> bda_pagetable_buffer;

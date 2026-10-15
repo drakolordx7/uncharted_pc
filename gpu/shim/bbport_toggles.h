@@ -79,6 +79,13 @@ inline bool Disabled(std::uint64_t bit) {
 namespace BbStats {
 /// Guest writes caught by page protection, and pages currently left unprotected as hot.
 inline std::atomic<std::uint64_t> tracker_faults{0};
+/// Guest writes to pages holding GPU data: the data dropped as dead (BB_DEAD_GPU_FRAMES) or read
+/// back first (waits for the GPU).
+inline std::atomic<std::uint64_t> dead_gpu_drops{0}, gpu_read_backs{0};
+/// ... or recent GPU data kept and merged at the next upload (BufferCache::ShadowGpuData).
+inline std::atomic<std::uint64_t> gpu_merges{0};
+/// ... or read back on the second queue (GPU work done; BufferCache::DownloadOnSideQueue).
+inline std::atomic<std::uint64_t> gpu_side_downloads{0}, gpu_side_download_ns{0};
 inline std::atomic<std::int64_t> hot_pages{0};
 /// Stall diagnostics (BB_FRAME_STATS): per-frame deltas printed for frames over 40 ms.
 inline std::atomic<std::uint64_t> images_registered{0};

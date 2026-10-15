@@ -120,8 +120,8 @@ def inspect_libc(path):
     return evidence
 
 
-def prepare(game, out):
-    source = (game / 'eboot.bin').read_bytes()
+def prepare(game, out, exe='eboot.bin'):
+    source = (game / exe).read_bytes()
     elf, header, ph, segments, missing = parse_self(source)
     loads = [p for p in ph if p['type'] in (1, 0x61000010)]
     def mapped(addr, size=8):
@@ -237,7 +237,8 @@ def prepare(game, out):
                   bundled_modules=sorted(p.name for p in (game / 'sce_module').iterdir()),
                   resources=dict(resources), resource_bytes=total_bytes,
                   status='Prepared only; execution and Vulkan are tested separately.')
-    (out / 'analysis.json').write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
+    (out / 'analysis.json').write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n',
+                                       encoding='utf-8')
     print(f"{report['sfo'].get('TITLE')} | entry={header[4]:#x} | image={size:,} bytes")
     print(f"{len(names)} imported symbols; {sum(counts.values()):,} relocations; {len(report['needed'])} required modules")
     print(f"Unavailable non-loadable metadata headers: {missing}; not a byte-exact ELF reconstruction")
@@ -249,8 +250,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('game', type=Path)
     parser.add_argument('--out', type=Path, default=Path(__file__).resolve().parent.parent / 'out')
+    parser.add_argument('--exe', default='eboot.bin', help='executable in the game folder')
     args = parser.parse_args()
     try:
-        prepare(args.game, args.out)
+        prepare(args.game, args.out, args.exe)
     except (ValueError, OSError, StopIteration, KeyError, IndexError) as error:
         parser.exit(1, f'prepare failed: {error}\n')

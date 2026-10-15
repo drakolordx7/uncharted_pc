@@ -88,7 +88,7 @@ typedef void (*GpuRange)(uintptr_t address, uint64_t size);
 static GpuRange hook_map, hook_unmap, hook_invalidate;
 enum { HOOK_MAP, HOOK_UNMAP, HOOK_INVALIDATE };
 typedef struct { int kind; uintptr_t address; uint64_t size; } PendingHook;
-static PendingHook pending[64]; static size_t pending_count;
+static PendingHook *pending; static size_t pending_count, pending_capacity;
 static size_t allocations, maps, flexible_maps, protects, queries;
 static uint64_t live_bytes, flexible_bytes;
 
@@ -268,7 +268,13 @@ static void host_discard(uint64_t phys, uint64_t size) {
 static void queue_hook(int kind, uintptr_t address, uint64_t size) {
     GpuRange hook = kind==HOOK_MAP ? hook_map : kind==HOOK_UNMAP ? hook_unmap : hook_invalidate;
     if (!hook) return;
-    if (pending_count==sizeof(pending)/sizeof(*pending)) { fputs("STOP: GPU hook queue overflow\n",stderr); exit(21); }
+    /* One unmap can cover many mappings (games map video memory in 1 MiB pieces). */
+    if (pending_count==pending_capacity) {
+        size_t capacity=pending_capacity ? pending_capacity*2 : 256;
+        PendingHook *grown=realloc(pending,capacity*sizeof(*pending));
+        if (!grown) { fputs("STOP: out of memory for GPU memory notifications\n",stderr); exit(21); }
+        pending=grown; pending_capacity=capacity;
+    }
     pending[pending_count++]=(PendingHook){kind,address,size};
 }
 /* Runs queued GPU notifications; callers invoke it after dropping the lock. */
@@ -441,12 +447,22 @@ static int32_t map_direct_locked(void **out, uint64_t size, int prot, int flags,
     if (!result) ++maps;
     return result;
 }
+/* BB_MEMORY_LOG=1: every mapping call with its arguments and result (diagnostics). */
+static int memory_log(void) {
+    static int value=-1;
+    if (value<0) { const char *v=getenv("BB_MEMORY_LOG"); value=v && v[0]=='1'; }
+    return value;
+}
 static ABI int32_t direct_map(void **out, uint64_t size, int prot, int flags, int64_t physical, uint64_t alignment) {
+    void *requested=out ? *out : NULL;
     write_lock();
     int32_t result=map_direct_locked(out,size,prot,flags,physical,alignment);
     write_unlock();
     flush_hooks();
-    if (!result) printf("Runtime: mapped direct memory %p, size=%" PRIu64 ", prot=0x%x\n", *out, size, prot);
+    if (memory_log())
+        printf("Memory: map direct want=%p size=0x%" PRIx64 " prot=0x%x flags=0x%x phys=0x%" PRIx64 " align=0x%" PRIx64 " -> %p result=0x%x\n",
+               requested,size,prot,flags,(uint64_t)physical,alignment,out ? *out : NULL,(unsigned)result);
+    else if (!result) printf("Runtime: mapped direct memory %p, size=%" PRIu64 ", prot=0x%x\n", *out, size, prot);
     return result;
 }
 static ABI int32_t direct_map_named(void **out, uint64_t size, int prot, int flags, int64_t physical,
@@ -476,6 +492,7 @@ static ABI int32_t direct_unmap(void *address, uint64_t size) {
     int32_t result=unmap_locked((uintptr_t)address,size);
     pending_count=before; /* already notified above */
     write_unlock();
+    if (memory_log()) printf("Memory: unmap %p size=0x%" PRIx64 " result=0x%x\n",address,size,(unsigned)result);
     return result;
 }
 static ABI int32_t direct_release(uint64_t start, uint64_t size) {
@@ -509,6 +526,7 @@ static ABI int32_t direct_release(uint64_t start, uint64_t size) {
     host_discard(start,size); /* zero on reuse */
     write_unlock();
     flush_hooks();
+    if (memory_log()) printf("Memory: release direct phys=0x%" PRIx64 " size=0x%" PRIx64 "\n",start,size);
     return 0;
 }
 static int32_t map_flexible_locked(void **inout, uint64_t size, int prot, int flags) {
@@ -521,6 +539,7 @@ static int32_t map_flexible_locked(void **inout, uint64_t size, int prot, int fl
     return result;
 }
 static ABI int32_t map_flexible(void **inout, uint64_t size, int prot, int flags) {
+    if (memory_log()) printf("Memory: map flexible want=%p size=0x%" PRIx64 " prot=0x%x flags=0x%x\n",inout ? *inout : NULL,size,prot,flags);
     write_lock();
     int32_t result=map_flexible_locked(inout,size,prot,flags);
     write_unlock();
@@ -541,6 +560,7 @@ static ABI int32_t reserve_range(void **inout, uint64_t size, int flags, uint64_
     if ((flags & MAP_FIXED_FLAG) && overlaps((uintptr_t)*inout,(uintptr_t)*inout+size,0)) {
         write_unlock(); return NO_MEMORY;
     }
+    if (memory_log()) printf("Memory: reserve want=%p size=0x%" PRIx64 " flags=0x%x align=0x%" PRIx64 "\n",*inout,size,flags,alignment);
     int32_t result=place(inout,size,0,flags,alignment,KIND_RESERVED,0,0);
     write_unlock();
     if (!result) printf("Runtime: reserved virtual range %p, size=%" PRIu64 "\n", *inout, size);
@@ -563,6 +583,7 @@ static ABI int32_t kernel_mprotect(const void *address, uint64_t size, int prot)
     int32_t result=protect_locked((uintptr_t)address,size,prot,-1);
     write_unlock();
     flush_hooks();
+    if (memory_log()) printf("Memory: mprotect %p size=0x%" PRIx64 " prot=0x%x result=0x%x\n",address,size,prot,(unsigned)result);
     return result;
 }
 static ABI int32_t query_protection(void *address, void **start, void **end, uint32_t *prot) {
@@ -615,6 +636,9 @@ static ABI int32_t batch_map2(BatchEntry *entries, int count, int *processed, in
     write_lock();
     for (; done<count; ++done) {
         BatchEntry *e=&entries[done];
+        if (memory_log())
+            printf("Memory: batch op=%d start=%p length=0x%" PRIx64 " offset=0x%" PRIx64 " prot=0x%x type=%d flags=0x%x\n",
+                   (int)e->operation,e->start,(uint64_t)e->length,(uint64_t)e->offset,(unsigned)(uint8_t)e->prot,(int)e->type,flags);
         switch (e->operation) {
         case 0: result=map_direct_locked(&e->start,e->length,(uint8_t)e->prot,flags,(int64_t)e->offset,0); break;
         case 1: result=unmap_locked((uintptr_t)e->start,e->length); break;
@@ -677,6 +701,26 @@ void *runtime_low_map(size_t size, int prot) {
     write_unlock();
     return p==MAP_FAILED ? NULL : p;
 #endif
+}
+/* The main executable where the PS4 loads it (0x400000), else as low as possible below 2 GiB:
+ * Uncharted's TGenericOffsetPtr tables cover pointers into the executable as [0, 2 GiB) and
+ * assert (save games, level loads) for an image at 0x800000000. NULL if nothing is free. */
+#define IMAGE_MIN UINT64_C(0x400000)
+#define IMAGE_LIMIT UINT64_C(0x80000000)
+void *runtime_image_map(size_t size, int prot) {
+    size=align_up(size,UINT64_C(65536));
+    write_lock();
+    void *p=NULL;
+    for (uintptr_t at=IMAGE_MIN; !p && at+size<=IMAGE_LIMIT; at+=UINT64_C(0x100000)) {
+#ifdef _WIN32
+        p=VirtualAlloc((void *)at,size,MEM_RESERVE|MEM_COMMIT,win_prot(prot));
+#else
+        p=mmap((void *)at,size,prot,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE,-1,0);
+        if (p==MAP_FAILED) p=NULL;
+#endif
+    }
+    write_unlock();
+    return p;
 }
 /* ---- GPU library interface (gpu/shim/bbgpu.cpp) ---- */
 /* Optimizations switched off at run time (diagnostics): the number in the file named by

@@ -1,5 +1,37 @@
 # Temporal upscaling and frame generation — frame analysis and plan
 
+## Uncharted: The Nathan Drake Collection (2026-10-10)
+
+All three games share the post-processing of the collection, so one set of shaders serves them
+(run.py sets the defaults):
+
+| Variable | Shader | Role |
+|---|---|---|
+| `BB_VELOCITY_PS=f4b18264` | camera velocity pass of the motion blur (full screen, 960x540) | its constant buffer gives the camera (below) |
+| `BB_UPSCALE_BEFORE_CS=aec539f0` | first compute after the lit scene color | DLSS/FSR/TAA run before it, frame generation takes depth and motion here |
+| `BB_HUDLESS_PS=484cdbf5` | first draw into the display buffer, before the UI draws | its target is the picture without UI |
+
+The velocity pass does not hold usable motion vectors: render target 0 is distortion (heat haze,
+shockwaves), target 1 the camera motion times the motion blur strength, which is zero with the
+game's default setting "Object" (also with "Off"). Its pixel shader (dumped IR) gives the camera:
+`z = c9 / (depth - c8)`, `view = (z (c0 u + c2), z (c1 v + c3), z)`, `p = M view + t` (rows
+c12..c23; stencil bits 0xc0 add c56..c58, not reproduced), previous clip x, y, w = rows c40..43,
+c44..47, c52..55 of `(p, 1)`. `CameraMotion::OnVelocityConstants` reads the buffer at the draw
+and `camera_motion.comp` mode 2 writes the motion vectors (pixels, previous minus current)
+that the upscalers and frame generation share. Depth is not inverted (sky 1.0).
+
+Frame generation (`vk_frame_generation.cpp`, `BB_FRAME_GEN=fsr3|dlss`,
+`BB_FRAME_GEN_MULTIPLIER=2..4`): the presenter composes the frame (FSR 1, post pass) and the
+picture without UI through the same passes; FSR 3.1 (FSR-Vulkan 3.1.6 frame interpolation)
+interpolates the picture without UI and `frame_gen_ui.comp` puts this frame's UI on top; DLSS
+Frame Generation (NGX through `bbport_dlss.dll` ABI 2, `nvngx_dlssg.dll`) gets it as HUD-less
+input and makes up to three frames on RTX 50. Generated frames are presented before the game's
+frame, spaced over the measured interval between the game's frames. Frames without the scene
+(menus, prerecorded movies) are shown alone. Checked on an RTX 5080: U1 deck, U2 train, U3
+intro at 120 FPS (FSR 3, DLSS 2x) and 240 FPS (DLSS 4x) from 60, pacing within 10 / 6 ms.
+`BB_FRAME_DUMP_TRIGGER` (tools/drive.py `shot`) also writes the generated frames and the
+inputs (`fg_depth`, `fg_motion`).
+
 ## Native TAA and missing FSR 4 assets (2026-10-01)
 
 `upscaler=taa` / `BB_UPSCALER=taa` is a separate native-resolution temporal AA

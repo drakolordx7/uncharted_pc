@@ -210,6 +210,29 @@ void Translator::BUFFER_LOAD(u32 num_dwords, bool is_inst_typed, bool is_buffer_
     const IR::VectorReg vaddr{inst.src[0].code};
     const IR::ScalarReg sharp{inst.src[2].code * 4};
 
+    // bbport: addr64 (GCN 2): the address is the 64-bit pair in vaddr (with a V# of base 0), read
+    // like a scalar load from that pointer. Uncharted 3's hair finds each pixel's shadow cascade
+    // this way (the cascade block's pointer plus 64 bytes per cascade); without it the hair was
+    // lit by the sun in the shade and glowed.
+    static const bool addr64_off = [] {
+        const char* env = std::getenv("BB_NO_ADDR64");
+        return env && env[0] == '1';
+    }();
+    if (mubuf.addr64 && !addr64_off && !is_inst_typed && !is_buffer_typed && scalar_width == 32) {
+        const IR::Value base =
+            ir.CompositeConstruct(ir.GetVectorReg(vaddr), ir.GetVectorReg(vaddr + 1));
+        const IR::U32 soffset{GetSrc(inst.src[3])};
+        IR::U32 dword_offset = ir.Imm32(u32(mubuf.offset) >> 2);
+        if (!soffset.IsImmediate() || soffset.U32() != 0) {
+            dword_offset = ir.IAdd(dword_offset, ir.ShiftRightLogical(soffset, ir.Imm32(2)));
+        }
+        const IR::VectorReg dst_reg{inst.src[1].code};
+        for (u32 i = 0; i < num_dwords; i++) {
+            ir.SetVectorReg(dst_reg + i, ir.ReadConst(base, ir.IAdd(dword_offset, ir.Imm32(i))));
+        }
+        return;
+    }
+
     const IR::U32 index = mubuf.idxen ? ir.GetVectorReg(vaddr) : ir.Imm32(0);
     const IR::VectorReg voffset_vgpr = mubuf.idxen ? vaddr + 1 : vaddr;
     const IR::U32 voffset = mubuf.offen ? ir.GetVectorReg(voffset_vgpr) : ir.Imm32(0);

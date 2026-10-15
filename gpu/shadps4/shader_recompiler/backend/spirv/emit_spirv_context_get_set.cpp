@@ -59,6 +59,13 @@ Id EmitGetUserData(EmitContext& ctx, IR::ScalarReg reg) {
 
 Id EmitReadConst(EmitContext& ctx, IR::Inst* inst, Id addr, Id offset) {
     const u32 flatbuf_off_dw = inst->Flags<u32>();
+    if (flatbuf_off_dw & ReadConstWindowFlag) {
+        // bbport: the lane's dword of the block's window (ReadConstWindowFlag)
+        const Id index =
+            ctx.OpUMin(ctx.U32[1], offset, ctx.ConstU32(ReadConstWindowDwords - 1));
+        return ctx.EmitFlatbufferLoad(
+            ctx.OpIAdd(ctx.U32[1], ctx.ConstU32(flatbuf_off_dw & 0xFFFFu), index));
+    }
     if (!EmulatorSettings.IsDirectMemoryAccessEnabled()) {
         return ctx.EmitFlatbufferLoad(ctx.ConstU32(flatbuf_off_dw));
     }

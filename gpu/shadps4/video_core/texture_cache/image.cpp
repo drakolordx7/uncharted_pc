@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "bbport_toggles.h"
+#include <cstdio>
+#include <cstdlib>
 #include <ranges>
+#include <string>
 #include "common/assert.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -209,6 +212,26 @@ Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,
     backing->num_samples = info.num_samples;
     backing->image = UniqueImage{instance.GetDevice(), instance.GetAllocator()};
     backing->image.Create(image_ci);
+    // bbport diagnosis: BB_IMAGE_LOG=1 names every image with its Vulkan handle (matched against
+    // the GPU crash address report).
+    static const bool image_log = [] {
+        const char* env = std::getenv("BB_IMAGE_LOG");
+        return env && env[0] == '1';
+    }();
+    if (image_log) {
+        std::printf("Image 0x%llx: %ux%ux%u %s guest 0x%llx+0x%llx mips %u layers %u samples %u "
+                    "tile %s usage %s host 0x%llx bytes\n",
+                    static_cast<unsigned long long>(
+                        reinterpret_cast<uintptr_t>(static_cast<VkImage>(GetImage()))),
+                    info.size.width, info.size.height, info.size.depth,
+                    vk::to_string(supported_format).c_str(),
+                    static_cast<unsigned long long>(info.guest_address),
+                    static_cast<unsigned long long>(info.guest_size), info.resources.levels,
+                    info.resources.layers, info.num_samples,
+                    std::string(AmdGpu::NameOf(info.tile_mode)).c_str(),
+                    vk::to_string(usage_flags).c_str(),
+                    static_cast<unsigned long long>(backing->image.size_bytes));
+    }
 
     Vulkan::SetObjectName(instance.GetDevice(), GetImage(),
                           "Image {}x{}x{} {} {} {:#x}:{:#x} L:{} M:{} S:{}", info.size.width,

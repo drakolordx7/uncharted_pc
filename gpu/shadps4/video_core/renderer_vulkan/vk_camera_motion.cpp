@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include <algorithm>
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
 
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -57,6 +60,20 @@ CameraMotion::CameraMotion(const Instance& instance_, Scheduler& scheduler_,
     // The upscaler can be switched on from the menu at any time: the camera is always tracked
     // unless BB_UPSCALER=none.
     for_upscaler = !(upscaler && std::strcmp(upscaler, "none") == 0);
+    for (const char* list = std::getenv("BB_VELOCITY_PS"); list && *list;) {
+        char* end = nullptr;
+        const u64 hash = std::strtoull(list, &end, 16);
+        if (end == list) {
+            break;
+        }
+        velocity_shaders.push_back(u64(u32(hash)));
+        list = *end == ',' ? end + 1 : end;
+    }
+    velocity_mode = for_upscaler && !velocity_shaders.empty();
+    if (velocity_mode) {
+        std::printf("Camera motion: from the game's velocity pass (%zu shaders)\n",
+                    velocity_shaders.size());
+    }
     const auto device = instance.GetDevice();
     if (for_upscaler) {
         const std::array<vk::DescriptorSetLayoutBinding, 3> motion_bindings = {{
@@ -153,10 +170,16 @@ CameraMotion::CameraMotion(const Instance& instance_, Scheduler& scheduler_,
 CameraMotion::~CameraMotion() = default;
 
 float CameraMotion::VerticalFov() const noexcept {
+    if (current.proj[1] == 0.0f) {
+        return 1.0f; // no camera constants (velocity mode): a typical 57 degrees
+    }
     return 2.0f * std::atan(1.0f / current.proj[1]);
 }
 
 float CameraMotion::Near() const noexcept {
+    if (current.proj[2] == 0.0f) {
+        return 0.1f;
+    }
     // depth = zs + zo / z is 0 at the near plane.
     return -current.proj[3] / current.proj[2];
 }
@@ -218,6 +241,118 @@ void CameraMotion::RecordMotion(vk::CommandBuffer cmdbuf, vk::ImageView depth_vi
     cmdbuf.dispatch((width + 7) / 8, (height + 7) / 8, 1);
 }
 
+bool CameraMotion::IsVelocityShader(u64 ps_hash) const noexcept {
+    return std::find(velocity_shaders.begin(), velocity_shaders.end(), u64(u32(ps_hash))) !=
+           velocity_shaders.end();
+}
+
+// bbport: the heading (degrees) of the camera the game last rendered with, and when (seconds,
+// steady clock).
+static std::atomic<float> shown_camera_yaw{0.0f};
+static std::atomic<double> shown_camera_time{0.0};
+
+extern "C" int bbgpu_camera_yaw(float* yaw_degrees, double* age_seconds) {
+    const double t = shown_camera_time.load(std::memory_order_acquire);
+    if (t == 0.0) {
+        return 0;
+    }
+    *yaw_degrees = shown_camera_yaw.load(std::memory_order_relaxed);
+    *age_seconds = std::chrono::duration<double>(
+                       std::chrono::steady_clock::now().time_since_epoch()).count() - t;
+    return 1;
+}
+
+void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
+    // Uncharted's camera velocity pass (its pixel shader, read from the shader dump):
+    //   z = c9 / (depth - c8), view = (z (c0 u + c2), z (c1 v + c3), z)
+    //   p = M view + t (M, t: rows c12..c23; pixels with stencil bits 0xc0 add c56..c58)
+    //   previous clip x, y, w = rows c40..c43, c44..c47, c52..c55 applied to (p, 1)
+    //   previous uv = (0.5 x / w + 0.5, 0.5 - 0.5 y / w)
+    if (dwords < 60) {
+        return;
+    }
+    auto& camera = velocity_camera;
+    const float* rows[3] = {c + 40, c + 44, c + 52};
+    for (int r = 0; r < 3; ++r) {
+        for (int col = 0; col < 4; ++col) {
+            float v = col == 3 ? rows[r][3] : 0.0f;
+            for (int k = 0; k < 3; ++k) {
+                v += rows[r][k] * c[12 + k * 4 + col];
+            }
+            camera.to_previous_clip[r * 4 + col] = v;
+        }
+    }
+    camera.uv_to_view = {c[0], c[1], c[2], c[3]};
+    camera.depth_to_z = {c[8], c[9]};
+    camera.valid = c[9] != 0.0f &&
+                   std::all_of(camera.to_previous_clip.begin(), camera.to_previous_clip.end(),
+                               [](float v) { return std::isfinite(v); });
+    // The shown camera's heading for the mouse controls (bbgpu_camera_yaw: which game camera is on
+    // screen), and with BB_CAMERA_LOG=1 its direction every frame, for measuring how the game turns
+    // the camera from the right stick.
+    const float fx = c[14], fy = c[18], fz = c[22];
+    const double t = std::chrono::duration<double>(
+                         std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (std::isfinite(fx) && std::isfinite(fz) && (fx != 0.0f || fz != 0.0f)) {
+        shown_camera_yaw.store(std::atan2(fx, fz) * 57.29578f, std::memory_order_relaxed);
+        shown_camera_time.store(t, std::memory_order_release);
+    }
+    static const bool camera_log = std::getenv("BB_CAMERA_LOG") != nullptr;
+    if (camera_log) {
+        std::printf("Camera: t=%.4f yaw=%.3f pitch=%.3f\n", t,
+                    std::atan2(fx, fz) * 57.29578f,
+                    std::asin(std::clamp(fy / std::sqrt(fx * fx + fy * fy + fz * fz), -1.0f, 1.0f)) * 57.29578f);
+    }
+    // The extra motion of stencil-marked pixels is not reproduced: say when it is used.
+    static bool reported = false;
+    if (!reported && (c[56] != 0.0f || c[57] != 0.0f || c[58] != 0.0f)) {
+        reported = true;
+        std::printf("Camera motion: the velocity pass moves stencil-marked pixels by "
+                    "(%g, %g, %g); not reproduced\n", c[56], c[57], c[58]);
+    }
+}
+
+void CameraMotion::RecordVelocity(vk::CommandBuffer cmdbuf, vk::ImageView depth_view,
+                                  vk::ImageView motion_view, u32 width, u32 height) {
+    const auto& camera = velocity_camera;
+    const PushConstants push{
+        .reproject = camera.to_previous_clip,
+        .proj = camera.uv_to_view,
+        .prev_proj = {camera.depth_to_z[0], camera.depth_to_z[1], 0.0f, 0.0f},
+        .size = {float(width), float(height)},
+        .jitter = jitter,
+        .previous_jitter = previous_jitter,
+        .mode = camera.valid ? 2u : 3u,
+    };
+    const vk::DescriptorImageInfo depth_info{.imageView = depth_view,
+                                             .imageLayout = vk::ImageLayout::eGeneral};
+    const vk::DescriptorImageInfo motion_info{.imageView = motion_view,
+                                              .imageLayout = vk::ImageLayout::eGeneral};
+    // Binding 2 (object motion) is not read in these modes.
+    const vk::DescriptorImageInfo velocity_info{.imageView = depth_view,
+                                                .imageLayout = vk::ImageLayout::eGeneral};
+    const std::array<vk::WriteDescriptorSet, 3> writes = {{
+        {.dstBinding = 0,
+         .descriptorCount = 1,
+         .descriptorType = vk::DescriptorType::eSampledImage,
+         .pImageInfo = &depth_info},
+        {.dstBinding = 1,
+         .descriptorCount = 1,
+         .descriptorType = vk::DescriptorType::eStorageImage,
+         .pImageInfo = &motion_info},
+        {.dstBinding = 2,
+         .descriptorCount = 1,
+         .descriptorType = vk::DescriptorType::eSampledImage,
+         .pImageInfo = &velocity_info},
+    }};
+    cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, *motion_pipeline);
+    cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *motion_pipeline_layout, 0,
+                                writes);
+    cmdbuf.pushConstants(*motion_pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0,
+                         sizeof(push), &push);
+    cmdbuf.dispatch((width + 7) / 8, (height + 7) / 8, 1);
+}
+
 void CameraMotion::OnConstants(const float* data) {
     // Scene constants: far plane 3000, 1/far, and the render size.
     if (data[0] != 3000.0f || data[4] < 64.0f || data[5] < 64.0f ||
@@ -251,6 +386,7 @@ void CameraMotion::OnDisplayPass(VideoCore::ImageId frame) {
     if (!frame_has_camera) InvalidateHistory();
     frame_has_camera = false;
     depth_id = {};
+    velocity_camera.valid = false;
 }
 
 void CameraMotion::Overlay(VideoCore::ImageId frame) {

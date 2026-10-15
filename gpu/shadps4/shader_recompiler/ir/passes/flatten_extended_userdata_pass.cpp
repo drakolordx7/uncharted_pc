@@ -502,10 +502,38 @@ static bool IsAllowedOffsetInstruction(const IR::Inst* inst) {
     case IR::Opcode::UMin32:
     case IR::Opcode::UMax32:
     case IR::Opcode::BitFieldUExtract:
+    case IR::Opcode::ReadFirstLane: // bbport: see ComputeOffset
         return true;
     default:
         return false;
     }
+}
+
+// bbport: whether an offset is known when the walker runs (user data, constants and arithmetic on
+// them), checked before ComputeOffset (which logs an error for values that vary per lane).
+static bool IsBindTimeOffset(const IR::Value& value) {
+    if (value.IsImmediate()) {
+        return true;
+    }
+    const IR::Inst* inst = value.Inst();
+    switch (inst->GetOpcode()) {
+    case IR::Opcode::GetUserData:
+    case IR::Opcode::ReadConstBuffer:
+        return true;
+    case IR::Opcode::ReadConst:
+        return !(inst->Flags<u32>() & ReadConstWindowFlag);
+    default:
+        break;
+    }
+    if (!IsAllowedOffsetInstruction(inst)) {
+        return false;
+    }
+    for (size_t arg = 0; arg < inst->NumArgs(); ++arg) {
+        if (!IsBindTimeOffset(inst->Arg(arg))) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static bool ComputeOffset(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg, PassInfo& pass_info,
@@ -518,6 +546,10 @@ static bool ComputeOffset(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg, PassInfo& p
         return true;
     case IR::Opcode::ReadConst:
     case IR::Opcode::ReadConstBuffer:
+        if (inst->GetOpcode() == IR::Opcode::ReadConst &&
+            (pass_info.DeduplicateInstruction(inst)->Flags<u32>() & ReadConstWindowFlag)) {
+            return false; // bbport: varies per lane
+        }
         if (u16 offset = GetFlatbufOffset(pass_info.DeduplicateInstruction(inst)); offset != 0) {
             c.mov(reg, ptr[rsi + (offset << 2)]);
             return true;
@@ -559,6 +591,10 @@ static bool ComputeOffset(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg, PassInfo& p
     case IR::Opcode::BitFieldUExtract:
         ABORT_ON_FAILURE(EmitComputeOffsetBitFieldUExtract(c, reg, pass_info, inst));
         return true;
+    case IR::Opcode::ReadFirstLane:
+        // bbport: a uniform offset moved through a vector register (v_mov + v_readfirstlane)
+        // has the value of its operand; operands that vary per lane fail below as before.
+        return ComputeOffset(c, reg, pass_info, inst->Arg(0));
     default:
         LOG_ERROR(Render_Recompiler, "Unexpected instruction for offset computation, {}",
                   magic_enum::enum_name(inst->GetOpcode()));
@@ -605,11 +641,20 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
     // flattened buffer.
     // TODO src and dst are contiguous. Optimize with wider loads/stores
     // TODO if this subtree is dynamically indexed, don't compact it (keep it sparse)
+    boost::container::small_vector<IR::Inst*, 8> windowed;
     for (auto [src_off_dw, use] : *use_list) {
         if (src_off_dw.IsImmediate()) {
             c.mov(r10d, ptr[rdi + (src_off_dw.U32() << 2)]);
         } else {
+            if (use->GetOpcode() == IR::Opcode::ReadConst && !IsBindTimeOffset(src_off_dw)) {
+                windowed.push_back(use); // bbport: an offset that varies per lane
+                continue;
+            }
             if (!ComputeOffset(c, r10d, pass_info, src_off_dw)) {
+                if (use->GetOpcode() == IR::Opcode::ReadConst) {
+                    windowed.push_back(use);
+                    continue;
+                }
                 LOG_ERROR(Render_Recompiler, "Failed to compute offset for SRT walker");
                 continue;
             }
@@ -621,6 +666,19 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
 
         SetFlatbufOffset(use, pass_info.dst_off_dw);
         pass_info.dst_off_dw++;
+    }
+    // bbport: reads at offsets that vary per lane share a copy of the block's first
+    // ReadConstWindowDwords dwords (ReadConstWindowFlag).
+    if (!windowed.empty()) {
+        const u32 start = pass_info.dst_off_dw;
+        for (u32 i = 0; i < ReadConstWindowDwords; ++i) {
+            c.mov(r10d, ptr[rdi + (i << 2)]);
+            c.mov(ptr[rsi + ((start + i) << 2)], r10d);
+        }
+        pass_info.dst_off_dw += ReadConstWindowDwords;
+        for (IR::Inst* use : windowed) {
+            use->SetFlags<u32>(start | ReadConstWindowFlag);
+        }
     }
 
     // Then visit any children used as pointers
@@ -829,8 +887,12 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
             inst && inst->GetOpcode() == IR::Opcode::ReadFirstLane) {
             continue;
         }
-        ASSERT_MSG(IsReadConstSource(base->Arg(0)), "ReadConst base low not from constant memory");
-        ASSERT_MSG(IsReadConstSource(base->Arg(1)), "ReadConst base high not from constant memory");
+        // bbport: addr64 buffer loads (ReadConst) may compute their pointer in other ways; those
+        // stay unresolved (as with a ReadFirstLane base) instead of stopping the game.
+        if (!IsReadConstSource(base->Arg(0)) || !IsReadConstSource(base->Arg(1))) {
+            LOG_ERROR(Render_Recompiler, "ReadConst base not from constant memory");
+            continue;
+        }
 
         IR::Inst* ptr_lo = base->Arg(0).Inst();
         ptr_lo = pass_info.DeduplicateInstruction(ptr_lo);
@@ -852,6 +914,10 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
     for (IR::Inst* readconst : all_readconsts) {
         ASSERT(pass_info.vn_to_inst.contains(pass_info.gvn_table.GetValueNumber(readconst)));
         IR::Inst* original = pass_info.DeduplicateInstruction(readconst);
+        if (readconst->GetOpcode() == IR::Opcode::ReadConst) {
+            readconst->SetFlags(original->Flags<u32>()); // with ReadConstWindowFlag
+            continue;
+        }
         SetFlatbufOffset(readconst, GetFlatbufOffset(original));
     }
 

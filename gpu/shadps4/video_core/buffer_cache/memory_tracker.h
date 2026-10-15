@@ -62,6 +62,26 @@ public:
                             });
     }
 
+    /// bbport: the latest guest frame in which the GPU wrote a GPU-modified page of the range.
+    u32 LatestGpuWriteFrame(VAddr cpu_addr, u64 size) noexcept {
+        u32 latest = 0;
+        IteratePages<false>(cpu_addr, size, [&latest](RegionManager* manager, u64 offset, size_t size) {
+            std::scoped_lock lk{manager->lock};
+            latest = std::max(latest, manager->LatestGpuWriteFrame(manager->GetCpuAddr() + offset, size));
+        });
+        return latest;
+    }
+
+    /// bbport: the tick by which the GPU has written every GPU-modified page of the range.
+    u64 LatestGpuWriteTick(VAddr cpu_addr, u64 size) noexcept {
+        u64 latest = 0;
+        IteratePages<false>(cpu_addr, size, [&latest](RegionManager* manager, u64 offset, size_t size) {
+            std::scoped_lock lk{manager->lock};
+            latest = std::max(latest, manager->LatestGpuWriteTick(manager->GetCpuAddr() + offset, size));
+        });
+        return latest;
+    }
+
     /// Unmark region as modified from the host GPU
     void UnmarkRegionAsGpuModified(VAddr dirty_cpu_addr, u64 query_size) noexcept {
         IteratePages<false>(dirty_cpu_addr, query_size,

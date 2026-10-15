@@ -20,6 +20,13 @@ struct Frame;
 
 namespace Libraries::VideoOut {
 
+/// bbport: steady_clock time (ns) of the last prerecorded movie frame decoded (Videodec2).
+/// While movies play, the present thread shows the guest a 60 Hz display (see PresentThread).
+void NoteMovieFrame();
+
+/// bbport diagnosis: the time (ns) between the guest's last two flip submissions.
+s64 LastFlipIntervalNs();
+
 struct VideoOutPort {
     SceVideoOutResolutionStatus resolution;
     std::array<VideoOutBuffer, MaxDisplayBuffers> buffer_slots;

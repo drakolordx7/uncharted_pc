@@ -1,12 +1,54 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <boost/container/static_vector.hpp>
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
 #include "shader_recompiler/ir/microinstruction.h"
 
 namespace Shader::Backend::SPIRV {
+
+namespace {
+// bbport diagnosis: BB_FORCE_IMAGE=<shader hash>:<image>:<value>: the samples of that image (the
+// index BB_TRACE_SHADER prints) in that shader give the value instead (which input of a shader
+// causes a visual problem). The shader is then compiled at every start, not cached.
+struct ForcedImage {
+    u32 hash{};
+    u32 image{};
+    f32 value{};
+};
+const ForcedImage& Forced() {
+    static const ForcedImage forced = [] {
+        ForcedImage f{};
+        if (const char* env = std::getenv("BB_FORCE_IMAGE")) {
+            char* end;
+            f.hash = u32(std::strtoull(env, &end, 16));
+            if (*end == ':') {
+                f.image = u32(std::strtoul(end + 1, &end, 10));
+                if (*end == ':') {
+                    f.value = std::strtof(end + 1, nullptr);
+                }
+            }
+        }
+        return f;
+    }();
+    return forced;
+}
+Id ForcedSample(EmitContext& ctx, u32 handle, bool dref) {
+    const auto& f = Forced();
+    if (!f.hash || u32(ctx.info.pgm_hash) != f.hash || (handle & 0xFFFF) != f.image) {
+        return {};
+    }
+    return dref ? ctx.ConstF32(f.value, 0.0f, 0.0f, 0.0f)
+                : ctx.ConstF32(f.value, f.value, f.value, f.value);
+}
+} // namespace
+
+bool IsForcedShader(u64 hash) {
+    const auto& f = Forced();
+    return f.hash && u32(hash) == f.hash;
+}
 
 struct ImageOperands {
     void Add(spv::ImageOperandsMask new_mask, Id value) {
@@ -82,6 +124,9 @@ Id EmitImageSampleRaw(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address1,
 
 Id EmitImageSampleImplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id bias,
                               const IR::Value& offset) {
+    if (const Id forced = ForcedSample(ctx, handle, false); Sirit::ValidId(forced)) {
+        return forced;
+    }
     const auto& texture = ctx.images[handle & 0xFFFF];
     const Id image = ctx.OpLoad(texture.image_type, texture.id);
     const Id result_type = texture.data_types->Get(4);
@@ -97,6 +142,9 @@ Id EmitImageSampleImplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id c
 
 Id EmitImageSampleExplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id lod,
                               const IR::Value& offset) {
+    if (const Id forced = ForcedSample(ctx, handle, false); Sirit::ValidId(forced)) {
+        return forced;
+    }
     const auto& texture = ctx.images[handle & 0xFFFF];
     const Id image = ctx.OpLoad(texture.image_type, texture.id);
     const Id result_type = texture.data_types->Get(4);
@@ -112,6 +160,9 @@ Id EmitImageSampleExplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id c
 
 Id EmitImageSampleDrefImplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id dref,
                                   Id bias, const IR::Value& offset) {
+    if (const Id forced = ForcedSample(ctx, handle, true); Sirit::ValidId(forced)) {
+        return forced;
+    }
     const auto& texture = ctx.images[handle & 0xFFFF];
     const Id image = ctx.OpLoad(texture.image_type, texture.id);
     const Id result_type = texture.data_types->Get(1);
@@ -129,6 +180,9 @@ Id EmitImageSampleDrefImplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, 
 
 Id EmitImageSampleDrefExplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id dref,
                                   Id lod, const IR::Value& offset) {
+    if (const Id forced = ForcedSample(ctx, handle, true); Sirit::ValidId(forced)) {
+        return forced;
+    }
     const auto& texture = ctx.images[handle & 0xFFFF];
     const Id image = ctx.OpLoad(texture.image_type, texture.id);
     const Id result_type = texture.data_types->Get(1);

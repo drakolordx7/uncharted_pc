@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Builds dist/bbport-windows/ (and dist/bbport-windows.zip): Bloodborne.exe (the launcher, frozen
-# with PyInstaller so players need no Python), bb-probe.exe with the MSYS2 CLANG64 DLLs it needs,
-# the preparation scripts and run.py. Run from an MSYS2 CLANG64 shell after `bash build.sh`.
-# Freezing uses a Windows Python 3.10+ (python.org; WINPYTHON overrides) and a private venv in
-# out/pyenv with PyInstaller. FSR 4 assets in fsr4_shaders/ are included when present.
+# Builds dist/uncharted-windows/ (and dist/uncharted-windows.zip): Uncharted.exe (the launcher,
+# frozen with PyInstaller so players need no Python), Play Uncharted.exe, bb-probe.exe with the
+# MSYS2 CLANG64 DLLs it needs, the preparation scripts and run.py. Run from an MSYS2 CLANG64
+# shell after `bash build.sh`. Freezing uses a Windows Python 3.10+ (python.org; WINPYTHON
+# overrides) and a private venv in out/pyenv with PyInstaller and Pillow.
 set -euo pipefail
 cd -- "$(dirname -- "$0")/../.."
 source ./msys2-env.sh
@@ -22,26 +22,30 @@ export USERPROFILE=${USERPROFILE:-$(cygpath -w "/c/Users/$(id -un)")}
 if [[ ! -x out/pyenv/Scripts/python.exe ]]; then
     "$python" -m venv out/pyenv
 fi
-out/pyenv/Scripts/python.exe -m pip install -q --disable-pip-version-check pyinstaller
-# The scripts run inside Bloodborne.exe (--script): the standard modules they import come along.
+out/pyenv/Scripts/python.exe -m pip install -q --disable-pip-version-check pyinstaller pillow
+# The scripts run inside Uncharted.exe (--script): the standard modules they import come along.
 hidden=()
-for module in argparse base64 collections hashlib json re shutil struct tempfile xml.etree.ElementTree \
-              urllib.request ctypes.wintypes; do
+for module in argparse base64 collections hashlib json re shutil struct tempfile zlib ctypes.wintypes \
+              uncharted_art uncharted_fonts uncharted_widgets bbport_steam PIL.ImageTk; do
     hidden+=(--hidden-import "$module")
 done
 out/pyenv/Scripts/python.exe -m PyInstaller --noconfirm --clean --log-level WARN --windowed \
-    --name Bloodborne --icon "$(cygpath -w "$PWD/launcher/bloodborne.ico")" --distpath out/pyi-dist \
-    --workpath out/pyi-work --specpath out/pyi-work --paths "$(cygpath -w "$PWD/scripts")" "${hidden[@]}" \
-    "$(cygpath -w "$PWD/launcher/bbport_launcher_win.py")"
+    --name Uncharted --icon "$(cygpath -w "$PWD/launcher/uncharted.ico")" --distpath out/pyi-dist \
+    --workpath out/pyi-work --specpath out/pyi-work --paths "$(cygpath -w "$PWD/scripts")" \
+    --paths "$(cygpath -w "$PWD/launcher")" \
+    --add-data "$(cygpath -w "$PWD/launcher/fonts");fonts" \
+    --add-data "$(cygpath -w "$PWD/launcher/covers");covers" \
+    "${hidden[@]}" \
+    "$(cygpath -w "$PWD/launcher/uncharted_launcher.py")"
 
-# The package is assembled in a fresh staging folder and zipped from there; dist/bbport-windows
+# The package is assembled in a fresh staging folder and zipped from there; dist/uncharted-windows
 # (a playable copy that may hold saves and settings) is only refreshed afterwards.
-dest=out/stage/bbport-windows
+dest=out/stage/uncharted-windows
 rm -rf -- out/stage
-mkdir -p "$dest/bin" "$dest/launcher"
-cp -r out/pyi-dist/Bloodborne/. "$dest/"
-llvm-strip -o "$dest/Play Bloodborne.exe" out/bb-play.exe
-cp launcher/bloodborne.ico launcher/bloodborne.png "$dest/launcher/"
+mkdir -p "$dest/bin" "$dest/launcher" "$dest/scripts"
+cp -r out/pyi-dist/Uncharted/. "$dest/"
+llvm-strip -o "$dest/Play Uncharted.exe" out/bb-play.exe
+cp launcher/uncharted.ico launcher/uncharted.png "$dest/launcher/"
 # The executables without debug information (out/ keeps the symbols for crash reports).
 for exe in bb-probe.exe bb-gpu-capabilities.exe; do
     llvm-strip --strip-debug -o "$dest/bin/$exe" "out/$exe"
@@ -51,44 +55,48 @@ ldd "$dest/bin/bb-probe.exe" "$dest/bin/bb-gpu-capabilities.exe" |
     awk '/\/clang64\/bin\// {print $3}' | sort -u | while read -r dll; do
         cp -u "$dll" "$dest/bin/"
     done
-cp -r scripts patches "$dest/"
-cp run.py LICENSE README.md packaging/windows/README-Windows.txt "$dest/"
+# Only what run.py runs to prepare a game (Bloodborne's patch and mod tools stay out).
+cp scripts/prepare.py scripts/link_modules.py scripts/link_libc.py scripts/content_profile.py "$dest/scripts/"
+cp run.py LICENSE "$dest/"
+cp packaging/windows/README-Uncharted.txt "$dest/README.txt"
+mkdir -p "$dest/licenses"
+cp packaging/windows/licenses/*.txt "$dest/licenses/" 2>/dev/null || true
+# FSR 4 (the v07 INT8 model) when its assets are in fsr4_shaders/ (tools/fetch_fsr4_assets.sh).
 if [[ -d fsr4_shaders ]]; then cp -r fsr4_shaders "$dest/"; fi
-# DLSS (NVIDIA RTX): the MSVC-built bridge and NVIDIA's runtime, next to bb-probe.exe
-# (packaging/windows/build_dlss.sh). Without them the DLSS option stays unavailable.
+# DLSS and DLSS Frame Generation (NVIDIA RTX): the MSVC-built bridge and NVIDIA's runtimes, next
+# to bb-probe.exe (packaging/windows/build_dlss.sh). Without them those options stay unavailable.
 if [[ -f out/bbport_dlss.dll && -f out/nvngx_dlss.dll ]]; then
     cp out/bbport_dlss.dll out/nvngx_dlss.dll "$dest/bin/"
-    mkdir -p "$dest/licenses" && cp out/NVIDIA-DLSS-LICENSE.txt "$dest/licenses/"
+    if [[ -f out/nvngx_dlssg.dll ]]; then cp out/nvngx_dlssg.dll "$dest/bin/"; fi
+    cp out/NVIDIA-DLSS-LICENSE.txt "$dest/licenses/"
     cp gpu/dlss_bridge/LICENSE.txt "$dest/licenses/bbport_dlss-LICENSE.txt"
 else
     echo "DLSS bridge not built (packaging/windows/build_dlss.sh): no DLSS in this package" >&2
 fi
-# Online co-op: the libraries compiled in (wepoll, cpp-httplib) and the MSYS2 DLLs it loads.
-mkdir -p "$dest/licenses"
-cp gpu/third_party/wepoll/LICENSE "$dest/licenses/wepoll-LICENSE.txt"
-cp gpu/third_party/httplib/LICENSE "$dest/licenses/cpp-httplib-LICENSE.txt"
-cp packaging/windows/licenses/*.txt "$dest/licenses/"
+for license in gpu/third_party/wepoll/LICENSE:wepoll gpu/third_party/httplib/LICENSE:cpp-httplib; do
+    if [[ -f ${license%%:*} ]]; then cp "${license%%:*}" "$dest/licenses/${license##*:}-LICENSE.txt"; fi
+done
 for package in protobuf abseil-cpp openssl miniupnpc zlib; do
     license=/clang64/share/licenses/$package/LICENSE
     if [[ -f $license ]]; then cp "$license" "$dest/licenses/$package-LICENSE.txt"; fi
 done
 find "$dest" -name __pycache__ -prune -exec rm -r {} +
 mkdir -p dist
-rm -f dist/bbport-windows.zip
+rm -f dist/uncharted-windows.zip
 (cd out/stage && powershell -NoProfile -Command \
-    "Compress-Archive -Path bbport-windows -DestinationPath ../../dist/bbport-windows.zip")
+    "Compress-Archive -Path uncharted-windows -DestinationPath ../../dist/uncharted-windows.zip")
 
-# Refresh dist/bbport-windows, keeping what players create there (saves, settings, mods), and
-# only while nothing runs from it: deleting a running launcher's files breaks it.
-play=dist/bbport-windows
+# Refresh dist/uncharted-windows, keeping what players create there (saves, settings), and only
+# while nothing runs from it: deleting a running launcher's files breaks it.
+play=dist/uncharted-windows
 running=$(powershell -NoProfile -Command \
     "@(Get-Process | Where-Object { \$_.Path -like '$(cygpath -w "$PWD/$play")\\*' }).Count" | tr -d '\r')
 if [[ ${running:-0} != 0 ]]; then
-    echo "dist/bbport-windows is in use ($running processes): not refreshed; the zip is ready." >&2
+    echo "dist/uncharted-windows is in use ($running processes): not refreshed; the zip is ready." >&2
 else
     mkdir -p "$play"
-    find "$play" -mindepth 1 -maxdepth 1 ! -name user ! -name mods ! -name bbport.ini \
-        ! -name mods.json ! -name patches.json -exec rm -rf {} +
+    find "$play" -mindepth 1 -maxdepth 1 ! -name user ! -name out ! -name art ! -name bbport.ini \
+        ! -name input.ini ! -name last_run.log -exec rm -rf {} +
     cp -r "$dest/." "$play/"
 fi
-du -sh "$dest" dist/bbport-windows.zip
+du -sh "$dest" dist/uncharted-windows.zip

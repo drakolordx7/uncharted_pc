@@ -257,6 +257,34 @@ static ABI int32_t save_delete(const Delete *d) {
     printf("Runtime: save data '%s' deleted\n",d->dir->data);
     return 0;
 }
+/* An existing slot of a save list (slots that do not exist are not listed, as on the console):
+ * which = 0 first, 1 last, 2 latest written, 3 oldest, 4 the one named focus.
+ * Returns 1 with the slot in out (and its parameters), or -1 when there is none. */
+int runtime_savedata_pick(int32_t user, const char *title, const char (*names)[32], uint32_t count,
+                          int which, const char *focus, char out[32], void *param_out) {
+    char base[600];
+    root(user,title,base,sizeof(base));
+    int best=-1;
+    Param p, best_param;
+    memset(&best_param,0,sizeof(best_param));
+    for (uint32_t i=0;names && i<count;++i) {
+        char name[33]; memcpy(name,names[i],32); name[32]=0;
+        if (!valid_name(name,sizeof(name))) continue;
+        char host[640], meta[680];
+        snprintf(host,sizeof(host),"%s/%s",base,name);
+        snprintf(meta,sizeof(meta),"%s/%s.sce_sys",base,name);
+        struct stat st;
+        if (stat(host,&st) || !S_ISDIR(st.st_mode)) continue;
+        read_param(meta,&p);
+        int better = which==0 ? best<0 : which==1 ? 1 : which==2 ? best<0 || p.mtime>best_param.mtime
+                   : which==3 ? best<0 || p.mtime<best_param.mtime : focus && !strncmp(focus,name,32);
+        if (better) { best=(int)i; best_param=p; }
+    }
+    if (best<0) return -1;
+    memcpy(out,names[best],32);
+    if (param_out) memcpy(param_out,&best_param,sizeof(best_param));
+    return 1;
+}
 /* SQL-LIKE pattern: % any run, _ one character. */
 static int like(const char *s, const char *p) {
     if (!*p) return !*s;

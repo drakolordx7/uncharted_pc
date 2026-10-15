@@ -74,10 +74,15 @@ static Context *contexts[MAX_CONTEXTS+1];
 static Batch batches[MAX_BATCHES];
 static size_t jobs_run, frames_decoded, batches_run;
 
-/* BB_AUDIO_TRACE=1: instance configurations and jobs that return a non-zero result. */
-static int trace_left=-1;
+/* BB_AUDIO_TRACE=1: instance configurations and jobs that return a non-zero result;
+   BB_AUDIO_TRACE=2: every job. */
+static int trace_left=-1, trace_all;
 static int ajm_trace(void) {
-    if (trace_left<0) { const char *e=getenv("BB_AUDIO_TRACE"); trace_left=e && e[0]=='1' ? 400 : 0; }
+    if (trace_left<0) {
+        const char *e=getenv("BB_AUDIO_TRACE");
+        trace_all=e && e[0]=='2';
+        trace_left=e && (e[0]=='1' || trace_all) ? (trace_all ? 200000 : 400) : 0;
+    }
     return trace_left>0 && trace_left--;
 }
 static uint32_t ident(uint32_t word) { return word & 0x3f; }
@@ -325,9 +330,19 @@ static void run_job(Context *ctx, uint32_t id, Job *job) {
     int32_t internal=0;
     if (in_size) for (;;) {
         if (in->gapless_loop && gapless_end(in)) { gapless_reset(in); in->total_samples=0; }
+        /* The stream's last sample is out: the job is done, without asking for more input.
+           Uncharted decodes each sound effect to its end in one go and dropped every effect
+           whose last job reported partial input (engine noise, gunfire, menu clicks). */
+        if (gapless_end(in) && frames) break;
         if ((in->codec_flags & 1) && in_size>=4 && !memcmp(input,"RIFF",4)) { parse_riff(in,&input,&in_size); in->total_samples=0; }
         if (!in->initialized) { flags_result|=RESULT_NOT_INITIALIZED; break; }
-        if (!gapless_end(in) && output_room(&out)<next_frame_bytes(in)) flags_result|=RESULT_NOT_ENOUGH_ROOM;
+        /* A full output after decoded frames ends the job normally (as on the PS4, and in
+           shadPS4's Ajm): the error is only for an output too small for the first frame.
+           Uncharted's sound engine drops voices on it: engine noise and gunfire went silent. */
+        if (!gapless_end(in) && output_room(&out)<next_frame_bytes(in)) {
+            if (frames) break;
+            flags_result|=RESULT_NOT_ENOUGH_ROOM;
+        }
         if (in_size<in->superframe_remain) flags_result|=RESULT_PARTIAL_INPUT;
         if (flags_result) break;
         uint32_t written=0;
@@ -337,7 +352,7 @@ static void run_job(Context *ctx, uint32_t id, Job *job) {
         if (!RUN_MULTIPLE_FRAMES(f)) break;
     }
     free(joined);
-    if (flags_result && ajm_trace())
+    if ((flags_result || trace_all) && ajm_trace())
         printf("Audio trace: Ajm job instance %u flags %#llx -> result %#x internal %d; input %llu/%llu used, output %llu/%llu written, frames %u\n",
                id,(unsigned long long)f,flags_result,internal,(unsigned long long)(in_start-in_size),(unsigned long long)in_start,
                (unsigned long long)(out_start-output_room(&out)),(unsigned long long)out_start,frames);
@@ -479,6 +494,63 @@ static ABI int32_t ajm_batch_cancel(uint32_t id, uint32_t batch) {
 static ABI int32_t ajm_error_dump(void) { return 0; }
 static ABI int32_t ajm_memory_register(uint32_t id, void *p, uint64_t pages) { (void)p; (void)pages; return context(id) ? 0 : ERR_INVALID_CONTEXT; }
 
+/* ---- MP3 frame header parsing (tables as in the AJM library) ---- */
+typedef struct {
+    uint64_t frame_size;
+    uint32_t num_channels, samples_per_channel, bitrate, sample_rate, encoder_delay, num_frames, total_samples, ofl_type;
+} Mp3Frame;
+static const int32_t mp3_rates[4][4]={{11025,12000,8000,0},{0,0,0,0},{22050,24000,16000,0},{44100,48000,32000,0}};
+static const int32_t mp3_kbps[4][16]={
+    {0,8,16,24,32,40,48,56,64,0,0,0,0,0,0,0}, {0},
+    {0,8,16,24,32,40,48,56,64,80,96,112,128,144,160,0},
+    {0,32,40,48,56,64,80,96,112,128,160,192,224,256,320,0}};
+static uint32_t read_bits(const uint8_t *data, size_t *offset, unsigned count) {
+    uint32_t value=0;
+    for (unsigned i=0;i<count;++i,++*offset) value=value<<1 | ((data[*offset/8]>>(7-*offset%8))&1);
+    return value;
+}
+/* parse_ofl: also reads Sony's "FGH" gapless block (encoder delay, total samples) that
+ * follows the side information of the first (empty) frame. */
+static ABI int32_t mp3_parse_frame(const uint8_t *data, uint32_t size, int parse_ofl, Mp3Frame *frame) {
+    if (!data || size<4 || !frame) return ERR_INVALID_PARAMETER;
+    uint32_t h=(uint32_t)data[0]<<24 | (uint32_t)data[1]<<16 | (uint32_t)data[2]<<8 | data[3];
+    if ((h>>21)!=0x7ff) return ERR_INVALID_PARAMETER;
+    unsigned version=(h>>19)&3, protection=(h>>16)&1, bitrate_index=(h>>12)&15, rate_index=(h>>10)&3;
+    unsigned padding=(h>>9)&1, mono=((h>>6)&3)==3;
+    frame->sample_rate=(uint32_t)mp3_rates[version][rate_index];
+    frame->bitrate=(uint32_t)mp3_kbps[version][bitrate_index]*1000;
+    if (!frame->sample_rate || !frame->bitrate) return ERR_INVALID_PARAMETER;
+    frame->num_channels=mono ? 1 : 2;
+    frame->samples_per_channel=version==3 ? 1152 : 576;
+    frame->frame_size=(uint64_t)(version==3 ? 144 : 72)*frame->bitrate/frame->sample_rate+padding;
+    frame->encoder_delay=frame->num_frames=frame->total_samples=frame->ofl_type=0;
+    if (!parse_ofl) return 0;
+    if (frame->frame_size>size) return 0;
+    const uint8_t *body=data+4, *end=data+frame->frame_size;
+    size_t bit=protection ? 0 : 16;
+    bit+=version==3 ? (mono ? 18 : 20) : (mono ? 9 : 10);
+    uint32_t part23=0;
+    for (unsigned gr=0;gr<(version==3 ? 2u : 1u);++gr)
+        for (unsigned ch=0;ch<frame->num_channels;++ch) {
+            if ((bit+12)/8>=(size_t)(end-body)) return 0;
+            part23+=read_bits(body,&bit,12);
+            bit+=version==3 ? 47 : 51;
+        }
+    bit+=part23;
+    const uint8_t *p=body+(bit+7)/8;
+    if (p+10>=end || !memcmp(p,"Xing",4) || !memcmp(p,"Info",4) || !memcmp(p,"VBRI",4)) return 0;
+    while (p+9<end && *p!=0xB4) ++p;
+    if (p+9>=end) return 0;
+    uint8_t crc=0xff;
+    for (int i=0;i<9;++i)
+        for (int j=7;j>=0;--j) crc=((crc>>7)&1)!=((p[i]>>j)&1) ? (uint8_t)(crc*2) : (uint8_t)((crc*2)^0x45);
+    if (p[9]!=crc) return 0;
+    frame->encoder_delay=(uint32_t)p[1]<<8 | p[2];
+    frame->total_samples=(uint32_t)p[3]<<24 | (uint32_t)p[4]<<16 | (uint32_t)p[5]<<8 | p[6];
+    frame->ofl_type=3; /* Fgh */
+    return 0;
+}
+
 static const RuntimeExport exports[]={
     {"sceAjmInitialize",ajm_initialize}, {"sceAjmFinalize",ajm_finalize},
     {"sceAjmModuleRegister",ajm_module_register}, {"sceAjmModuleUnregister",ajm_module_unregister},
@@ -488,7 +560,7 @@ static const RuntimeExport exports[]={
     {"sceAjmBatchJobRunSplitBufferRa",job_run_split}, {"sceAjmBatchJobInlineBuffer",job_inline},
     {"sceAjmBatchStartBuffer",ajm_batch_start}, {"sceAjmBatchWait",ajm_batch_wait},
     {"sceAjmBatchCancel",ajm_batch_cancel}, {"sceAjmBatchErrorDump",ajm_error_dump},
-    {"sceAjmMemoryRegister",ajm_memory_register},
+    {"sceAjmMemoryRegister",ajm_memory_register}, {"sceAjmDecMp3ParseFrame",mp3_parse_frame},
 };
 uintptr_t runtime_ajm_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }
 void runtime_ajm_report(void) {

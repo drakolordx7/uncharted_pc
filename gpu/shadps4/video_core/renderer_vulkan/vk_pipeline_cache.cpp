@@ -813,7 +813,9 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
         module = CompileSPV(spv, instance.GetDevice());
     }
 
-    RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
+    if (!Shader::Backend::SPIRV::IsForcedShader(info.pgm_hash)) {
+        RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
+    }
 
     const auto name = GetShaderName(info.hw_stage, info.pgm_hash, perm_idx);
     Vulkan::SetObjectName(instance.GetDevice(), module, name);

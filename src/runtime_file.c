@@ -190,7 +190,15 @@ static File *get(int fd) {
     return &files[fd];
 }
 /* BB_AUDIO_TRACE=1: sound file opens and failed reads (missing game sounds). */
-static int audio_trace(void) { static int v=-1; if (v<0) { const char *e=getenv("BB_AUDIO_TRACE"); v=e && e[0]=='1'; } return v; }
+static int audio_trace(void) { static int v=-1; if (v<0) { const char *e=getenv("BB_AUDIO_TRACE"); v=e && (e[0]=='1' || e[0]=='2') ? e[0]-'0' : 0; } return v; }
+static File *get(int fd);
+/* BB_AUDIO_TRACE=2: every read of a sound bank. */
+static void trace_bank_read(int fd, uint64_t size, int64_t offset, int64_t n) {
+    if (audio_trace()<2) return;
+    File *f=get(fd);
+    if (f && (strstr(f->path,".bnk") || strstr(f->path,"config/ps4")))
+        printf("Audio trace: read %s fd %d: %llu bytes @%lld -> %lld\n",f->path,fd,(unsigned long long)size,(long long)offset,(long long)n);
+}
 /* Game mounts (including linked mod overlays) are read-only. Saves use other mounts. */
 static int game_path(const char *p) {
     if (!p || !*p) return 0;
@@ -200,10 +208,17 @@ static int game_path(const char *p) {
 }
 /* All operations return >=0 or -(host errno); wrappers adapt the convention. */
 static int64_t do_open(const char *guest,int flags,int mode) {
-    if (game_path(guest) && (flags & (3|0x8|0x200|0x400|0x800))) return -EROFS;
+    if (game_path(guest) && (flags & (3|0x8|0x400|0x800))) return -EROFS;
     char path[1024];
     int e=translate(guest,path,sizeof(path));
     if (e) return -e;
+    /* O_CREAT on a read-only mount opens an existing file for reading, as FreeBSD does (U1
+       reads its sound configuration this way); only creating a new file fails. */
+    if (game_path(guest) && (flags & 0x200)) {
+        HostStat existing;
+        if (host_stat(path,&existing)) return -EROFS;
+        flags&=~0x200;
+    }
 #ifdef _WIN32
     /* Windows cannot open a directory as a CRT descriptor: directories are listings only. */
     (void)mode;
@@ -245,7 +260,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     snprintf(files[fd].path,sizeof(files[fd].path),"%s",guest);
     ++opens;
     pthread_mutex_unlock(&lock);
-    if (audio_trace() && strstr(guest,"sound/")) printf("Audio trace: open(%s) -> fd %d, %lld bytes\n",guest,fd,(long long)s.st_size);
+    if (audio_trace() && strstr(guest,"sound")) printf("Audio trace: open(%s) -> fd %d, %lld bytes\n",guest,fd,(long long)s.st_size);
     const char *mod_trace=getenv("BB_MOD_TRACE"), *mod_root=getenv("BB_MODS_DIR");
     if (mod_trace && mod_trace[0]=='1' && mod_root) {
         char actual[PATH_MAX],root[PATH_MAX];
@@ -300,6 +315,7 @@ static int64_t do_read(int fd,void *buffer,uint64_t size) {
     touch_for_write(buffer,size);
     ssize_t n=host_read(h,buffer,size);
     if (n<0) { if (audio_trace()) printf("Audio trace: read(fd %d, %llu) failed, errno %d\n",fd,(unsigned long long)size,errno); return -errno; }
+    trace_bank_read(fd,size,-1,n);
     __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)n,__ATOMIC_RELAXED);
     return n;
 }
@@ -309,6 +325,7 @@ static int64_t do_pread(int fd,void *buffer,uint64_t size,int64_t offset) {
     touch_for_write(buffer,size);
     ssize_t n=pread(h,buffer,size,offset);
     if (n<0) { if (audio_trace()) printf("Audio trace: pread(fd %d, %llu @%lld) failed, errno %d\n",fd,(unsigned long long)size,(long long)offset,errno); return -errno; }
+    trace_bank_read(fd,size,offset,n);
     __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)n,__ATOMIC_RELAXED);
     return n;
 }
@@ -480,6 +497,10 @@ static ABI int64_t posix_unlink(const char *p) { return posix(path_op(p,2,0)); }
 static ABI int32_t sce_check_reachability(const char *p) {
     GuestStat s; return (int32_t)sce(do_stat(p,&s));
 }
+/* Access/modification times are left to the host file system; the path must exist. */
+static ABI int32_t sce_utimes(const char *p,const void *times) {
+    (void)times; GuestStat s; return (int32_t)sce(do_stat(p,&s));
+}
 
 static const RuntimeExport exports[]={
     {"sceKernelOpen",sce_open}, {"open",posix_open}, {"_open",posix_open},
@@ -499,7 +520,7 @@ static const RuntimeExport exports[]={
     {"access",posix_access}, {"sceKernelCheckReachability",sce_check_reachability},
     {"sceKernelMkdir",sce_mkdir}, {"mkdir",posix_mkdir},
     {"sceKernelRmdir",sce_rmdir}, {"rmdir",posix_rmdir},
-    {"sceKernelUnlink",sce_unlink}, {"unlink",posix_unlink},
+    {"sceKernelUnlink",sce_unlink}, {"unlink",posix_unlink}, {"sceKernelUtimes",sce_utimes},
 };
 uintptr_t runtime_file_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }
 /* Host-side helpers for other modules (e.g. SaveData, Fios). */

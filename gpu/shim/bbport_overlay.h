@@ -31,6 +31,8 @@ bool Visible();
 
 /// Present thread: draws into `view` (layout ColorAttachmentOptimal).
 void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent);
+/// Every presented frame (FPS readout; BB_FPS_LOG=1 prints the rate every 5 seconds).
+void NotePresent();
 
 /// The menu is open or a text entry is shown: the game's input is held neutral.
 bool CapturesInput();

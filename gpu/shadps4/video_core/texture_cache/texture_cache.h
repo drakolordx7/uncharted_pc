@@ -218,8 +218,20 @@ public:
     }
 
     /// Get the associated depth stencil image if it is still valid.
-    ImageId GetAssociatedDepth(Image& image) {
+    /// bbport: only for a stencil read (8-bit view format). The link is made for whatever image
+    /// starts at the stencil address; once the game reuses that memory for another texture
+    /// (Uncharted at level loads), redirecting e.g. an RGBA16F read to the D32S8 image created
+    /// an invalid view and the GPU read past the image (device lost).
+    ImageId GetAssociatedDepth(Image& image, vk::Format view_format) {
         if (!image.depth_id) {
+            return {};
+        }
+        switch (view_format) {
+        case vk::Format::eS8Uint:
+        case vk::Format::eR8Uint:
+        case vk::Format::eR8Unorm:
+            break;
+        default:
             return {};
         }
         if (slot_images.is_allocated(image.depth_id)) {

@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <atomic>
+#include <cstdio>
+#include "core/memory.h"
 #include "shader_recompiler/info.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
@@ -234,11 +238,138 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
     return true;
 }
 
+// bbport: Uncharted's engine fills small constant blocks (effect material parameters, e.g. of
+// the blood) with a compute shader that copies one dword per workgroup: dst[i] = src[i] while
+// i < count (user data SGPR6). Run on the GPU, the copy never reaches guest memory, and the SRT
+// walker reads those blocks there for the shaders that use them: zeros (blood drawn as solid
+// discs). While neither side holds GPU-written data the copy is done in guest memory instead.
+static constexpr u64 SCALAR_COPY_SHADER_HASH = 0x2d215c3b;    // one dword per workgroup
+static constexpr u64 SCALAR_COPY64_SHADER_HASH = 0x6a6422a9;  // 64 dwords per workgroup (U2)
+
+static bool ExecuteScalarCopyHLE(const Shader::Info& info, const AmdGpu::ComputeProgram& cs_program,
+                                 Rasterizer& rasterizer, u64 group_size) {
+    if (info.buffers.size() != 2 || BbToggle::Disabled(BbToggle::MultiCopyShader)) {
+        return false;
+    }
+    const auto ud = info.UserData();
+    if (ud.size() <= 6) {
+        return false;
+    }
+    const auto src = info.buffers[0].GetSharp(info);
+    const auto dst = info.buffers[1].GetSharp(info);
+    if (src.GetStride() != 4 || dst.GetStride() != 4 || !src.base_address || !dst.base_address) {
+        return false;
+    }
+    const u64 count =
+        std::min<u64>({u64(cs_program.dim_x) * group_size, ud[6], src.num_records, dst.num_records});
+    if (count == 0) {
+        return true;
+    }
+    const u64 size = count * 4;
+    // BB_COPY_SHADER_LOG=1: the large copies (depth surfaces among them).
+    static const bool copy_log = std::getenv("BB_COPY_SHADER_LOG") != nullptr;
+    if (copy_log && size >= 65536) {
+        std::printf("Copy shader %llx: 0x%llx -> 0x%llx (%llu bytes, groups %u, ud6 %u, records %u/%u)\n",
+                    static_cast<unsigned long long>(info.pgm_hash),
+                    static_cast<unsigned long long>(src.base_address),
+                    static_cast<unsigned long long>(dst.base_address),
+                    static_cast<unsigned long long>(size), cs_program.dim_x, ud[6],
+                    src.num_records, dst.num_records);
+    }
+    auto& buffer_cache = rasterizer.GetBufferCache();
+    // Uncharted copies depth surfaces this way (the scene depth into the copies its depth of
+    // field and effects read). The image of the source lives on the GPU only: its contents go
+    // into the source memory first, so the copy (and the image refreshed from the destination)
+    // get them. Without it the depth of field saw stale depth and blurred the whole picture.
+    static const bool depth_sync = [] {
+        const char* env = std::getenv("BB_DEPTH_COPY_SYNC"); // 0: off (A/B tests)
+        return !(env && env[0] == '0');
+    }();
+    if (depth_sync && size >= 1_MB && !BbToggle::Disabled(BbToggle::MultiCopyShader)) {
+        buffer_cache.SyncImageToBuffer(src.base_address, static_cast<u32>(size));
+    }
+    auto* memory = Core::Memory::Instance();
+    const bool src_gpu = buffer_cache.IsRegionGpuModified(src.base_address, size);
+    const bool dst_gpu = buffer_cache.IsRegionGpuModified(dst.base_address, size);
+    if (src_gpu || dst_gpu) {
+        // Copied on the GPU, which keeps the GPU's view right. The SRT walker reads the
+        // destination in guest memory, though: character constant blocks among them (in U3
+        // Sully's cloth shirt exploded into screen-size triangles for single frames). The page
+        // tracker flags whole pages, so most of these sources were never written by the GPU:
+        // their guest memory is current and small copies are made there as well.
+        // BB_SCALAR_COPY_BOTH=0: GPU copy only (A/B). BB_SCALAR_COPY_SYNC=1: sources the GPU did
+        // write are read back first (waits for the GPU).
+        static const bool both = [] {
+            const char* env = std::getenv("BB_SCALAR_COPY_BOTH");
+            return !(env && env[0] == '0');
+        }();
+        static const bool sync = [] {
+            const char* env = std::getenv("BB_SCALAR_COPY_SYNC");
+            return env && env[0] == '1';
+        }();
+        const bool src_written = src_gpu && buffer_cache.IsRangeGpuWritten(src.base_address, size);
+        static const bool small_sync = [] {
+            const char* env = std::getenv("BB_SCALAR_COPY_SMALL_SYNC");
+            return env && env[0] == '1';
+        }();
+        if (small_sync && size < 1_MB) {
+            // Both sides into guest memory first, then the copy is made there (below): the
+            // destination stops being GPU data, so the next copy from it needs no read back.
+            if (src_gpu) {
+                buffer_cache.ReadMemory(src.base_address, size, false, true);
+            }
+            if (dst_gpu) {
+                buffer_cache.ReadMemory(dst.base_address, size, false, true);
+            }
+        } else if (both && size < 1_MB) {
+            if (src_written && sync) {
+                buffer_cache.ReadMemory(src.base_address, size, false, true);
+            }
+            if ((!src_written || sync) && memory->IsValidGpuMapping(src.base_address, size) &&
+                memory->IsValidGpuMapping(dst.base_address, size)) {
+                memory->TryWriteBacking(reinterpret_cast<void*>(dst.base_address),
+                                        reinterpret_cast<const void*>(src.base_address), size);
+            }
+        }
+        static std::atomic<u32> total{0}, written{0};
+        const u32 count = total.fetch_add(1, std::memory_order_relaxed) + 1;
+        const u32 written_count = written.fetch_add(src_written, std::memory_order_relaxed) + src_written;
+        if (count <= 4 || (count & 4095) == 0) {
+            std::printf("Scalar copy: 0x%llx -> 0x%llx (%llu bytes) next to GPU data: copied on the "
+                        "GPU%s (%u so far, %u with GPU-written sources)\n",
+                        static_cast<unsigned long long>(src.base_address),
+                        static_cast<unsigned long long>(dst.base_address),
+                        static_cast<unsigned long long>(size),
+                        both && size < 1_MB ? " and in guest memory" : "", count, written_count);
+        }
+        if (!small_sync || size >= 1_MB) {
+            return false;
+        }
+    }
+    if (!memory->IsValidGpuMapping(src.base_address, size) ||
+        !memory->IsValidGpuMapping(dst.base_address, size) ||
+        !memory->TryWriteBacking(reinterpret_cast<void*>(dst.base_address),
+                                 reinterpret_cast<const void*>(src.base_address), size)) {
+        return false;
+    }
+    // The GPU's copy of the destination is refreshed from guest memory when next used.
+    buffer_cache.InvalidateMemory(dst.base_address, size, true);
+    return true;
+}
+
+bool IsGuestMemoryShaderHLE(unsigned long long pgm_hash) {
+    return pgm_hash == SCALAR_COPY_SHADER_HASH || pgm_hash == SCALAR_COPY64_SHADER_HASH;
+}
+
 bool ExecuteShaderHLE(const Shader::Info& info, const AmdGpu::Regs& regs,
                       const AmdGpu::ComputeProgram& cs_program, Rasterizer& rasterizer) {
     switch (info.pgm_hash) {
     case COPY_SHADER_HASH:
         return ExecuteCopyShaderHLE(info, cs_program, rasterizer);
+    case SCALAR_COPY_SHADER_HASH:
+        return ExecuteScalarCopyHLE(info, cs_program, rasterizer, 1);
+    case SCALAR_COPY64_SHADER_HASH:
+        return ExecuteScalarCopyHLE(info, cs_program, rasterizer, 64);
     default:
         return false;
     }

@@ -16,6 +16,8 @@ inline bool IsFsr4(int upscaler) {
     return upscaler == UpscalerFsr4 || upscaler == UpscalerFsr411;
 }
 enum Preset : int { NativeAA = 0, Quality, Balanced, Performance, UltraPerformance, PresetCount };
+/// Frame generation (vk_frame_generation.h): frames generated between two of the game's.
+enum FrameGen : int { FrameGenOff = 0, FrameGenFsr3 = 1, FrameGenDlss = 2, FrameGenCount };
 enum DebugView : int { DebugNone = 0, DebugReactive = 1, DebugMotion = 2, DebugViewCount };
 
 /// Game effects switched by the community patches at start (patches.py EFFECTS): ini key,
@@ -84,6 +86,12 @@ struct Values {
     /// DLSS (bbport_dlss.dll, NVIDIA RTX) is ready, or why not (null before the device exists).
     std::atomic<bool> dlss_supported{false};
     std::atomic<const char*> dlss_problem{nullptr};
+    /// Frame generation: provider and output frames per game frame (2 = one generated frame,
+    /// up to 4 with DLSS on RTX 50). dlssg_max_multiplier: 1 without DLSS Frame Generation.
+    std::atomic<int> frame_gen{FrameGenOff};
+    std::atomic<int> frame_gen_multiplier{2};
+    std::atomic<int> dlssg_max_multiplier{1};
+    std::atomic<const char*> frame_gen_problem{nullptr};
 
     /// Startup settings for the explicit BB_RENDER_RES compatibility patch only.
     int startup_preset = NativeAA;
@@ -114,5 +122,6 @@ void Save();
 float PresetScale(int preset);
 const char* PresetName(int preset);
 const char* UpscalerName(int upscaler);
+const char* FrameGenName(int frame_gen);
 
 } // namespace BbSettings

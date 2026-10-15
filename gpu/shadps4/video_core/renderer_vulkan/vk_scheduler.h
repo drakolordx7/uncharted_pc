@@ -690,6 +690,9 @@ public:
     /// Waits for the given tick to trigger on the GPU.
     void Wait(u64 tick);
 
+    /// bbport: prints every scheduler's timeline and the last queue submissions (GPU stall).
+    static void ReportStall();
+
     /// Attempts to execute operations whose tick the GPU has caught up with.
     void PopPendingOperations();
 

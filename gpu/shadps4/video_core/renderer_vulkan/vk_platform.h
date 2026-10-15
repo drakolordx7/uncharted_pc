@@ -27,6 +27,11 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
 
 vk::UniqueDebugUtilsMessengerEXT CreateDebugCallback(vk::Instance instance);
 
+/// bbport: BB_GPU_ADDRESS_REPORT=1 (GPU address binding history for device-lost reports).
+bool AddressReportEnabled();
+vk::UniqueDebugUtilsMessengerEXT CreateAddressReportCallback(vk::Instance instance);
+void DumpAddressBindings(u64 address);
+
 template <typename T>
 concept VulkanHandleType = vk::isVulkanHandleType<T>::value;
 

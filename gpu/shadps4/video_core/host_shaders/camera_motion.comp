@@ -24,8 +24,9 @@ layout(push_constant) uniform Constants {
     vec2 size;         // pixels
     vec2 jitter;       // current viewport shift in render pixels (x right, y down)
     vec2 previous_jitter;
-    uint mode;         // motion: 1 = object motion vectors available; debug: 0 motion, 1 raw
-                       // depth, 2 view z / 50, 3 reprojected previous frame, 4 |difference|
+    uint mode;         // motion: 1 = object motion vectors available, 2 = Uncharted's velocity
+                       // pass camera, 3 = none (zero); debug: 0 motion, 1 raw depth,
+                       // 2 view z / 50, 3 reprojected previous frame, 4 |difference|
 };
 
 void main() {
@@ -84,7 +85,23 @@ void main() {
     imageStore(color_img, pixel, vec4(mix(current.rgb, mv_color, 0.75), current.a));
 #else
     vec2 result = motion;
-    if (mode == 1) {
+    if (mode == 2) {
+        // Uncharted's camera velocity pass (CameraMotion::OnVelocityConstants): reproject holds
+        // the view to previous clip x, y, w rows; proj the view from uv; prev_proj.xy the view
+        // z from depth.
+        const float view_z = prev_proj.y / (depth - prev_proj.x);
+        const vec4 view_pos = vec4(view_z * (proj.x * scene_uv.x + proj.z),
+                                   view_z * (proj.y * scene_uv.y + proj.w), view_z, 1.0);
+        const vec3 clip = vec3(dot(reproject[0], view_pos), dot(reproject[1], view_pos),
+                               dot(reproject[2], view_pos));
+        const vec2 previous_uv = vec2(0.5 * clip.x / clip.z + 0.5, 0.5 - 0.5 * clip.y / clip.z);
+        result = (previous_uv - scene_uv) * size;
+        if (any(isnan(result)) || any(isinf(result))) {
+            result = vec2(0.0);
+        }
+    } else if (mode == 3) {
+        result = vec2(0.0); // no camera this frame
+    } else if (mode == 1) {
         const vec4 object_motion = texelFetch(object_tex, pixel, 0);
         // A later ordinary draw may have covered this pixel without touching the motion
         // target. Its final depth then differs from the depth stored with the vector.

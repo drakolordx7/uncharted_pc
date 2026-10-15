@@ -37,6 +37,7 @@ class Scheduler;
 class Runtime;
 class CameraMotion;
 class SceneTargets;
+class FrameGenerator;
 
 class TemporalUpscaler {
 public:
@@ -62,6 +63,15 @@ public:
 
     /// Before a compute dispatch: the post-processing combine shader triggers the upscale.
     void OnDispatch(u64 cs_hash);
+
+    /// bbport: frame generation takes its depth and motion vectors at the same point.
+    void SetFrameGenerator(FrameGenerator* generator) noexcept {
+        frame_generator = generator;
+    }
+    /// bbport: BB_HUDLESS_PS=<pixel shader hash>: the draw that writes the game's finished
+    /// picture into the display buffer before the UI (Uncharted). After it, frame generation
+    /// copies that target: the frame without UI.
+    void OnDrawRecorded(u64 ps_hash, VideoCore::ImageId color);
 
     /// Start of a frame in the command stream (display pass).
     bool OnFrameStart();
@@ -139,6 +149,8 @@ private:
     u64 view_uses = 0;
 
     void Run();
+    /// The scene depth and the game's motion vectors for frame generation (velocity mode).
+    void CaptureFrameGen();
     void RunScaled();
     void RunUiOnly(VideoCore::ImageId color, VideoCore::ImageId depth);
     void EnsureUiResources(u32 width, u32 height, vk::Format color, vk::Format depth);
@@ -185,6 +197,9 @@ private:
     Runtime& runtime;
     CameraMotion& camera_motion;
     SceneTargets& scene_targets;
+    FrameGenerator* frame_generator = nullptr;
+    bool frame_gen_captured = false; ///< this frame's inputs are taken
+    u64 hudless_hash = 0;
     int applied_preset = -1;
     int applied_upscaler = -1;
     bool dispatched_last_frame = false;

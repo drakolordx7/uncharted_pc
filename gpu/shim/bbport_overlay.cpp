@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "bbport_overlay.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cfloat>
 #include <chrono>
@@ -59,7 +60,7 @@ float base_scale = 1.0f;
 
 // Present rate for the FPS counter.
 std::chrono::steady_clock::time_point last_present{};
-float frame_ms_avg = 0.0f;
+float frame_ms_avg = 0.0f, last_present_ms = 0.0f;
 
 void SetOpen(bool value) {
     if (menu_open.exchange(value) == value) {
@@ -308,6 +309,39 @@ void Menu() {
          "Движущийся предмет без синего и без красного/зелёного апскейлер считает "
          "неподвижным, отсюда шлейф.");
     ImGui::EndDisabled(); // upscaler off
+
+    ImGui::SeparatorText("Генерация кадров");
+    static const char* frame_gens[] = {"Выкл", "FSR 3 (любая видеокарта)",
+                                       "DLSS (NVIDIA RTX 40/50)"};
+    const int frame_gen = s.frame_gen;
+    if (ImGui::BeginCombo("Генерация кадров", frame_gens[frame_gen])) {
+        for (int i = 0; i < BbSettings::FrameGenCount; ++i) {
+            const bool supported = i != BbSettings::FrameGenDlss || s.dlssg_max_multiplier > 1;
+            ImGui::BeginDisabled(!supported);
+            if (ImGui::Selectable(frame_gens[i], i == frame_gen)) {
+                Store(s.frame_gen, i, true);
+            }
+            ImGui::EndDisabled();
+            if (!supported) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("— не поддерживается видеокартой");
+            }
+        }
+        ImGui::EndCombo();
+    }
+    Hint("Кадры между двумя кадрами игры: 60 FPS на экране становятся 120. Нужны представление "
+         "Mailbox или Immediate и монитор с такой частотой. Немного добавляет задержку ввода. "
+         "Меню и видеоролики не генерируются.");
+    const int max_multiplier = s.frame_gen == BbSettings::FrameGenDlss ? s.dlssg_max_multiplier.load() : 2;
+    ImGui::BeginDisabled(s.frame_gen == BbSettings::FrameGenOff || max_multiplier <= 2);
+    int multiplier = std::min(s.frame_gen_multiplier.load(), max_multiplier);
+    if (ImGui::SliderInt("Множитель", &multiplier, 2, std::max(max_multiplier, 2), "%dx")) {
+        Store(s.frame_gen_multiplier, multiplier, true);
+    }
+    ImGui::EndDisabled();
+    if (const char* problem = s.frame_gen_problem.load()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "%s", problem);
+    }
 
     ImGui::SeparatorText("Разрешение вывода");
     static const char* outputs[] = {"1280 x 720", "1920 x 1080", "2560 x 1440", "3840 x 2160"};
@@ -626,14 +660,38 @@ void SetTextEntry(bool active, const std::string& prompt, const std::string& tex
     text_entry_text = text;
 }
 
-void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
-    // Present interval for the FPS readout (measured also while nothing is drawn).
+// Called for every presented frame: the interval for the FPS readout and BB_FPS_LOG.
+void NotePresent() {
     const auto now = std::chrono::steady_clock::now();
     const float ms = std::chrono::duration<float, std::milli>(now - last_present).count();
     last_present = now;
+    last_present_ms = ms;
     if (ms > 0.0f && ms < 1000.0f) {
         frame_ms_avg = frame_ms_avg == 0.0f ? ms : frame_ms_avg * 0.95f + ms * 0.05f;
     }
+    // BB_FPS_LOG=1: presents per second and the slowest frame, every 5 seconds (test runs).
+    static const bool fps_log = [] {
+        const char* env = std::getenv("BB_FPS_LOG");
+        return env && env[0] == '1';
+    }();
+    if (fps_log) {
+        static auto window_start = now;
+        static int frames = 0;
+        static float worst = 0.0f;
+        ++frames;
+        worst = std::max(worst, ms < 1000.0f ? ms : 0.0f);
+        const float elapsed = std::chrono::duration<float>(now - window_start).count();
+        if (elapsed >= 5.0f) {
+            std::printf("Frame rate: %.1f FPS, slowest frame %.1f ms\n", frames / elapsed, worst);
+            window_start = now;
+            frames = 0;
+            worst = 0.0f;
+        }
+    }
+}
+
+void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
+    const float ms = last_present_ms;
     if (!Visible()) {
         return;
     }

@@ -30,6 +30,17 @@
 
 namespace AmdGpu {
 
+// bbport diagnosis: BB_SUBMIT_DELAY_US=<us> starts each submission no earlier than that long
+// after the guest submitted it, as a GPU still busy with earlier work would. Tests whether the
+// guest finishes data a command buffer reads only after submitting it.
+static std::chrono::microseconds SubmitDelay() {
+    static const std::chrono::microseconds delay{[] {
+        const char* env = std::getenv("BB_SUBMIT_DELAY_US");
+        return env ? std::strtoll(env, nullptr, 10) : 0LL;
+    }()};
+    return delay;
+}
+
 static const char* dcb_task_name{"DCB_TASK"};
 static const char* ccb_task_name{"CCB_TASK"};
 
@@ -86,8 +97,14 @@ Liverpool::~Liverpool() {
 }
 
 void Liverpool::ProcessCommands() {
-    if (num_commands && rasterizer) {
-        rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCommands); // bbport: commands touch the caches
+    // bbport: commands touch the caches and record into the draw scheduler, so the draw
+    // recording thread has to be idle first. A command queued after the check used to run
+    // without the drain (both threads recorded into one command buffer: a crash in the driver).
+    if (!num_commands) {
+        return;
+    }
+    if (rasterizer) {
+        rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCommands);
     }
     // Process incoming commands with high priority
     while (num_commands) {
@@ -104,6 +121,7 @@ void Liverpool::ProcessCommands() {
 
 void Liverpool::Process(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuCommandProcessor");
+    on_processor_thread = true;
 #ifndef _WIN32
     if (clockid_t clock; pthread_getcpuclockid(pthread_self(), &clock) == 0) {
         BbStats::gpu_thread_clock.store(static_cast<int>(clock));
@@ -141,12 +159,20 @@ void Liverpool::Process(std::stop_token stoken) {
             auto& queue = mapped_queues[curr_qid];
 
             Task::Handle task{};
+            std::chrono::steady_clock::time_point not_before{};
             {
                 std::scoped_lock lock{queue.m_access};
                 if (queue.submits.empty()) {
                     continue;
                 }
                 task = queue.submits.front();
+                if (!queue.front_started && !queue.submit_times.empty()) {
+                    not_before = queue.submit_times.front() + SubmitDelay();
+                }
+                queue.front_started = true;
+            }
+            if (not_before > std::chrono::steady_clock::now()) {
+                std::this_thread::sleep_until(not_before);
             }
             task.resume();
 
@@ -155,6 +181,10 @@ void Liverpool::Process(std::stop_token stoken) {
 
                 std::scoped_lock lock{queue.m_access};
                 queue.submits.pop();
+                if (!queue.submit_times.empty()) {
+                    queue.submit_times.pop();
+                }
+                queue.front_started = false;
 
                 --num_submits;
                 std::scoped_lock lock2{submit_mutex};
@@ -256,6 +286,24 @@ void SignalEop(const PM4CmdEventWriteEop& eop) {
 void RunEventWriteEop(Vulkan::Rasterizer& rasterizer, const u8* data) {
     const auto eop = *reinterpret_cast<const PM4CmdEventWriteEop*>(data);
     rasterizer.ProcessDownloadImages();
+    rasterizer.GetBufferCache().CheckStableBindings();
+    rasterizer.CheckConstants();
+    // bbport diagnosis: BB_READBACK_RANGE=<hex address>:<hex size>: GPU data there is copied back
+    // to guest memory before each end-of-pipe fence.
+    static const std::pair<u64, u64> readback = [] {
+        std::pair<u64, u64> range{};
+        if (const char* env = std::getenv("BB_READBACK_RANGE")) {
+            char* end;
+            range.first = std::strtoull(env, &end, 16);
+            if (*end == ':') {
+                range.second = std::strtoull(end + 1, nullptr, 16);
+            }
+        }
+        return range;
+    }();
+    if (readback.second) {
+        rasterizer.GetBufferCache().ReadMemory(readback.first, readback.second, false, true);
+    }
     // Guest memory copies on the copy threads precede the fence the guest sees.
     // BB_ASYNC_FENCES=1 writes it once they are done instead of waiting for them; measured
     // slower (79 vs 83 FPS): the guest waits on these fences, and later fences stall it more
@@ -314,6 +362,9 @@ void RunDmaData(Vulkan::Rasterizer& rasterizer, const u8* data) {
 
 void SignalFlip(Vulkan::Rasterizer& rasterizer, const u8*) {
     rasterizer.WaitDeferredSignals();
+    rasterizer.OnGuestFlip();
+    rasterizer.GetBufferCache().CheckStableBindings();
+    rasterizer.CheckConstants();
     Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxFlip);
 }
 
@@ -324,6 +375,8 @@ void RunWriteData(Vulkan::Rasterizer& rasterizer, const u8* data) {
     // precede writes the guest sees.
     rasterizer.WaitHostCopies();
     rasterizer.WaitDeferredSignals();
+    rasterizer.GetBufferCache().CheckStableBindings();
+    rasterizer.CheckConstants();
     BbWriteLog::Note(write_data->Address<u64>(), write_data->data,
                      (header->type3.count.Value() - 2) * sizeof(u32), BbWriteLog::WriteData);
     std::memcpy(write_data->Address<u64*>(), write_data->data,
@@ -336,6 +389,8 @@ void RunEventWriteEos(Vulkan::Rasterizer& rasterizer, const u8* data) {
     rasterizer.WaitHostCopies();
     rasterizer.WaitDeferredSignals();
     rasterizer.ProcessDownloadImages();
+    rasterizer.GetBufferCache().CheckStableBindings();
+    rasterizer.CheckConstants();
     event_eos.SignalFence([](void* address, u64 value, u32 num_bytes) {
         auto* memory = Core::Memory::Instance();
         BbWriteLog::Note(reinterpret_cast<u64>(address), &value, num_bytes, BbWriteLog::Fence);
@@ -1598,6 +1653,8 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             if (rasterizer) {
                 rasterizer->WaitHostCopies();
                 rasterizer->WaitDeferredSignals();
+                rasterizer->GetBufferCache().CheckStableBindings();
+                rasterizer->CheckConstants();
             }
             const auto* release_mem = reinterpret_cast<const PM4CmdReleaseMem*>(header);
             if (rasterizer) {
@@ -1686,6 +1743,9 @@ void Liverpool::SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb) {
         }
         auto task = ProcessGraphics(dcb, ccb, seq);
         queue.submits.emplace(task.handle);
+        if (SubmitDelay().count()) {
+            queue.submit_times.push(std::chrono::steady_clock::now());
+        }
     }
 
     std::scoped_lock lk{submit_mutex};
@@ -1703,6 +1763,9 @@ void Liverpool::SubmitAsc(u32 gnm_vqid, std::span<const u32> acb) {
     {
         std::scoped_lock lock{queue.m_access};
         queue.submits.emplace(task.handle);
+        if (SubmitDelay().count()) {
+            queue.submit_times.push(std::chrono::steady_clock::now());
+        }
     }
 
     std::scoped_lock lk{submit_mutex};

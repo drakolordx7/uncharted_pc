@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -18,6 +19,7 @@
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/libraries/kernel/time.h"
+#include <array>
 #include "core/libraries/videoout/driver.h"
 #include "core/libraries/videoout/videoout_error.h"
 #include "imgui/renderer/imgui_core.h"
@@ -436,15 +438,25 @@ void VideoOutDriver::Flip(const Request& req) {
             const double draws_per_frame = frames ? double(all_draws - window_draws) / frames : 0.0;
             window_draws = all_draws;
             window_gpu_us = gpu_us;
+            const u64 side_downloads = BbStats::gpu_side_downloads.exchange(0);
             std::printf("Frame stats: %.1f FPS, worst frame %.1f ms (vblank %u Hz); "
                         "%u shader/pipeline compiles, %.1f ms; %llu recorder syncs; "
-                        "%.0f write faults/s, %lld hot pages; GPU thread %.2f us/draw, "
+                        "%.0f write faults/s (%.0f/s over dead GPU data, %.0f/s merged, "
+                        "%.0f/s read back, %.0f/s on the side queue, %.0f us each), "
+                        "%lld hot pages; GPU thread %.2f us/draw, "
                         "%.0f draws/frame, idle %.1f%%; blocked: recorder %.1f%%, host copies "
                         "%.1f%% (%.0f/frame), copy threads %.1f%%, GPU ticks %.1f%%; "
                         "reduced-size draws %.0f/frame of %.0f in the scene\n",
                         frames / window, worst_ms, EmulatorSettings.GetVblankFrequency(), compiles,
                         compile_ns / 1e6, static_cast<unsigned long long>(direct),
-                        faults / window, static_cast<long long>(BbStats::hot_pages.load()),
+                        faults / window, BbStats::dead_gpu_drops.exchange(0) / window,
+                        BbStats::gpu_merges.exchange(0) / window,
+                        BbStats::gpu_read_backs.exchange(0) / window,
+                        side_downloads / window,
+                        side_downloads ? BbStats::gpu_side_download_ns.exchange(0) / 1e3 /
+                                             side_downloads
+                                       : 0.0,
+                        static_cast<long long>(BbStats::hot_pages.load()),
                         us_per_draw, draws_per_frame,
                         BbStats::gpu_idle_ns.exchange(0) / (window * 1e7),
                         BbStats::sync_recording_ns.exchange(0) / (window * 1e7),
@@ -532,8 +544,37 @@ void VideoOutDriver::DrawLastFrame() {
     }, true);
 }
 
+namespace {
+/// bbport diagnosis: when the guest submitted its last flip, and the gap before it.
+std::atomic<s64> last_flip_submit_ns{0}, last_flip_interval_ns{0};
+} // namespace
+
 bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
                                 bool is_eop /*= false*/) {
+    if (index != -1) {
+        const s64 now = std::chrono::steady_clock::now().time_since_epoch().count();
+        const s64 last = last_flip_submit_ns.exchange(now, std::memory_order_relaxed);
+        const s64 gap = last ? now - last : 0;
+        last_flip_interval_ns.store(gap, std::memory_order_relaxed);
+        // BB_FLIP_LOG=1: the gaps between the guest's flips (its frame times), every 5 s.
+        static const bool flip_log = [] {
+            const char* env = std::getenv("BB_FLIP_LOG");
+            return env && env[0] == '1';
+        }();
+        if (flip_log && gap) {
+            static std::array<u32, 6> buckets{};
+            static s64 window = now;
+            const s64 ms = gap / 1'000'000;
+            ++buckets[ms < 4 ? 0 : ms < 10 ? 1 : ms < 15 ? 2 : ms < 20 ? 3 : ms < 40 ? 4 : 5];
+            if (now - window >= 5'000'000'000) {
+                std::printf("Flip gaps: <4 ms %u, 4-10 %u, 10-15 %u, 15-20 %u, 20-40 %u, 40+ %u\n",
+                            buckets[0], buckets[1], buckets[2], buckets[3], buckets[4],
+                            buckets[5]);
+                buckets.fill(0);
+                window = now;
+            }
+        }
+    }
     {
         std::unique_lock lock{port->port_mutex};
         if (index != -1 && port->flip_status.flip_pending_num > 16) {
@@ -582,6 +623,24 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
     request_cv.notify_one();
 }
 
+namespace {
+std::atomic<s64> movie_frame_ns{0};
+
+bool MovieActive(std::chrono::steady_clock::time_point now) {
+    const s64 last = movie_frame_ns.load(std::memory_order_relaxed);
+    return last && now.time_since_epoch().count() - last < 300'000'000;
+}
+} // namespace
+
+void NoteMovieFrame() {
+    movie_frame_ns.store(std::chrono::steady_clock::now().time_since_epoch().count(),
+                         std::memory_order_relaxed);
+}
+
+s64 LastFlipIntervalNs() {
+    return last_flip_interval_ns.load(std::memory_order_relaxed);
+}
+
 void VideoOutDriver::PresentThread(std::stop_token token) {
     const std::chrono::nanoseconds vblank_period(1000000000 /
                                                  EmulatorSettings.GetVblankFrequency());
@@ -614,6 +673,13 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     // arrives and its slot allows, between vblanks, instead of on the next vblank tick.
     const bool immediate_flips = frame_limit != 0;
 
+    // bbport: prerecorded movies (Uncharted's cutscenes) show one video frame per vblank of
+    // a 60 Hz display and played too fast at 120 Hz. While a movie is being decoded the guest
+    // gets vblanks and flips at 60 Hz; gameplay keeps the configured rate.
+    const bool fast_vblank = EmulatorSettings.GetVblankFrequency() > 60;
+    constexpr std::chrono::nanoseconds movie_period{1000000000 / 60};
+    auto next_movie_vblank = std::chrono::steady_clock::now();
+
     while (!token.stop_requested()) {
         timer.Start();
         const auto tick_deadline = std::chrono::steady_clock::now() + vblank_period;
@@ -627,7 +693,15 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
         // Check if it's time to take a request.
         auto& vblank_status = main_port.vblank_status;
         const auto now = std::chrono::steady_clock::now();
-        const bool flip_slot = !frame_limit || now >= next_flip;
+        const bool movie = fast_vblank && MovieActive(now);
+        if (movie) {
+            if (now + vblank_period / 2 < next_movie_vblank) {
+                timer.End();
+                continue;
+            }
+            next_movie_vblank = std::max(next_movie_vblank + movie_period, now - movie_period);
+        }
+        const bool flip_slot = movie || !frame_limit || now >= next_flip;
         if (flip_slot && vblank_status.count % (main_port.flip_rate + 1) == 0) {
             const auto request = receive_request();
             if (request && frame_limit) {
@@ -671,7 +745,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             main_port.vblank_cv.notify_all();
         }
 
-        if (!immediate_flips || main_port.flip_rate != 0) {
+        if (!immediate_flips || main_port.flip_rate != 0 || movie) {
             timer.End();
             continue;
         }

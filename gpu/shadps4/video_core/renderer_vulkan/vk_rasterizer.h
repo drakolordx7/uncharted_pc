@@ -136,6 +136,14 @@ public:
     bool OnWriteFault(VAddr addr, bool assume_locks);
     bool ReadMemory(VAddr addr, u64 size, bool assume_locks = false);
     void ProcessDownloadImages();
+    /// bbport diagnosis (BB_OUTPUT_CHECK=N with BB_STALE_CHECK): at every Nth end-of-pipe
+    /// fence, reads back this frame's compute-written vertices and reports impossible ones.
+    void CheckComputeOutputs();
+    /// bbport diagnosis: the guest's flip, in stream order (BB_STALE_CHECK frames).
+    void OnGuestFlip();
+    /// bbport diagnosis (BB_CONST_CHECK): before a fence the guest can see.
+    void CheckConstants();
+    u32 current_vs_hash{}; ///< bbport diagnosis: the draw being bound (BB_FORCE_UPLOAD_VS)
     bool IsMapped(VAddr addr, u64 size);
     void MapMemory(VAddr addr, u64 size);
     void RegisterMemory(VAddr addr, u64 size);

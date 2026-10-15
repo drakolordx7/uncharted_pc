@@ -191,6 +191,16 @@ static ABI int32_t cond_abs_timedwait(GuestCond **cond, GuestMutex **mutex, cons
     struct timespec end = {.tv_sec = (time_t)abs->sec, .tv_nsec = (long)abs->nsec};
     return cond_wait_until(cond, mutex, &end);
 }
+/* Condition attributes carry nothing the host condvar uses (clock and pshared are fixed). */
+static char condattr_handle;
+static ABI int32_t condattr_init(void **out) {
+    if (!out) return orbis_error(EINVAL);
+    *out = &condattr_handle; return 0;
+}
+static ABI int32_t condattr_destroy(void **attr) {
+    if (!attr || *attr != &condattr_handle) return orbis_error(EINVAL);
+    *attr = NULL; return 0;
+}
 /* POSIX pthread APIs return positive guest errno values, unlike scePthread. */
 static int32_t posix_result(int32_t result) { return result ? (int32_t)((uint32_t)result & 0xffff) : 0; }
 static ABI int32_t posix_attr_init(GuestAttr **out) { return posix_result(attr_init(out)); }
@@ -201,6 +211,8 @@ static ABI int32_t posix_mutex_destroy(GuestMutex **m) { return posix_result(mut
 static ABI int32_t posix_mutex_lock(GuestMutex **m) { return posix_result(mutex_lock(m)); }
 static ABI int32_t posix_mutex_trylock(GuestMutex **m) { return posix_result(mutex_trylock(m)); }
 static ABI int32_t posix_mutex_unlock(GuestMutex **m) { return posix_result(mutex_unlock(m)); }
+static ABI int32_t posix_condattr_init(void **a) { return posix_result(condattr_init(a)); }
+static ABI int32_t posix_condattr_destroy(void **a) { return posix_result(condattr_destroy(a)); }
 static ABI int32_t posix_cond_init(GuestCond **c, void **a) { return posix_result(cond_init(c, a, NULL)); }
 static ABI int32_t posix_cond_destroy(GuestCond **c) { return posix_result(cond_destroy(c)); }
 static ABI int32_t posix_cond_wait(GuestCond **c, GuestMutex **m) { return posix_result(cond_wait(c, m)); }
@@ -208,6 +220,10 @@ static ABI int32_t posix_cond_timedwait(GuestCond **c, GuestMutex **m, const Gue
 static ABI int32_t posix_cond_signal(GuestCond **c) { return posix_result(cond_signal(c)); }
 static ABI int32_t posix_cond_broadcast(GuestCond **c) { return posix_result(cond_broadcast(c)); }
 uintptr_t runtime_mutex_resolve(const char *name) {
+    if (!strcmp(name,"m5-2bsNfv7s#p#J")) return (uintptr_t)condattr_init;
+    if (!strcmp(name,"waPcxYiR3WA#p#J")) return (uintptr_t)condattr_destroy;
+    if (!strcmp(name,"mKoTx03HRWA#I#J")) return (uintptr_t)posix_condattr_init;
+    if (!strcmp(name,"dJcuQVn6-Iw#I#J")) return (uintptr_t)posix_condattr_destroy;
     if (!strcmp(name,"0TyVk4MSLt0#I#J")) return (uintptr_t)posix_cond_init;
     if (!strcmp(name,"RXXqi4CtF8w#I#J")) return (uintptr_t)posix_cond_destroy;
     if (!strcmp(name,"Op8TBGY5KHg#I#J")) return (uintptr_t)posix_cond_wait;

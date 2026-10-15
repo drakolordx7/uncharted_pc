@@ -25,6 +25,7 @@
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
+#include "video_core/renderer_vulkan/vk_frame_generation.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -181,6 +182,9 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
     if (const char* hash = std::getenv("BB_UI_TRIGGER_VS")) {
         ui_trigger_vs = std::strtoull(hash, nullptr, 16);
     }
+    if (const char* hash = std::getenv("BB_HUDLESS_PS")) {
+        hudless_hash = u32(std::strtoull(hash, nullptr, 16));
+    }
     if (const char* res = std::getenv("BB_OUTPUT_RES")) {
         u32 w = 0, h = 0;
         if (std::sscanf(res, "%ux%u", &w, &h) == 2 && w && h) {
@@ -291,12 +295,14 @@ bool TemporalUpscaler::OnFrameStart() {
     const auto& settings = BbSettings::Get();
     // The guest's startup resolution patch remains in effect until restart. Keep the FSR
     // model at the applied preset while the menu saves the requested one for run.sh.
-    const int preset = BbSettings::RenderPreset();
+    // Velocity mode (Uncharted) runs at the game's own size: anti-aliasing (Native AA) only.
+    const int preset = camera_motion.VelocityMode() ? 0 : BbSettings::RenderPreset();
     if (applied_preset != preset || settings.upscaler == BbSettings::UpscalerOff) failed = false;
     const bool active = Active();
     const bool jitter_on = active && settings.jitter && !BbToggle::Disabled(1u << 25);
     const int upscaler = settings.upscaler.load();
-    const int output = settings.output_res.load();
+    const int output =
+        camera_motion.VelocityMode() ? BbSettings::OutputDefault : settings.output_res.load();
     const bool output_changed = !scaled_session && applied_output != output;
     if (output_changed) {
         target_width = BbSettings::OutputWidths[output];
@@ -338,6 +344,7 @@ bool TemporalUpscaler::OnFrameStart() {
     ui_phase = false;
     ui_read_barrier = false;
     done_this_frame = false;
+    frame_gen_captured = false;
     ldr_target = {};
     scene_color = {};
     snapshot_taken = false;
@@ -358,11 +365,29 @@ bool TemporalUpscaler::OnFrameStart() {
 }
 
 void TemporalUpscaler::OnDispatch(u64 cs_hash) {
-    if (cs_hash != trigger_hash || done_this_frame || failed || Scaled()) {
+    if (cs_hash != trigger_hash || done_this_frame) {
+        return;
+    }
+    // Before the upscale: it changes the scene color only, and frame generation runs with
+    // the upscaler off as well.
+    if (frame_generator && frame_generator->Wanted() && camera_motion.VelocityMode() &&
+        !frame_gen_captured) {
+        frame_gen_captured = true;
+        CaptureFrameGen();
+    }
+    if (failed || Scaled()) {
         return;
     }
     done_this_frame = true;
     if (!scene_color || !camera_motion.Ready() || !Active()) {
+        // bbport: why the trigger passed without running (first few times; diagnosis).
+        static int reported = 0;
+        if (camera_motion.VelocityMode() && Active() && reported < 3) {
+            ++reported;
+            std::printf("Upscaler: not run (scene color %d, depth %d, camera %d)\n",
+                        int(bool(scene_color)), int(bool(camera_motion.Depth())),
+                        int(camera_motion.Ready()));
+        }
         reset = true;
         return;
     }
@@ -1068,7 +1093,11 @@ void TemporalUpscaler::Run() {
     own_barrier(vk::Image(output_image), vk::ImageLayout::eUndefined, all,
                 vk::AccessFlagBits2::eNone, vk::ImageLayout::eGeneral, all, rw);
 
-    camera_motion.RecordMotion(cmdbuf, input_depth_view, *motion_view, w, h);
+    if (camera_motion.VelocityMode()) {
+        camera_motion.RecordVelocity(cmdbuf, input_depth_view, *motion_view, w, h);
+    } else {
+        camera_motion.RecordMotion(cmdbuf, input_depth_view, *motion_view, w, h);
+    }
     own_barrier(vk::Image(motion_image), vk::ImageLayout::eGeneral,
                 vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderWrite,
                 vk::ImageLayout::eGeneral, all, vk::AccessFlagBits2::eShaderRead);
@@ -1134,7 +1163,7 @@ void TemporalUpscaler::Run() {
         info.frameTimeMilliseconds = frame_ms;
         info.preExposure = 1.0f;
         info.cameraNear = camera_motion.Near();
-        info.cameraFar = 3000.0f;
+        info.cameraFar = camera_motion.VelocityMode() ? 10000.0f : 3000.0f;
         info.cameraVerticalFovRadians = camera_motion.VerticalFov();
         info.viewSpaceToMeters = 1.0f;
         // RCAS strength 0..1 (menu, BB_FSR_SHARPNESS); jitter at 1:1 softens the image slightly.
@@ -1227,6 +1256,44 @@ void TemporalUpscaler::Run() {
                              sizeof(mode), &mode);
         cmdbuf.dispatch((ow + 7) / 8, (oh + 7) / 8, 1);
     }
+}
+
+void TemporalUpscaler::CaptureFrameGen() {
+    if (!camera_motion.Depth()) {
+        return;
+    }
+    auto& depth = texture_cache.GetImage(camera_motion.Depth());
+    const auto depth_view =
+        CachedView(depth, depth.info.pixel_format, vk::ImageAspectFlagBits::eDepth);
+    scheduler.EndRendering();
+    runtime.Transit(&depth, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eComputeShader,
+                    vk::AccessFlagBits2::eShaderRead);
+    runtime.FlushBarriers();
+    const auto cmdbuf = scheduler.CommandBuffer();
+    const u32 w = depth.info.size.width, h = depth.info.size.height;
+    // The same motion vectors the upscaler computes: camera motion, previous minus current.
+    if (const vk::ImageView motion = frame_generator->BeginCapture(cmdbuf, depth_view, w, h)) {
+        camera_motion.RecordVelocity(cmdbuf, depth_view, motion, w, h);
+        frame_generator->EndCapture(cmdbuf, Active() ? jitter : std::array<float, 2>{},
+                                    camera_motion.Ready());
+    }
+}
+
+void TemporalUpscaler::OnDrawRecorded(u64 ps_hash, VideoCore::ImageId color) {
+    // This draw starts the upscaler's next frame (OnFrameStart: it writes the display buffer);
+    // the frame generator knows whether this frame's inputs were taken.
+    if (!hudless_hash || u32(ps_hash) != hudless_hash || !color || !frame_generator ||
+        !frame_generator->Wanted()) {
+        return;
+    }
+    auto& image = texture_cache.GetImage(color);
+    scheduler.EndRendering();
+    runtime.Transit(&image, vk::ImageLayout::eTransferSrcOptimal,
+                    vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferRead);
+    runtime.FlushBarriers();
+    frame_generator->CaptureHudless(scheduler.CommandBuffer(), image.GetImage(),
+                                    image.info.pixel_format, image.info.size.width,
+                                    image.info.size.height);
 }
 
 vk::ImageView TemporalUpscaler::CachedView(const VideoCore::Image& image, vk::Format format,

@@ -7,6 +7,43 @@
 #include "sdl_window.h"
 #include "bbport_overlay.h"
 
+namespace {
+// bbport: mouse input for runtime_pad.c (keyboard and mouse controls). The window thread adds
+// the motion, buttons and wheel of its events; the pad sampling takes them (bbgpu_mouse_sample).
+std::mutex mouse_mutex;
+float mouse_dx{}, mouse_dy{};
+int mouse_wheel{};
+u32 mouse_buttons{};
+std::atomic<bool> mouse_look{false}, mouse_captured{false};
+bool window_focused{true};
+
+u32 MouseBit(u8 button) {
+    switch (button) {
+    case SDL_BUTTON_LEFT: return 1u;
+    case SDL_BUTTON_RIGHT: return 2u;
+    case SDL_BUTTON_MIDDLE: return 4u;
+    case SDL_BUTTON_X1: return 8u;
+    case SDL_BUTTON_X2: return 16u;
+    default: return 0u;
+    }
+}
+} // namespace
+
+extern "C" void bbgpu_mouse_configure(int look) {
+    mouse_look = look != 0;
+}
+
+extern "C" int bbgpu_mouse_sample(float* dx, float* dy, uint32_t* buttons, int* wheel) {
+    std::scoped_lock lock{mouse_mutex};
+    *dx = mouse_dx;
+    *dy = mouse_dy;
+    *buttons = mouse_buttons;
+    *wheel = mouse_wheel;
+    mouse_dx = mouse_dy = 0.0f;
+    mouse_wheel = 0;
+    return mouse_captured ? 1 : 0;
+}
+
 namespace Frontend {
 
 WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}, height{height_} {
@@ -93,6 +130,20 @@ bool WindowSDL::PollEvents() {
     if (!text_active) {
         BbOverlay::UpdateTextInput(window);
     }
+    // Mouse look holds the cursor in the window (relative mode) while the game has the focus;
+    // the settings menu, text entry and a held Left Alt give it back.
+    {
+        const bool* keys = SDL_GetKeyboardState(nullptr);
+        const bool want = mouse_look && window_focused && !text_active &&
+                          !BbOverlay::CapturesInput() && !(keys && keys[SDL_SCANCODE_LALT]);
+        if (want != mouse_captured) {
+            SDL_SetWindowRelativeMouseMode(window, want);
+            mouse_captured = want;
+            std::scoped_lock lock{mouse_mutex};
+            mouse_dx = mouse_dy = 0.0f;
+            mouse_buttons = 0;
+        }
+    }
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         if (text_active && (event.type == SDL_EVENT_TEXT_INPUT || event.type == SDL_EVENT_KEY_DOWN)) {
@@ -126,6 +177,38 @@ bool WindowSDL::PollEvents() {
             continue;
         }
         switch (event.type) {
+        case SDL_EVENT_MOUSE_MOTION:
+            if (mouse_captured) {
+                std::scoped_lock lock{mouse_mutex};
+                mouse_dx += event.motion.xrel;
+                mouse_dy += event.motion.yrel;
+            }
+            break;
+        case SDL_EVENT_MOUSE_BUTTON_DOWN:
+        case SDL_EVENT_MOUSE_BUTTON_UP: {
+            std::scoped_lock lock{mouse_mutex};
+            if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && !BbOverlay::CapturesInput()) {
+                mouse_buttons |= MouseBit(event.button.button);
+            } else {
+                mouse_buttons &= ~MouseBit(event.button.button);
+            }
+            break;
+        }
+        case SDL_EVENT_MOUSE_WHEEL: {
+            std::scoped_lock lock{mouse_mutex};
+            const float y = event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -event.wheel.y : event.wheel.y;
+            mouse_wheel += y > 0 ? 1 : y < 0 ? -1 : 0;
+            break;
+        }
+        case SDL_EVENT_WINDOW_FOCUS_GAINED:
+            window_focused = true;
+            break;
+        case SDL_EVENT_WINDOW_FOCUS_LOST: {
+            window_focused = false;
+            std::scoped_lock lock{mouse_mutex};
+            mouse_buttons = 0;
+            break;
+        }
         case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
         case SDL_EVENT_WINDOW_RESIZED: {
             int w = 0, h = 0;

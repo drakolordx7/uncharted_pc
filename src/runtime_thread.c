@@ -59,6 +59,7 @@ static ThreadAttr *attributes;
 static GuestThread *threads;
 static _Thread_local GuestThread *current;
 static _Thread_local int32_t guest_errno;
+static void apply_affinity(GuestThread *t,int current_thread);
 static const unsigned char *tls_template;
 static uint64_t tls_filesz, tls_memsz, tls_align=16;
 static size_t created, joined_count, exited;
@@ -152,6 +153,13 @@ static ThreadAttr *find_attr(ThreadAttr **slot) {
 }
 
 static ABI void *thread_self(void) { return runtime_thread_current(); }
+/* scePthreadGetthreadid: a small unique number per thread (Uncharted 3 tags its job workers). */
+static ABI int32_t thread_get_id(void) {
+    static int32_t next_id;
+    static _Thread_local int32_t id;
+    if (!id) id=__atomic_add_fetch(&next_id,1,__ATOMIC_RELAXED);
+    return id;
+}
 static ABI int32_t *guest_error(void) { return &guest_errno; }
 int32_t *runtime_errno(void) { return &guest_errno; }
 
@@ -252,10 +260,29 @@ static void set_host_name(const char *name) {
 #define exit_setjmp(t) setjmp((t)->exit_jump)
 #define exit_longjmp(t) longjmp((t)->exit_jump,1)
 #endif
+/* BB_GUEST_MXCSR=<hex>: guest threads start with that MXCSR (0x9fc0 is the value sceFiber uses
+ * for a fresh FPU state: flush to zero, denormals are zero) and the x87 control word 0x037f.
+ * Off by default (the host's 0x1f80): tried against U3's exploding cloth bones, no change. */
+void runtime_set_guest_fpu(void) {
+    static unsigned value=0;
+    static int once;
+    if (!once) {
+        const char *env=getenv("BB_GUEST_MXCSR");
+        if (env) value=(unsigned)strtoul(env,NULL,16);
+        once=1;
+    }
+    if (!value) return;
+    uint32_t mxcsr=value;
+    uint16_t fpucw=0x037f;
+    __asm__ volatile("ldmxcsr %0" : : "m"(mxcsr));
+    __asm__ volatile("fldcw %0" : : "m"(fpucw));
+}
 static void *host_start(void *p) {
     GuestThread *t=p;
     attach(t);
     set_host_name(t->name);
+    runtime_set_guest_fpu();
+    if (t->attr.affinity!=0x7f) apply_affinity(t,1);
     if (!exit_setjmp(t)) t->result=t->entry(t->argument);
     runtime_thread_keys_cleanup();
     pthread_mutex_lock(&lock); t->finished=1; ++exited; pthread_mutex_unlock(&lock);
@@ -334,9 +361,33 @@ static ABI int32_t thread_set_prio(GuestThread *t,int prio) {
     if (!find_thread(t)) return ERR(3);
     t->attr.prio=prio; return 0;
 }
+/* BB_AFFINITY=1: the guest's core masks are applied, PS4 core i on host logical processor 2*i
+ * (one per physical core where SMT pairs neighbour). Off by default: the PS4 scheduler's
+ * guarantees (threads on one core never run at once) are not otherwise reproduced. */
+static int affinity_enabled(void) {
+    static int value=-1;
+    if (value<0) { const char *env=getenv("BB_AFFINITY"); value=env && env[0]=='1'; }
+    return value;
+}
+static void apply_affinity(GuestThread *t,int current_thread) {
+#ifdef _WIN32
+    if (!affinity_enabled()) return;
+    DWORD_PTR host=0;
+    for (int i=0;i<7;++i) if (t->attr.affinity>>i&1) host|=(DWORD_PTR)1<<(2*i);
+    if (!host) return;
+    HANDLE handle=current_thread ? GetCurrentThread() : (HANDLE)pthread_gethandle(t->host);
+    DWORD_PTR previous=handle ? SetThreadAffinityMask(handle,host) : 0;
+    printf("Runtime: thread '%s' on PS4 cores 0x%llx (host mask 0x%llx)%s\n",t->name,
+           (unsigned long long)t->attr.affinity,(unsigned long long)host,previous ? "" : " failed");
+#else
+    (void)t; (void)current_thread;
+#endif
+}
 static ABI int32_t thread_set_affinity(GuestThread *t,uint64_t mask) {
     if (!find_thread(t)) return ERR(3);
-    t->attr.affinity=mask; return 0;
+    t->attr.affinity=mask;
+    apply_affinity(t,t==current);
+    return 0;
 }
 static ABI int32_t thread_get_affinity(GuestThread *t,uint64_t *mask) {
     if (!find_thread(t)) return ERR(3);
@@ -380,6 +431,7 @@ int32_t runtime_thread_join_spawned(void *thread,void **result) {
 uintptr_t runtime_thread_resolve(const char *name) {
     static const struct { const char *nid; void *fn; } table[]={
         {"aI+OeCz8xrQ#p#J",thread_self}, {"EotR8a3ASf4#I#J",thread_self},
+        {"EI-5-jlq2dE#p#J",thread_get_id},
         {"9BcDykPmo1I#p#J",guest_error},
         {"nsYoNRywwNg#p#J",attr_init}, {"62KCwEMmzcM#p#J",attr_destroy},
         {"x1X76arYMxU#p#J",attr_get}, {"8+s5BzZjxSg#p#J",attr_affinity},

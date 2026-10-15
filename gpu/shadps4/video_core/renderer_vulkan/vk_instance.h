@@ -90,6 +90,16 @@ public:
         return graphics_queue;
     }
 
+    /// bbport: a queue beside the graphics queue for read-backs: a transfer-only family's (copy
+    /// engine) or the graphics family's second; null when there is neither.
+    vk::Queue GetSideQueue() const {
+        return side_queue;
+    }
+
+    u32 GetSideQueueFamilyIndex() const {
+        return side_queue_family_index;
+    }
+
     vk::Queue GetPresentQueue() const {
         return present_queue;
     }
@@ -533,9 +543,12 @@ private:
     vk::PhysicalDeviceComputeShaderDerivativesFeaturesKHR compute_shader_derivatives_features;
     vk::DriverIdKHR driver_id;
     vk::UniqueDebugUtilsMessengerEXT debug_callback{};
+    vk::UniqueDebugUtilsMessengerEXT address_report_callback{}; // bbport
     std::string vendor_name;
     VmaAllocator allocator{};
     vk::Queue present_queue;
+    vk::Queue side_queue;
+    u32 side_queue_family_index{};
     vk::Queue graphics_queue;
     std::vector<vk::PhysicalDevice> physical_devices;
     std::vector<std::string> available_extensions;

@@ -21,6 +21,36 @@ from link_libc import encode_id
 DEFAULT_MODULES = ('libc.prx', 'libSceFios2.prx')
 FS_LOAD = bytes.fromhex('64488b042500000000')  # mov rax, fs:[0]
 
+# Library/module codes are assigned per executable. The host runtime spells imports with the
+# codes of the executable it was first written for (Bloodborne CUSA03173); every game's
+# imports are rewritten to that spelling by library name, and to NID#library otherwise.
+RUNTIME_SPELLING = {
+    'libSceAjm': ('N', 'O'), 'libSceAppContent': ('c', 'd'), 'libSceAudioIn': ('Y', 'Z'),
+    'libSceAudioOut': ('G', 'H'), 'libSceAvPlayer': ('m', 'n'), 'libSceCommonDialog': ('Z', 'a'),
+    'libSceFios2': ('F', 'G'), 'libSceGameLiveStreaming': ('e', 'f'), 'libSceGnmDriver': ('B', 'C'),
+    'libSceHttp': ('K', 'L'), 'libSceImeDialog': ('b', 'c'), 'libSceMouse': ('U', 'V'),
+    'libSceMsgDialog': ('j', 'k'), 'libSceNet': ('E', 'F'), 'libSceNetCtl': ('J', 'K'),
+    'libSceNpAuth': ('X', 'Y'), 'libSceNpCommerce': ('k', 'l'), 'libSceNpCommon': ('Q', 'R'),
+    'libSceNpManager': ('R', 'S'), 'libSceNpMatching2': ('P', 'Q'), 'libSceNpProfileDialog': ('h', 'i'),
+    'libSceNpScore': ('o', 'p'), 'libSceNpSignaling': ('T', 'U'), 'libSceNpTrophy': ('l', 'm'),
+    'libSceNpUtility': ('S', 'T'), 'libSceNpWebApi': ('W', 'X'), 'libScePad': ('A', 'B'),
+    'libScePlayGo': ('n', 'o'), 'libScePosix': ('I', 'J'), 'libSceRtc': ('H', 'I'),
+    'libSceSaveData': ('O', 'P'), 'libSceSaveDataDialog': ('d', 'e'), 'libSceScreenShot': ('g', 'h'),
+    'libSceSsl': ('L', 'M'), 'libSceSysmodule': ('M', 'N'), 'libSceSystemService': ('V', 'W'),
+    'libSceUserService': ('D', 'E'), 'libSceVideoOut': ('C', 'D'), 'libSceVideoRecording': ('f', 'g'),
+    'libSceVoice': ('i', 'j'), 'libSceWebBrowserDialog': ('a', 'b'), 'libc': ('q', 'q'),
+    'libkernel': ('p', 'J'),
+}
+RUNTIME_MODULE = {'libSceAppContent': 'libSceAppContentUtil', 'libScePosix': 'libkernel'}
+
+
+def runtime_name(identity):
+    nid, (library, _), (module_name, _) = identity
+    codes = RUNTIME_SPELLING.get(library)
+    if codes and module_name == RUNTIME_MODULE.get(library, library):
+        return f'{nid}#{codes[0]}#{codes[1]}'
+    return f'{nid}#{library}'
+
 
 def module(path):
     source = path.read_bytes()
@@ -89,8 +119,8 @@ def patch_fs_loads(image, ph, base):
     return patched
 
 
-def link(game, out, module_names=DEFAULT_MODULES):
-    main = module(game / 'eboot.bin')
+def link(game, out, module_names=DEFAULT_MODULES, exe='eboot.bin'):
+    main = module(game / exe)
     raw = (out / 'boot.bin').read_bytes()
     magic, size, entry, ns, nr, ni, flags = unpack('<8s6Q', raw, 0)
     if magic != b'BBPROBE2':
@@ -107,19 +137,13 @@ def link(game, out, module_names=DEFAULT_MODULES):
         raise ValueError('unexpected boot trailer')
 
     identities = {main['identity'](name): i for i, name in enumerate(names)}
-    main_libraries = {identity: key for key, identity in main['libraries'].items()}
-    main_modules = {identity: key for key, identity in main['modules'].items()}
+    names = [runtime_name(main['identity'](name)) if main['identity'](name) else name for name in names]
 
     def imported(symbol):
         key = symbol['identity']
         if key not in identities:
-            n, lib, mod = key
-            # Main-program spelling when the identity matches (existing host
-            # tables use it); otherwise NID#library for new libraries.
-            name = (f'{n}#{main_libraries[lib]}#{main_modules[mod]}'
-                    if lib in main_libraries and mod in main_modules else f'{n}#{lib[0]}')
             identities[key] = len(names)
-            names.append(name)
+            names.append(runtime_name(key))
         return identities[key]
 
     exports, by_nid = {}, collections.defaultdict(list)
@@ -249,5 +273,6 @@ if __name__ == '__main__':
     p.add_argument('game', type=Path)
     p.add_argument('--out', type=Path, default=Path(__file__).resolve().parent.parent / 'out')
     p.add_argument('--modules', nargs='*', default=list(DEFAULT_MODULES))
+    p.add_argument('--exe', default='eboot.bin', help='executable in the game folder')
     a = p.parse_args()
-    link(a.game, a.out, a.modules)
+    link(a.game, a.out, a.modules, a.exe)

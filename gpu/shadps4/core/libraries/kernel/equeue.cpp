@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <atomic>
+#include <mutex>
+#include <shared_mutex>
+#include <unordered_map>
 #include <thread>
 #include <magic_enum/magic_enum.hpp>
 
@@ -21,7 +24,36 @@ namespace Libraries::Kernel {
 extern boost::asio::io_context io_context;
 extern void KernelSignalRequest();
 
-static std::unordered_map<s32, EqueueInternal*> kqueues;
+// bbport: the queue table is used from every guest thread (create, wait, trigger, timers). A
+// lookup racing an insert (the map rehashing) read freed memory: Uncharted 2 crashed at start
+// while its GPU interrupt threads created and waited on queues. Lookups share a lock; values
+// are node-based, so references stay valid after the lock is released.
+class EqueueTable {
+public:
+    bool contains(s32 handle) const {
+        std::shared_lock lock{mutex};
+        return map.contains(handle);
+    }
+    EqueueInternal*& operator[](s32 handle) {
+        {
+            std::shared_lock lock{mutex};
+            if (const auto it = map.find(handle); it != map.end()) {
+                return it->second;
+            }
+        }
+        std::unique_lock lock{mutex};
+        return map[handle];
+    }
+    void erase(s32 handle) {
+        std::unique_lock lock{mutex};
+        map.erase(handle);
+    }
+
+private:
+    std::unordered_map<s32, EqueueInternal*> map;
+    mutable std::shared_mutex mutex;
+};
+static EqueueTable kqueues;
 static constexpr auto HrTimerSpinlockThresholdNs = 1200000u;
 
 EqueueInternal* GetEqueue(OrbisKernelEqueue eq) {

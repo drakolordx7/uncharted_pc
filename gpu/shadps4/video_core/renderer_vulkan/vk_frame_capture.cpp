@@ -28,7 +28,7 @@ struct Entry {
     Target depth;
     u32 draws{};
     u64 indices{};
-    std::vector<u64> shaders; ///< vs/ps pairs (graphics) or cs (compute), first few
+    std::vector<u64> shaders; ///< vs and ps (graphics) or cs (compute), the first 64
     std::vector<std::pair<Target, bool>> sampled; ///< textures (false) and storage images (true)
     std::string note;
     std::vector<std::string> buffers; ///< dumped constants, per draw
@@ -50,6 +50,16 @@ void AddBuffers(Entry& entry) {
     pending_buffers.clear();
 }
 bool pass_open = false;
+// BB_CAPTURE_BY_FLIP=1: the recording spans the passes between two flips instead of starting
+// and ending at passes that write a display buffer (Uncharted writes two per frame).
+u64 record_start_flip = 0;
+bool CaptureByFlip() {
+    static const bool value = [] {
+        const char* env = std::getenv("BB_CAPTURE_BY_FLIP");
+        return env && env[0] == '1';
+    }();
+    return value;
+}
 std::mutex display_mutex;
 std::vector<VAddr> display_buffers;
 // bbport: read on every draw; the game registers a handful of display buffers once.
@@ -78,7 +88,7 @@ void AddSampled(Entry& entry) {
 }
 
 void AddShader(Entry& entry, u64 hash) {
-    if (entry.shaders.size() < 8 && std::ranges::find(entry.shaders, hash) == entry.shaders.end()) {
+    if (entry.shaders.size() < 64 && std::ranges::find(entry.shaders, hash) == entry.shaders.end()) {
         entry.shaders.push_back(hash);
     }
 }
@@ -183,6 +193,25 @@ void FrameCapture::BeginPass(const VideoCore::ImageInfo* const* colors, u32 num_
     // Frame boundaries in the command stream: the pass that writes a display buffer.
     const bool new_pass = !(pass_open && !entries.empty() && !entries.back().compute &&
                             entries.back().colors == targets);
+    if (CaptureByFlip()) {
+        const u64 now = flips.load(std::memory_order_acquire);
+        if (state.load(std::memory_order_relaxed) == Armed) {
+            entries.clear();
+            pending_sampled.clear();
+            pending_buffers.clear();
+            pass_open = false;
+            record_start_flip = now;
+            state.store(Recording, std::memory_order_release);
+        } else if (state.load(std::memory_order_relaxed) == Recording && now >= record_start_flip + 2) {
+            Write(last_presented.load(std::memory_order_relaxed));
+            entries.clear();
+            pending_sampled.clear();
+            pending_buffers.clear();
+            state.store(Idle, std::memory_order_release);
+            return;
+        }
+        display = false;
+    }
     if (display && new_pass) {
         if (state.load(std::memory_order_relaxed) == Recording) {
             Write(last_presented.load(std::memory_order_relaxed));

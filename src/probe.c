@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include <time.h>
 #include "runtime.h"
 #include "gpu/bbgpu.h"
 #if !defined(__x86_64__) || !defined(__GNUC__)
@@ -47,6 +48,51 @@ static uint64_t read64(FILE *f) {
     return n;
 }
 static size_t round_page(size_t size) { return (size + page_size - 1) & ~(page_size - 1); }
+#ifdef _WIN32
+/* BB_WATCH=offset:type,... (diagnosis): guest image variables printed every 5 seconds.
+ * Types: f float, d double, b byte, i int32, q int64. */
+/* BB_POKE=offset:type=value,... (experiments): written before each print. */
+static void apply_pokes(void) {
+    const char *p=getenv("BB_POKE");
+    while (p && *p) {
+        char *end; uint64_t offset=strtoull(p,&end,16);
+        char type=*end==':' ? end[1] : 'f';
+        const char *value=strchr(end,'=');
+        if (!value) break;
+        unsigned char *at=image+offset;
+        if (type=='d') *(double *)at=strtod(value+1,NULL);
+        else if (type=='b') *at=(unsigned char)strtoul(value+1,NULL,0);
+        else if (type=='i') *(int32_t *)at=(int32_t)strtol(value+1,NULL,0);
+        else *(float *)at=strtof(value+1,NULL);
+        p=strchr(value,',');
+        if (p) ++p;
+    }
+}
+static DWORD WINAPI watch_thread(void *argument) {
+    const char *list=argument;
+    for (;;) {
+        Sleep(5000);
+        apply_pokes();
+        char line[1024]; size_t used=0;
+        for (const char *p=list; *p && used<sizeof(line)-64; ) {
+            char *end; uint64_t offset=strtoull(p,&end,16);
+            char type=*end==':' ? end[1] : 'f';
+            const unsigned char *at=image+offset;
+            if (type=='d') used+=snprintf(line+used,sizeof(line)-used," %llx=%g",(unsigned long long)offset,*(const double *)at);
+            else if (type=='b') used+=snprintf(line+used,sizeof(line)-used," %llx=%u",(unsigned long long)offset,*at);
+            else if (type=='i') used+=snprintf(line+used,sizeof(line)-used," %llx=%d",(unsigned long long)offset,*(const int32_t *)at);
+            else if (type=='q') used+=snprintf(line+used,sizeof(line)-used," %llx=%lld",(unsigned long long)offset,*(const long long *)at);
+            else used+=snprintf(line+used,sizeof(line)-used," %llx=%g",(unsigned long long)offset,*(const float *)at);
+            p=strchr(end,',');
+            if (!p) break;
+            ++p;
+        }
+        printf("Watch:%s\n",line);
+        fflush(stdout);
+    }
+    return 0;
+}
+#endif
 static void *allocate(size_t size) {
     void *low=runtime_low_map(size,PROT_READ|PROT_WRITE);
     if (low) return low;
@@ -346,6 +392,235 @@ static void apply_patches(const char *path, Segment *segments, uint64_t ns, cons
     fclose(f);
     printf("Patches: %" PRIu64 " writes, %" PRIu64 " bytes applied, %" PRIu64 " pointers rebased\n",count,bytes,rebased);
 }
+/* BB_GUEST_HOOKS="offset:bytes,...,START-END": diagnostic call counters on guest functions.
+ * The first `bytes` (>= 5, whole position-independent instructions) at each image offset move
+ * to a thunk near the image, which counts the call and keeps its first two arguments; START-END
+ * hooks every 16-byte aligned function in that range that begins with a frame-pointer prologue.
+ * The counts that changed are printed every 2 s. */
+#include <pthread.h>
+typedef struct { volatile uint64_t calls, rdi, rsi, rdx, rcx, r8, r15; uint64_t offset, printed; } GuestHook;
+static GuestHook *guest_hooks;
+static size_t guest_hook_count;
+static uint64_t guest_image_size;
+/* A pointer argument into the image (or guest memory the tracker knows) shown as text. */
+static void print_hook_string(const char *name, uint64_t value) {
+    const unsigned char *p=(const unsigned char *)(uintptr_t)value;
+    if (value<(uint64_t)(uintptr_t)image || value>=(uint64_t)(uintptr_t)image+guest_image_size-64) return;
+    char text[65]; size_t n=0;
+    while (n<64 && p[n]>=32 && p[n]<127) { text[n]=(char)p[n]; ++n; }
+    text[n]=0;
+    if (n>=3) printf("    %s -> \"%s\"\n",name,text);
+}
+static void *report_guest_hooks(void *unused) {
+    (void)unused;
+    for (;;) {
+#ifdef _WIN32
+        Sleep(2000);
+#else
+        sleep(2);
+#endif
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC,&now);
+        printf("Hooks at %.1f s\n",(double)now.tv_sec+now.tv_nsec/1e9);
+        for (size_t i=0;i<guest_hook_count;++i) {
+            GuestHook *h=&guest_hooks[i];
+            uint64_t calls=h->calls;
+            if (calls==h->printed) continue;
+            printf("Hook %#" PRIx64 ": %" PRIu64 " calls (+%" PRIu64 ", last rdi %#" PRIx64 " rsi %#" PRIx64 " rdx %#" PRIx64
+                   " rcx %#" PRIx64 " r8 %#" PRIx64 " r15 %#" PRIx64 ")\n",h->offset,calls,calls-h->printed,(uint64_t)h->rdi,
+                   (uint64_t)h->rsi,(uint64_t)h->rdx,(uint64_t)h->rcx,(uint64_t)h->r8,(uint64_t)h->r15);
+            h->printed=calls;
+            print_hook_string("rdi",h->rdi); print_hook_string("rsi",h->rsi);
+            print_hook_string("rdx",h->rdx); print_hook_string("rcx",h->rcx);
+        }
+        fflush(stdout);
+    }
+    return NULL;
+}
+/* BB_HOOK_DUMP=<hook offset>:<bytes>:<file>: every 20 ms the memory at the hook's last rdi
+ * (an object) is appended to <file> as [double time][bytes] records (finding fields that follow
+ * a value, e.g. a camera angle). */
+static void *dump_hook_object(void *unused) {
+    (void)unused;
+    const char *spec=getenv("BB_HOOK_DUMP");
+    char *end;
+    const uint64_t offset=strtoull(spec,&end,0);
+    const size_t bytes=*end==':' ? (size_t)strtoull(end+1,&end,0) : 0;
+    FILE *f=*end==':' ? fopen(end+1,"wb") : NULL;
+    GuestHook *h=NULL;
+    for (size_t i=0;i<guest_hook_count;++i) if (guest_hooks[i].offset==offset) h=&guest_hooks[i];
+    if (!f || !h || !bytes) { printf("BB_HOOK_DUMP: bad specification\n"); return NULL; }
+    unsigned char *copy=malloc(bytes);
+    const uint64_t before=getenv("BB_HOOK_DUMP_BEFORE") ? strtoull(getenv("BB_HOOK_DUMP_BEFORE"),NULL,0) : 0;
+    for (;;) {
+#ifdef _WIN32
+        Sleep(50);
+#else
+        usleep(50000);
+#endif
+        const uint64_t object=h->rdi ? h->rdi-before : 0;
+        if (!object) continue;
+#ifdef _WIN32
+        MEMORY_BASIC_INFORMATION info;
+        if (!VirtualQuery((const void *)(uintptr_t)object,&info,sizeof(info)) || info.State!=MEM_COMMIT ||
+            (uint64_t)(uintptr_t)info.BaseAddress+info.RegionSize<object+bytes) continue;
+#endif
+        memcpy(copy,(const void *)(uintptr_t)object,bytes);
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC,&now);
+        const double t=(double)now.tv_sec+now.tv_nsec/1e9;
+        fwrite(&t,sizeof(t),1,f);
+        fwrite(copy,1,bytes,f);
+        fflush(f);
+    }
+    return NULL;
+}
+/* Bytes of whole instructions (>= 5) a frame-pointer prologue at `f` can move, 0 if unknown. */
+static size_t prologue_bytes(const unsigned char *f) {
+    if (memcmp(f,"\x55\x48\x89\xe5",4)) return 0;
+    if (f[4]==0x41 && f[5]>=0x50 && f[5]<=0x57) return 6;
+    if (f[4]>=0x50 && f[4]<=0x57) return 5;
+    if (f[4]==0x48 && f[5]==0x83 && f[6]==0xec) return 8;
+    if (f[4]==0x48 && f[5]==0x81 && f[6]==0xec) return 11;
+    return 0;
+}
+static void install_guest_hooks(Segment *segments, uint64_t ns) {
+    const char *spec=getenv("BB_GUEST_HOOKS");
+    if (!spec || !*spec) return;
+    enum { MAX_HOOKS=16384, THUNK=80 };
+    guest_hooks=calloc(MAX_HOOKS,sizeof(*guest_hooks));
+    uint64_t end_of_image=0;
+    for (uint64_t s=0;s<ns;++s) if (segments[s].address+segments[s].size>end_of_image) end_of_image=segments[s].address+segments[s].size;
+    guest_image_size=end_of_image;
+    unsigned char *thunks=NULL;
+#ifdef _WIN32
+    /* rel32 jumps: the thunks within 2 GiB of the image. */
+    uint64_t base=((uint64_t)(uintptr_t)image+end_of_image+0xffff)&~(uint64_t)0xffff;
+    for (uint64_t step=0;!thunks && step<(1900ull<<20);step+=1u<<16) {
+        thunks=VirtualAlloc((void *)(uintptr_t)(base+step),(size_t)MAX_HOOKS*THUNK,MEM_RESERVE|MEM_COMMIT,PAGE_EXECUTE_READWRITE);
+        if (!thunks && (uint64_t)(uintptr_t)image>step+(2u<<20))
+            thunks=VirtualAlloc((void *)(uintptr_t)(((uint64_t)(uintptr_t)image-step-(2u<<20))&~(uint64_t)0xffff),
+                                (size_t)MAX_HOOKS*THUNK,MEM_RESERVE|MEM_COMMIT,PAGE_EXECUTE_READWRITE);
+    }
+#endif
+    if (!thunks) fail("BB_GUEST_HOOKS: no thunk memory near the image");
+    for (const char *p=spec;*p;) {
+        char *end;
+        uint64_t first=strtoull(p,&end,0), last=first, n=0;
+        if (*end==':') n=strtoull(end+1,&end,0);
+        else if (*end=='-') last=strtoull(end+1,&end,0);
+        else fail("bad BB_GUEST_HOOKS entry");
+        if (*end && *end!=',') fail("bad BB_GUEST_HOOKS entry");
+        p=*end==',' ? end+1 : end;
+        for (uint64_t offset=first;offset<=last;offset+=first==last ? 1 : 16) {
+            if (!mapped(segments,ns,offset,16)) { if (first==last) fail("bad BB_GUEST_HOOKS entry"); continue; }
+            unsigned char *f=image+offset;
+            size_t moved=first==last ? (size_t)n : prologue_bytes(f);
+            if (first!=last && !moved) continue;
+            if (moved<5 || moved>16 || guest_hook_count==MAX_HOOKS) fail("bad BB_GUEST_HOOKS entry");
+            GuestHook *h=&guest_hooks[guest_hook_count];
+            unsigned char *t=thunks+guest_hook_count*THUNK;
+            ++guest_hook_count;
+            h->offset=offset;
+            uintptr_t slot=(uintptr_t)h;
+            size_t k=0;
+            t[k++]=0x50;                                                /* push rax */
+            t[k++]=0x48; t[k++]=0xb8; memcpy(t+k,&slot,8); k+=8;        /* movabs rax, hook */
+            t[k++]=0xf0; t[k++]=0x48; t[k++]=0xff; t[k++]=0x00;         /* lock inc qword [rax] */
+            t[k++]=0x48; t[k++]=0x89; t[k++]=0x78; t[k++]=0x08;         /* mov [rax+8], rdi */
+            t[k++]=0x48; t[k++]=0x89; t[k++]=0x70; t[k++]=0x10;         /* mov [rax+16], rsi */
+            t[k++]=0x48; t[k++]=0x89; t[k++]=0x50; t[k++]=0x18;         /* mov [rax+24], rdx */
+            t[k++]=0x48; t[k++]=0x89; t[k++]=0x48; t[k++]=0x20;         /* mov [rax+32], rcx */
+            t[k++]=0x4c; t[k++]=0x89; t[k++]=0x40; t[k++]=0x28;         /* mov [rax+40], r8 */
+            t[k++]=0x4c; t[k++]=0x89; t[k++]=0x78; t[k++]=0x30;         /* mov [rax+48], r15 */
+            t[k++]=0x58;                                                /* pop rax */
+            memcpy(t+k,f,moved); k+=moved;                              /* the moved instructions */
+            int32_t back=(int32_t)((int64_t)(uintptr_t)(f+moved)-(int64_t)(uintptr_t)(t+k+5));
+            t[k++]=0xe9; memcpy(t+k,&back,4); k+=4;                     /* jmp offset+moved */
+            int32_t to=(int32_t)((int64_t)(uintptr_t)t-(int64_t)(uintptr_t)(f+5));
+            f[0]=0xe9; memcpy(f+1,&to,4); memset(f+5,0x90,moved-5);
+        }
+    }
+    printf("Hooks: %zu guest functions counted\n",guest_hook_count);
+    pthread_t thread;
+    pthread_create(&thread,NULL,report_guest_hooks,NULL);
+    if (getenv("BB_HOOK_DUMP")) pthread_create(&thread,NULL,dump_hook_object,NULL);
+}
+/* Game callbacks (runtime_guest_callbacks: mouse camera): a guest function whose code matches
+ * the expected bytes calls a host function first, with rdi, rsi, the image base and r14 (Microsoft
+ * x64 convention on every host). The thunk keeps the guest's registers and flags, so it also
+ * works inside a function. */
+static unsigned char *near_image_memory(size_t size) {
+    unsigned char *memory=NULL;
+#ifdef _WIN32
+    /* rel32 jumps: within 2 GiB of the image. */
+    uint64_t end_of_image=round_page(guest_image_size ? guest_image_size : 1);
+    uint64_t base=((uint64_t)(uintptr_t)image+end_of_image+(32u<<20)+0xffff)&~(uint64_t)0xffff;
+    for (uint64_t step=0;!memory && step<(1900ull<<20);step+=1u<<16) {
+        memory=VirtualAlloc((void *)(uintptr_t)(base+step),size,MEM_RESERVE|MEM_COMMIT,PAGE_EXECUTE_READWRITE);
+        if (!memory && (uint64_t)(uintptr_t)image>step+(2u<<20))
+            memory=VirtualAlloc((void *)(uintptr_t)(((uint64_t)(uintptr_t)image-step-(2u<<20))&~(uint64_t)0xffff),
+                                size,MEM_RESERVE|MEM_COMMIT,PAGE_EXECUTE_READWRITE);
+    }
+#else
+    (void)size;
+#endif
+    return memory;
+}
+static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t image_size) {
+    size_t count=0;
+    const RuntimeGuestCallback *callbacks=runtime_guest_callbacks(&count);
+    unsigned char *thunks=NULL;
+    size_t used=0;
+    guest_image_size=image_size;
+    for (size_t i=0;i<count;++i) {
+        const RuntimeGuestCallback *c=&callbacks[i];
+        if (!mapped(segments,ns,c->offset,c->signature_size) ||
+            memcmp(image+c->offset,c->signature,c->signature_size)) continue;
+        if (!c->callback) {
+            memcpy(image+c->offset,c->patch,c->moved);
+            printf("Callbacks: %s at %#" PRIx64 " (patch)\n",c->name,c->offset);
+            continue;
+        }
+        if (!thunks && !(thunks=near_image_memory(4096))) { printf("Callbacks: no thunk memory\n"); return; }
+        if (used+256>4096) break;
+        unsigned char *t=thunks+used, *f=image+c->offset;
+        size_t k=0;
+        /* pushfq; push rax rcx rdx r8-r11 rbx; mov rbx, rsp; and rsp, -16; sub rsp, 0xa0 (works at
+         * a function's start and inside it) */
+        static const unsigned char save[]={0x9c,0x50,0x51,0x52,0x41,0x50,0x41,0x51,0x41,0x52,0x41,0x53,0x53,
+                                           0x48,0x89,0xe3,0x48,0x83,0xe4,0xf0,0x48,0x81,0xec,0xa0,0x00,0x00,0x00};
+        memcpy(t+k,save,sizeof(save)); k+=sizeof(save);
+        for (int x=0;x<8;++x) {                                     /* movdqu [rsp+0x20+16x], xmmx */
+            const uint32_t disp=0x20u+16u*(uint32_t)x;
+            t[k++]=0xf3; t[k++]=0x0f; t[k++]=0x7f; t[k++]=(unsigned char)(0x84|x<<3); t[k++]=0x24;
+            memcpy(t+k,&disp,4); k+=4;
+        }
+        t[k++]=0x48; t[k++]=0x89; t[k++]=0xf9;                      /* mov rcx, rdi */
+        t[k++]=0x48; t[k++]=0x89; t[k++]=0xf2;                      /* mov rdx, rsi */
+        const uintptr_t base=(uintptr_t)image, host=(uintptr_t)c->callback;
+        t[k++]=0x49; t[k++]=0xb8; memcpy(t+k,&base,8); k+=8;        /* movabs r8, image */
+        t[k++]=0x4d; t[k++]=0x89; t[k++]=0xf1;                      /* mov r9, r14 */
+        t[k++]=0x48; t[k++]=0xb8; memcpy(t+k,&host,8); k+=8;        /* movabs rax, callback */
+        t[k++]=0xff; t[k++]=0xd0;                                   /* call rax */
+        for (int x=0;x<8;++x) {                                     /* movdqu xmmx, [rsp+0x20+16x] */
+            const uint32_t disp=0x20u+16u*(uint32_t)x;
+            t[k++]=0xf3; t[k++]=0x0f; t[k++]=0x6f; t[k++]=(unsigned char)(0x84|x<<3); t[k++]=0x24;
+            memcpy(t+k,&disp,4); k+=4;
+        }
+        /* mov rsp, rbx; pop rbx r11-r8 rdx rcx rax; popfq */
+        static const unsigned char restore[]={0x48,0x89,0xdc,0x5b,0x41,0x5b,0x41,0x5a,0x41,0x59,0x41,0x58,
+                                              0x5a,0x59,0x58,0x9d};
+        memcpy(t+k,restore,sizeof(restore)); k+=sizeof(restore);
+        memcpy(t+k,f,c->moved); k+=c->moved;                       /* the moved instructions */
+        int32_t back=(int32_t)((int64_t)(uintptr_t)(f+c->moved)-(int64_t)(uintptr_t)(t+k+5));
+        t[k++]=0xe9; memcpy(t+k,&back,4); k+=4;
+        int32_t to=(int32_t)((int64_t)(uintptr_t)t-(int64_t)(uintptr_t)(f+5));
+        f[0]=0xe9; memcpy(f+1,&to,4); memset(f+5,0x90,c->moved-5);
+        used+=(k+15)&~(size_t)15;
+        printf("Callbacks: %s at %#" PRIx64 "\n",c->name,c->offset);
+    }
+}
 /* Restarts the game through run.sh (the settings menu: a new render resolution is a patch
  * applied at start). Descriptors are closed first so the old GPU device and its memory are
  * released before the new process opens its own. */
@@ -392,21 +667,23 @@ int main(int argc, char **argv) {
     runtime_memory_reserve();
     runtime_thread_tcb_offset();
 #endif
-    int cpu_only = 0, strict_imports = 0;
+    int cpu_only = 0, strict_imports = 0, list_missing = 0;
     unsigned timeout_seconds = 10;
-    const char *content_profile=NULL, *app0=NULL, *user_dir=NULL, *patch_file=NULL;
+    const char *content_profile=NULL, *app0=NULL, *user_dir=NULL, *patch_file=NULL, *guest_argv_file=NULL;
     for (int i = 2; i < argc; ++i) {
         if (!strcmp(argv[i], "--cpu-only")) cpu_only = 1;
         else if (!strcmp(argv[i], "--strict-imports")) strict_imports = 1;
+        else if (!strcmp(argv[i], "--list-missing")) list_missing = 1;
         else if (!strcmp(argv[i], "--content-profile") && i+1<argc) content_profile=argv[++i];
         else if (!strcmp(argv[i], "--app0") && i+1<argc) app0=argv[++i];
         else if (!strcmp(argv[i], "--user") && i+1<argc) user_dir=argv[++i];
         else if (!strcmp(argv[i], "--patches") && i+1<argc) patch_file=argv[++i];
+        else if (!strcmp(argv[i], "--guest-argv") && i+1<argc) guest_argv_file=argv[++i];
         else if (!strcmp(argv[i], "--timeout") && i+1<argc) timeout_seconds=(unsigned)strtoul(argv[++i],NULL,10);
         else { fprintf(stderr, "Unknown option: %s\n", argv[i]); return 1; }
     }
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s boot.bin [--cpu-only] [--strict-imports] [--content-profile file] [--app0 dir] [--user dir] [--patches file] [--timeout seconds] | --vulkan-only\n", argv[0]);
+        fprintf(stderr, "Usage: %s boot.bin [--cpu-only] [--strict-imports] [--list-missing] [--content-profile file] [--app0 dir] [--user dir] [--patches file] [--guest-argv file] [--timeout seconds] | --vulkan-only\n", argv[0]);
         return 1;
     }
     if (content_profile) {
@@ -558,7 +835,22 @@ int main(int argc, char **argv) {
             if (!executable) fail("native function is not executable");
         }
     }
-    image = allocate(round_page(size));
+    if (list_missing) {
+        unsigned char *kinds=calloc(import_count ? import_count : 1,1);
+        if (!kinds) fail("allocation failed");
+        for (uint64_t i=0;i<nr;++i) if (relocs[i].kind) kinds[relocs[i].value]=(unsigned char)relocs[i].kind;
+        uint64_t missing=0;
+        for (uint64_t i=0;i<import_count;++i) {
+            if (!kinds[i] || runtime_resolve(names[i],kinds[i]==2) || (native_libc && bindings[i])) continue;
+            const char *symbol=runtime_symbol(names[i]);
+            printf("missing %s %s%s\n",names[i],symbol ? symbol : "?",kinds[i]==2 ? " (data)" : "");
+            ++missing;
+        }
+        printf("%" PRIu64 " of %" PRIu64 " imports missing\n",missing,import_count);
+        return missing ? 20 : 0;
+    }
+    image = runtime_image_map(round_page(size), PROT_READ | PROT_WRITE);
+    if (!image) image = allocate(round_page(size));
     if (fread(image, 1, size, f) != size || fgetc(f) != EOF) fail("incorrect memory image size");
     fclose(f);
     if (!cpu_only) {
@@ -604,6 +896,12 @@ int main(int argc, char **argv) {
         memcpy(image + relocs[i].target, &value, 8);
     }
     if (patch_file) apply_patches(patch_file, segments, ns, relocs, nr);
+    install_guest_hooks(segments, ns);
+    {
+        uint64_t image_end=0;
+        for (uint64_t s=0;s<ns;++s) if (segments[s].address+segments[s].size>image_end) image_end=segments[s].address+segments[s].size;
+        install_game_callbacks(segments, ns, image_end);
+    }
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
 #endif
@@ -617,6 +915,7 @@ int main(int argc, char **argv) {
     }
     if (!executable_entry) fail("entry is not executable");
     printf("Mapped %" PRIu64 " bytes, %" PRIu64 " segments; applied %" PRIu64 " relocations\n", size, ns, nr);
+    printf("Guest image at %p\n", (void *)image);
     if (native_libc) {
         for (uint64_t m=0;m<module_count;++m) {
             int init_executable=0;
@@ -629,6 +928,7 @@ int main(int argc, char **argv) {
         runtime_set_main_tls(image+main_tls[0],main_tls[1],main_tls[2],main_tls[3]);
         runtime_thread_attach_main();
         runtime_set_procparam(image+procparam);
+        runtime_set_guest_fpu();
         /* Dependencies start in link order (libc first), as the PS4 dynamic linker does. */
         for (uint64_t m=0;m<module_count;++m) {
             printf("Starting linked module %" PRIu64 " at image offset 0x%" PRIx64 "; native bindings=%" PRIu64 "\n",m,modules[m].init,nb);
@@ -640,7 +940,24 @@ int main(int argc, char **argv) {
     }
     printf("Entering original x86-64 code at guest offset 0x%" PRIx64 "\n", entry);
     entered_game=1;
-    struct { uint64_t argc; const char *argv[2]; } params = {1, {"/app0/eboot.bin", NULL}};
+#ifdef _WIN32
+    if (getenv("BB_WATCH")) CloseHandle(CreateThread(NULL,0,watch_thread,getenv("BB_WATCH"),0,NULL));
+#endif
+    /* argv: the executable and, after sceSystemServiceLoadExec, the arguments it was given
+     * (--guest-argv: one per line, the guest path first). */
+    struct { uint64_t argc; const char *argv[34]; } params = {1, {"/app0/eboot.bin", NULL}};
+    if (guest_argv_file) {
+        FILE *list=fopen(guest_argv_file,"rb");
+        static char lines[33][1024];
+        uint64_t n=0;
+        while (list && n<33 && fgets(lines[n],sizeof(lines[n]),list)) {
+            lines[n][strcspn(lines[n],"\r\n")]=0;
+            params.argv[n]=lines[n]; ++n;
+        }
+        if (list) fclose(list);
+        if (n) { params.argc=n; params.argv[n]=NULL; }
+        printf("Guest argv: %s (+%" PRIu64 " arguments)\n",params.argv[0],params.argc-1);
+    }
 #ifdef _WIN32
     typedef void (ABI *Entry)(void *, void (ABI *)(void));
     ((Entry)(image + entry))(&params, guest_exit);

@@ -46,10 +46,27 @@ public:
         return debug_overlay || for_upscaler;
     }
 
-    /// Both cameras and the scene depth of the current frame are known.
+    /// Both cameras and the scene depth of the current frame are known; in VelocityMode the
+    /// velocity pass's camera and the scene depth.
     [[nodiscard]] bool Ready() const noexcept {
-        return current.valid && previous.valid && depth_id;
+        return velocity_mode ? velocity_camera.valid && depth_id
+                             : current.valid && previous.valid && depth_id;
     }
+    /// bbport: BB_VELOCITY_PS=<pixel shader hash,...> (Uncharted): the game's camera velocity
+    /// pass (for its motion blur). Its constants give this frame's view from depth and the
+    /// previous frame's projection (OnVelocityConstants); no scene constants are needed then.
+    /// Its first target holds distortion (heat haze, shockwaves), the second the camera motion
+    /// scaled by the motion blur setting, zero with the default ("Object"): neither is read.
+    [[nodiscard]] bool VelocityMode() const noexcept {
+        return velocity_mode;
+    }
+    [[nodiscard]] bool IsVelocityShader(u64 ps_hash) const noexcept;
+    /// The velocity pass's constant buffer (`dwords` of it).
+    void OnVelocityConstants(const float* data, u32 dwords);
+    /// Records the motion vector pass from the velocity pass's camera into `motion_view`
+    /// (RG16F storage, General), pixels, previous minus current; zero without that camera.
+    void RecordVelocity(vk::CommandBuffer cmdbuf, vk::ImageView depth_view,
+                        vk::ImageView motion_view, u32 width, u32 height);
     [[nodiscard]] VideoCore::ImageId Depth() const noexcept {
         return depth_id;
     }
@@ -105,6 +122,16 @@ private:
     std::array<float, 2> jitter{}, previous_jitter{};
     std::array<u32, 2> render_size{};
     VideoCore::ImageId depth_id{};
+    bool velocity_mode = false;
+    std::vector<u64> velocity_shaders;
+    /// The velocity pass's camera this frame: view position from depth and uv, and the 3x4
+    /// view to previous clip (x, y, w rows).
+    struct VelocityCamera {
+        std::array<float, 12> to_previous_clip{};
+        std::array<float, 4> uv_to_view{}; ///< view x = z (a u + c), view y = z (b v + d)
+        std::array<float, 2> depth_to_z{}; ///< z = y / (depth - x)
+        bool valid = false;
+    } velocity_camera;
 
     vk::UniqueDescriptorSetLayout desc_layout;
     vk::UniquePipelineLayout pipeline_layout;

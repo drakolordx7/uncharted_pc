@@ -8,6 +8,9 @@
 #endif
 #include "bbport_toggles.h"
 #include <algorithm>
+#include <array>
+#include <cstdio>
+#include <cstdlib>
 #include <atomic>
 #include <condition_variable>
 #include <boost/asio/io_context.hpp>
@@ -51,6 +54,7 @@ Frontend::WindowSDL* g_window = nullptr;
 
 namespace Libraries::GnmDriver { void RegisterLib(Core::Loader::SymbolsResolver* sym); }
 namespace Libraries::AvPlayer { void RegisterLib(Core::Loader::SymbolsResolver* sym); }
+namespace Libraries::Videodec2 { void RegisterLib(Core::Loader::SymbolsResolver* sym); }
 namespace Libraries::VideoOut { void RegisterLib(Core::Loader::SymbolsResolver* sym); }
 namespace Libraries::Kernel { void RegisterEventQueue(Core::Loader::SymbolsResolver* sym); }
 
@@ -220,7 +224,16 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
 #endif
     Core::Emulator::FillElfInfo(*config);
     const std::string title = config->title ? config->title : "Bloodborne";
-    const s32 width = config->width, height = config->height;
+    s32 width = config->width, height = config->height;
+    // bbport: BB_WINDOW_SIZE=WxH: the window's size (the game's frame is scaled to it, with
+    // FSR 1 when BB_FSR1=1). Fullscreen uses the desktop's size.
+    if (const char* size = std::getenv("BB_WINDOW_SIZE")) {
+        int w = 0, h = 0;
+        if (std::sscanf(size, "%dx%d", &w, &h) == 2 && w >= 640 && h >= 360 && w <= 7680 && h <= 4320) {
+            width = w;
+            height = h;
+        }
+    }
     g_window_thread = std::thread([title, width, height] {
         Common::SetCurrentThreadName("bb:window");
         auto* window = new Frontend::WindowSDL(width, height, title.c_str());
@@ -233,7 +246,7 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
         while (window->PollEvents()) {
             SDL_Delay(2);
         }
-        LOG_INFO(Frontend, "Window closed by user");
+        std::printf("Window closed (close button, Alt+F4 or system quit request)\n");
         std::fflush(stdout);
         std::_Exit(0);
     });
@@ -256,6 +269,7 @@ extern "C" void bbgpu_register_kernel(void) {
     Core::Loader::SymbolsResolver resolver;
     Libraries::Kernel::RegisterEventQueue(&resolver);
     Libraries::AvPlayer::RegisterLib(&resolver);
+    Libraries::Videodec2::RegisterLib(&resolver);
     bbnet_register();
 }
 
@@ -271,7 +285,44 @@ extern "C" uintptr_t bbgpu_resolve(const char* scoped_nid) {
 }
 
 extern "C" int bbgpu_handle_fault(void* ucontext, void* address) {
-    return Core::Signals::Instance()->DispatchAccessViolation(ucontext, address) ? 1 : 0;
+    // bbport diagnosis: BB_FAULT_TIMES=1 — how long handled faults stop the faulting thread,
+    // as a histogram every 5 s.
+    static const bool fault_times = [] {
+        const char* env = std::getenv("BB_FAULT_TIMES");
+        return env && env[0] == '1';
+    }();
+    if (!fault_times) {
+        return Core::Signals::Instance()->DispatchAccessViolation(ucontext, address) ? 1 : 0;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    const bool handled = Core::Signals::Instance()->DispatchAccessViolation(ucontext, address);
+    const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - start)
+                        .count();
+    static std::array<std::atomic<u32>, 6> buckets{};
+    static std::atomic<s64> longest{0};
+    static std::atomic<s64> window{start.time_since_epoch().count()};
+    if (handled) {
+        buckets[us < 10 ? 0 : us < 100 ? 1 : us < 1000 ? 2 : us < 5000 ? 3 : us < 20000 ? 4 : 5]
+            .fetch_add(1, std::memory_order_relaxed);
+        static std::atomic<u32> slow_reports{0};
+        if (us >= 1000 && slow_reports.fetch_add(1, std::memory_order_relaxed) < 300) {
+            std::printf("Slow fault: %lld us at %p\n", static_cast<long long>(us), address);
+        }
+        s64 seen = longest.load(std::memory_order_relaxed);
+        while (us > seen && !longest.compare_exchange_weak(seen, us)) {
+        }
+    }
+    const s64 now = std::chrono::steady_clock::now().time_since_epoch().count();
+    s64 last = window.load(std::memory_order_relaxed);
+    if (now - last >= 5'000'000'000 && window.compare_exchange_strong(last, now)) {
+        std::printf("Fault times: <10 us %u, <100 us %u, <1 ms %u, <5 ms %u, <20 ms %u, 20+ ms %u; "
+                    "longest %lld us\n",
+                    buckets[0].exchange(0), buckets[1].exchange(0), buckets[2].exchange(0),
+                    buckets[3].exchange(0), buckets[4].exchange(0), buckets[5].exchange(0),
+                    static_cast<long long>(longest.exchange(0)));
+    }
+    return handled ? 1 : 0;
 }
 
 extern "C" unsigned bbgpu_symbol_count(void) {

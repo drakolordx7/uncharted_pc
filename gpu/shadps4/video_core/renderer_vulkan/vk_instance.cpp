@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <boost/container/static_vector.hpp>
 #include <fmt/format.h>
 #include <fmt/ranges.h>
@@ -18,6 +19,12 @@
 #include <vk_mem_alloc.h>
 
 namespace Vulkan {
+
+bool g_device_fault_ext = false;
+// bbport diagnosis: BB_GPU_CHECKPOINTS=1 (VK_NV_device_diagnostic_checkpoints): the queue whose
+// last checkpoints a GPU crash report prints.
+bool g_gpu_checkpoints = false;
+VkQueue g_crash_queue = VK_NULL_HANDLE;
 
 namespace {
 
@@ -107,6 +114,9 @@ Instance::Instance(const Frontend::WindowSystemInfo& window_info, s32 physical_d
       physical_devices{EnumeratePhysicalDevices(instance)} {
     if (enable_validation) {
         debug_callback = CreateDebugCallback(*instance);
+    }
+    if (AddressReportEnabled()) {
+        address_report_callback = CreateAddressReportCallback(*instance);
     }
     const std::size_t num_physical_devices = static_cast<u16>(physical_devices.size());
     ASSERT_MSG(num_physical_devices > 0, "No physical devices found");
@@ -372,6 +382,13 @@ bool Instance::CreateDevice() {
     }
     const bool calibrated_timestamps =
         TRACY_GPU_ENABLED ? add_extension(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) : false;
+    // bbport: what the GPU touched when the device is lost (reported by vk_semaphore.cpp).
+    g_device_fault_ext = add_extension(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+    if (const char* env = std::getenv("BB_GPU_CHECKPOINTS"); env && env[0] == '1') {
+        g_gpu_checkpoints = add_extension(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+    }
+    const bool address_report =
+        AddressReportEnabled() && add_extension(VK_EXT_DEVICE_ADDRESS_BINDING_REPORT_EXTENSION_NAME);
 
     const auto family_properties = physical_device.getQueueFamilyProperties();
     if (family_properties.empty()) {
@@ -393,11 +410,33 @@ bool Instance::CreateDevice() {
         return false;
     }
 
-    static constexpr std::array queue_priorities = {1.0f};
-    const vk::DeviceQueueCreateInfo queue_info = {
-        .queueFamilyIndex = queue_family_index,
-        .queueCount = static_cast<u32>(queue_priorities.size()),
-        .pQueuePriorities = queue_priorities.data(),
+    // bbport: a side queue (BufferCache reads GPU data back there, past the work queued for
+    // graphics): a transfer-only family, a copy engine that runs beside graphics work; else a
+    // second queue of the graphics family.
+    static constexpr std::array queue_priorities = {1.0f, 1.0f};
+    side_queue_family_index = queue_family_index;
+    for (u32 i = 0; i < family_properties.size(); ++i) {
+        const auto flags =
+            family_properties[i].queueFlags & ~vk::QueueFlags{vk::QueueFlagBits::eSparseBinding};
+        if (flags == vk::QueueFlagBits::eTransfer && family_properties[i].queueCount > 0) {
+            side_queue_family_index = i;
+            break;
+        }
+    }
+    const bool side_family = side_queue_family_index != queue_family_index;
+    const u32 graphics_queues =
+        side_family ? 1u : std::min<u32>(2u, family_properties[queue_family_index].queueCount);
+    const std::array queue_infos = {
+        vk::DeviceQueueCreateInfo{
+            .queueFamilyIndex = queue_family_index,
+            .queueCount = graphics_queues,
+            .pQueuePriorities = queue_priorities.data(),
+        },
+        vk::DeviceQueueCreateInfo{
+            .queueFamilyIndex = side_queue_family_index,
+            .queueCount = 1,
+            .pQueuePriorities = queue_priorities.data(),
+        },
     };
 
     const auto vk11_features = feature_chain.get<vk::PhysicalDeviceVulkan11Features>();
@@ -417,8 +456,8 @@ bool Instance::CreateDevice() {
     }
     vk::StructureChain device_chain = {
         vk::DeviceCreateInfo{
-            .queueCreateInfoCount = 1u,
-            .pQueueCreateInfos = &queue_info,
+            .queueCreateInfoCount = side_family ? 2u : 1u,
+            .pQueueCreateInfos = queue_infos.data(),
             .enabledExtensionCount = static_cast<u32>(enabled_extensions.size()),
             .ppEnabledExtensionNames = enabled_extensions.data(),
         },
@@ -568,7 +607,19 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceShaderMixedFloatDotProductFeaturesVALVE{
             .shaderMixedFloatDotProductFloat16AccFloat32 = true,
         },
+        vk::PhysicalDeviceFaultFeaturesEXT{
+            .deviceFault = true,
+        },
+        vk::PhysicalDeviceAddressBindingReportFeaturesEXT{
+            .reportAddressBinding = true,
+        },
     };
+    if (!g_device_fault_ext) {
+        device_chain.unlink<vk::PhysicalDeviceFaultFeaturesEXT>();
+    }
+    if (!address_report) {
+        device_chain.unlink<vk::PhysicalDeviceAddressBindingReportFeaturesEXT>();
+    }
 
     if (!custom_border_color) {
         device_chain.unlink<vk::PhysicalDeviceCustomBorderColorFeaturesEXT>();
@@ -640,6 +691,12 @@ bool Instance::CreateDevice() {
 
     graphics_queue = device->getQueue(queue_family_index, 0);
     present_queue = device->getQueue(queue_family_index, 0);
+    g_crash_queue = graphics_queue;
+    if (side_queue_family_index != queue_family_index) {
+        side_queue = device->getQueue(side_queue_family_index, 0);
+    } else if (physical_device.getQueueFamilyProperties()[queue_family_index].queueCount > 1) {
+        side_queue = device->getQueue(queue_family_index, 1);
+    }
 
     if (calibrated_timestamps) {
         const auto [time_domains_result, time_domains] =

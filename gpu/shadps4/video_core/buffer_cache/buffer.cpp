@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <cstdio>
+#include <cstring>
+#include <mutex>
 #include <numeric>
 
 #include "common/alignment.h"
@@ -63,6 +67,66 @@ std::string_view BufferTypeName(MemoryType type) {
     }
 }
 
+namespace {
+// bbport: every buffer with a device address, alive or destroyed (the last 8192), so a GPU
+// crash can name what lived at the faulting address.
+struct BdaRecord {
+    u64 address, size;
+    bool alive;
+    char name[40];
+};
+std::mutex bda_mutex;
+std::vector<BdaRecord> bda_records;
+
+void RecordBda(u64 address, u64 size) {
+    std::scoped_lock lk{bda_mutex};
+    if (bda_records.size() >= 8192) {
+        bda_records.erase(bda_records.begin(), bda_records.begin() + 1024);
+    }
+    bda_records.push_back({address, size, true, {}});
+}
+
+void ForgetBda(u64 address) {
+    std::scoped_lock lk{bda_mutex};
+    for (auto it = bda_records.rbegin(); it != bda_records.rend(); ++it) {
+        if (it->address == address && it->alive) {
+            it->alive = false;
+            return;
+        }
+    }
+}
+} // namespace
+
+void NameBda(u64 address, std::string_view name) {
+    std::scoped_lock lk{bda_mutex};
+    for (auto it = bda_records.rbegin(); it != bda_records.rend(); ++it) {
+        if (it->address == address) {
+            const size_t n = std::min(name.size(), sizeof(it->name) - 1);
+            std::memcpy(it->name, name.data(), n);
+            it->name[n] = 0;
+            return;
+        }
+    }
+}
+
+void DumpBuffersNear(u64 address) {
+    std::scoped_lock lk{bda_mutex};
+    std::printf("GPU crash: buffers near 0x%llx (of %zu recorded):\n",
+                static_cast<unsigned long long>(address), bda_records.size());
+    for (const auto& r : bda_records) {
+        const bool inside = address >= r.address && address < r.address + r.size;
+        const u64 distance = address >= r.address + r.size ? address - (r.address + r.size)
+                             : address < r.address     ? r.address - address
+                                                       : 0;
+        if (inside || distance < (64ull << 20)) {
+            std::printf("GPU crash:   %s 0x%llx-0x%llx %s%s\n", inside ? "HIT " : "near",
+                        static_cast<unsigned long long>(r.address),
+                        static_cast<unsigned long long>(r.address + r.size),
+                        r.alive ? "alive" : "DESTROYED", r.name[0] ? r.name : "");
+        }
+    }
+}
+
 UniqueBuffer::UniqueBuffer(vk::Device device_, VmaAllocator allocator_)
     : device{device_}, allocator{allocator_} {}
 
@@ -71,6 +135,9 @@ UniqueBuffer::~UniqueBuffer() {
 }
 
 void UniqueBuffer::Destroy() {
+    if (bda_addr) {
+        ForgetBda(bda_addr);
+    }
     if (allocation) {
         vmaDestroyBuffer(allocator, buffer, allocation);
     } else if (buffer) {
@@ -117,6 +184,7 @@ void UniqueBuffer::Create(vk::BufferCreateInfo& buffer_ci, MemoryType mem_type,
         auto bda_result = device.getBufferAddress(bda_info);
         ASSERT_MSG(bda_result != 0, "Failed to get buffer device address");
         bda_addr = bda_result;
+        RecordBda(bda_addr, buffer_ci.size);
     }
 }
 
@@ -130,10 +198,21 @@ Buffer::Buffer(const Vulkan::Instance& instance, VAddr cpu_addr_, u64 size_bytes
         .usage = AllFlags,
         .sharingMode = vk::SharingMode::eExclusive,
     };
+    // bbport: the arenas are read by the side queue's family too (BufferCache read-backs).
+    const std::array families = {instance.GetGraphicsQueueFamilyIndex(),
+                                 instance.GetSideQueueFamilyIndex()};
+    if (mem_type == MemoryType::Sparse && families[0] != families[1]) {
+        buffer_ci.sharingMode = vk::SharingMode::eConcurrent;
+        buffer_ci.queueFamilyIndexCount = static_cast<u32>(families.size());
+        buffer_ci.pQueueFamilyIndices = families.data();
+    }
     VmaAllocationInfo alloc_info{};
     buffer.Create(buffer_ci, mem_type, &alloc_info);
 
     const auto device = instance.GetDevice();
+    if (buffer.bda_addr) {
+        NameBda(buffer.bda_addr, !debug_name.empty() ? debug_name : BufferTypeName(mem_type));
+    }
     if (!debug_name.empty()) {
         Vulkan::SetObjectName(device, Handle(), debug_name);
     } else {

@@ -5,6 +5,7 @@
 
 #include <cstdlib>
 
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <coroutine>
@@ -130,6 +131,12 @@ public:
         rasterizer = rasterizer_;
     }
 
+    /// bbport: true on the command processor thread (work sent from there must not wait for
+    /// itself).
+    static bool OnProcessorThread() noexcept {
+        return on_processor_thread;
+    }
+
     template <bool wait_done = false>
     void SendCommand(auto&& func) {
         if constexpr (wait_done) {
@@ -235,6 +242,10 @@ private:
         std::vector<u32> dcb_buffer;
         std::vector<u32> ccb_buffer;
         std::queue<Task::Handle> submits{};
+        /// bbport: when each queued submission arrived, and whether the first one has started
+        /// (BB_SUBMIT_DELAY_US, liverpool.cpp).
+        std::queue<std::chrono::steady_clock::time_point> submit_times{};
+        bool front_started{};
         ComputeProgram cs_state{};
     };
     std::array<GpuQueue, NumTotalQueues> mapped_queues{};
@@ -276,6 +287,7 @@ private:
     std::mutex submit_mutex;
     std::condition_variable_any submit_cv;
     std::queue<Common::UniqueFunction<void>> command_queue{};
+    static inline thread_local bool on_processor_thread = false;
     std::thread::id gpu_id;
 #if defined(__linux__) || defined(_WIN32)
     u32 gpu_tid{};
