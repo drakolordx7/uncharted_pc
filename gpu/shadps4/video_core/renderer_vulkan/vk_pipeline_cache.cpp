@@ -565,6 +565,7 @@ void PipelineCache::EnsureWorkerPipeline(PipelineSelection& worker_sel) {
     }
     const auto pipeline_hash = std::hash<GraphicsPipelineKey>{}(key);
     const u64 claim_id = pipeline_hash ^ PipelineClaimTag;
+    BbThreads::ScopedNormalPriority boost; // the GPU thread may wait for this claim
     AcquireClaim(claim_id);
     {
         std::shared_lock lock{pipelines_mutex};
