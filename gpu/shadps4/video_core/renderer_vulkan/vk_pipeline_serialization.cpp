@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <shared_mutex>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -246,6 +247,11 @@ void PipelineCache::StartWarmUp() {
     if (!EmulatorSettings.IsPipelineCacheEnabled()) {
         return;
     }
+    // BB_WARM_MODE: 0 = no preload, 1 = all (default), 2 = everything but the motion shaders.
+    if (const char* mode = std::getenv("BB_WARM_MODE"); mode && mode[0] == '0') {
+        warm_done.store(true, std::memory_order_release);
+        return;
+    }
     Storage::DataBase::Instance().Open();
     warm_done.store(false, std::memory_order_release);
     warm_thread = std::thread([this] { WarmUpThread(); });
@@ -305,8 +311,12 @@ void PipelineCache::WarmUpThread() {
         return;
     }
 
-    const u32 threads =
-        std::clamp<u32>(BbThreads::Available() > 2 ? BbThreads::Available() - 2 : 1, 1, 16);
+    const char* warm_mode = std::getenv("BB_WARM_MODE");
+    const bool skip_motion = warm_mode && warm_mode[0] == '2';
+    u32 threads = std::clamp<u32>(BbThreads::Available() > 2 ? BbThreads::Available() - 2 : 1, 1, 16);
+    if (const char* env = std::getenv("BB_WARM_THREADS")) { // 1 = the old serial load, for timing
+        threads = std::clamp<u32>(static_cast<u32>(std::atoi(env)), 1, 64);
+    }
     const auto device = instance.GetDevice();
 
     // 1. The stored pipeline keys.
@@ -385,7 +395,7 @@ void PipelineCache::WarmUpThread() {
         const auto& info = stage.program->info;
         if (info.hw_stage == Shader::HwStage::Vertex &&
             stage.spec.runtime_info.hw.vs.motion_vectors &&
-            Shader::MotionVectors::positions_address == 0) {
+            (Shader::MotionVectors::positions_address == 0 || skip_motion)) {
             return;
         }
         std::vector<u32> spv{};
@@ -442,11 +452,21 @@ void PipelineCache::WarmUpThread() {
     }
     const double t_programs = elapsed_ms();
 
-    // 4. The pipelines themselves, on all threads.
+    // 4. The programs are final: selection may start. (A permutation the game needs that is
+    // not stored is appended behind the stored ones, as the reserved slots promise.)
     std::array<Shader::RuntimeInfo, MaxShaderStages> no_runtime_infos{};
     ParallelFor(owners.size(), threads, [&](size_t i) {
         owners[i]->info_template = std::make_unique<Shader::Info>(owners[i]->info);
     });
+    warm_done.store(true, std::memory_order_release);
+    warm_done.notify_all();
+    const double t_ready = elapsed_ms();
+
+    // 5. The pipelines themselves, on all threads, while the game already runs: each goes into
+    // the map as it is done, unless the game built the same one first. They are built from
+    // the programs' template Infos (the game refreshes the programs' own per draw) and then
+    // pointed at the programs' Infos.
+    std::atomic<u32> num_pipelines{0};
     ParallelFor(stored.size(), threads, [&](size_t i) {
         auto& entry = stored[i];
         if (!entry.parsed) {
@@ -457,12 +477,22 @@ void PipelineCache::WarmUpThread() {
             if (it == by_hash.end() || !it->second->ready) {
                 return;
             }
-            entry.cpipeline = std::make_unique<ComputePipeline>(
+            {
+                std::shared_lock lock{pipelines_mutex};
+                if (compute_pipelines.contains(entry.ckey)) {
+                    return;
+                }
+            }
+            auto pipeline = std::make_unique<ComputePipeline>(
                 instance, scheduler, desc_heap, profile, *pipeline_cache, entry.ckey,
-                it->second->owner->info, it->second->module, entry.csdata, true);
+                *it->second->owner->info_template, it->second->module, entry.csdata, true);
+            pipeline->RebindStage(&it->second->owner->info);
+            std::unique_lock lock{pipelines_mutex};
+            num_pipelines += compute_pipelines.try_emplace(entry.ckey, std::move(pipeline)).second;
             return;
         }
         std::array<const Shader::Info*, MaxShaderStages> infos{};
+        std::array<const Shader::Info*, MaxShaderStages> program_infos{};
         std::array<vk::ShaderModule, MaxShaderStages> modules{};
         std::optional<Shader::Gcn::FetchShaderData> fetch_shader;
         for (u32 stage = 0; stage < MaxShaderStages; ++stage) {
@@ -474,43 +504,50 @@ void PipelineCache::WarmUpThread() {
             if (it == by_hash.end() || !it->second->ready) {
                 return;
             }
-            infos[stage] = &it->second->owner->info;
+            infos[stage] = it->second->owner->info_template.get();
+            program_infos[stage] = &it->second->owner->info;
             modules[stage] = it->second->module;
             if (it->second->fetch_shader) {
                 fetch_shader = it->second->fetch_shader;
             }
         }
-        entry.gpipeline = std::make_unique<GraphicsPipeline>(
+        // The game may need (and build) the same pipeline meanwhile: build it only once.
+        const u64 claim_id = std::hash<GraphicsPipelineKey>{}(entry.gkey) ^ PipelineClaimTag;
+        AcquireClaim(claim_id);
+        {
+            std::shared_lock lock{pipelines_mutex};
+            if (graphics_pipelines.contains(entry.gkey)) {
+                ReleaseClaim(claim_id);
+                return;
+            }
+        }
+        auto pipeline = std::make_unique<GraphicsPipeline>(
             instance, scheduler, desc_heap, profile, entry.gkey, *pipeline_cache, infos,
             no_runtime_infos, fetch_shader, modules, entry.gsdata, true);
-    });
-    u32 num_pipelines{};
-    for (auto& entry : stored) {
-        if (entry.gpipeline) {
+        pipeline->RebindStages(program_infos);
+        {
+            std::unique_lock lock{pipelines_mutex};
             num_pipelines +=
-                graphics_pipelines.try_emplace(entry.gkey, std::move(entry.gpipeline)).second;
-        } else if (entry.cpipeline) {
-            num_pipelines +=
-                compute_pipelines.try_emplace(entry.ckey, std::move(entry.cpipeline)).second;
+                graphics_pipelines.try_emplace(entry.gkey, std::move(pipeline)).second;
         }
-    }
+        ReleaseClaim(claim_id);
+    });
     const u32 num_total_pipelines = static_cast<u32>(stored.size());
-    LOG_INFO(Render, "Preloaded {} pipelines", num_pipelines);
-    if (num_total_pipelines > num_pipelines) {
+    LOG_INFO(Render, "Preloaded {} pipelines", num_pipelines.load());
+    if (num_total_pipelines > num_pipelines.load()) {
         LOG_WARNING(Render, "{} stale pipelines were found. Consider re-generating the cache",
-                    num_total_pipelines - num_pipelines);
+                    num_total_pipelines - num_pipelines.load());
     }
     std::printf("Pipeline cache: preloaded %u of %u pipelines (%u shaders, %u threads) in %.0f ms "
-                "(keys %.0f, shaders %.0f, programs %.0f, pipelines %.0f)\n",
-                num_pipelines, num_total_pipelines, u32(stages.size()), threads, elapsed_ms(),
-                t_keys, t_shaders - t_keys, t_programs - t_shaders, elapsed_ms() - t_programs);
+                "(keys %.0f, shaders %.0f, programs %.0f, pipelines %.0f); the game could select from %.0f ms\n",
+                num_pipelines.load(), num_total_pipelines, u32(stages.size()), threads, elapsed_ms(),
+                t_keys, t_shaders - t_keys, t_programs - t_shaders, elapsed_ms() - t_programs,
+                t_ready);
     db.FinishPreload();
     // The driver's cache gets the entries this preload had to compile.
     if (driver_cache_loaded_size != DriverCacheSize()) {
         driver_cache_dirty.fetch_add(1);
     }
-    warm_done.store(true, std::memory_order_release);
-    warm_done.notify_all();
 }
 
 void PipelineCache::Sync() {

@@ -17,6 +17,11 @@
 #endif
 
 namespace BbThreads {
+/// Set on the helper threads (draw preparation, preload): they are not the GPU thread.
+inline thread_local bool background_thread = false;
+inline bool IsBackground() {
+    return background_thread;
+}
 #ifdef _WIN32
 /// Hardware threads available to the process (its affinity mask).
 inline unsigned Available() {
@@ -29,11 +34,13 @@ inline unsigned Available() {
 
 /// The calling thread only runs when cores are otherwise idle (lowest Windows priority).
 inline void MakeBackground() {
+    background_thread = true;
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_IDLE);
 }
 
 /// The calling thread yields to the game's own threads but is not starved by them.
 inline void MakeBelowNormal() {
+    background_thread = true;
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
 }
 
@@ -62,6 +69,7 @@ inline unsigned Available() {
 
 /// The calling thread only runs on otherwise idle cores (falls back to the lowest nice level).
 inline void MakeBackground() {
+    background_thread = true;
     sched_param param{};
     if (sched_setscheduler(0, SCHED_IDLE, &param) != 0) {
         setpriority(PRIO_PROCESS, static_cast<id_t>(gettid()), 19);
@@ -70,6 +78,7 @@ inline void MakeBackground() {
 
 /// The calling thread yields to the game's own threads but is not starved by them.
 inline void MakeBelowNormal() {
+    background_thread = true;
     setpriority(PRIO_PROCESS, static_cast<id_t>(gettid()), 5);
 }
 

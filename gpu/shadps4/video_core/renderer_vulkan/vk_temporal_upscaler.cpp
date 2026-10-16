@@ -6,6 +6,7 @@
 #include "video_core/renderer_vulkan/ui_composition.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -407,6 +408,7 @@ bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
         return true;
     }
     const auto device = instance.GetDevice();
+    const auto resources_start = std::chrono::steady_clock::now();
     // FSR 4 owns no portable FSR 3 context, but its images can still be in flight.
     scheduler.Finish();
     resources_ready = false;
@@ -555,8 +557,11 @@ bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
     FfxVkPortableMemoryUsage usage{};
     usage.structSize = sizeof(usage);
     ffxVkPortableUpscaleContextGetMemoryUsage(context, &usage);
-    std::printf("Upscaler: FSR 3 context %ux%u -> %ux%u (%s), %.1f MB\n", w, h, ow, oh,
-                hdr ? "HDR scene color" : "tonemapped frame", usage.totalUsageInBytes / 1e6);
+    std::printf("Upscaler: FSR 3 context %ux%u -> %ux%u (%s), %.1f MB, %.0f ms\n", w, h, ow, oh,
+                hdr ? "HDR scene color" : "tonemapped frame", usage.totalUsageInBytes / 1e6,
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                          resources_start)
+                    .count());
     return true;
 }
 
