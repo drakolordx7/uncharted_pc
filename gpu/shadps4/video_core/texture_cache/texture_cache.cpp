@@ -1030,16 +1030,22 @@ void TextureCache::GarbageCollectImages() {
         }
     }
     if (instance.CanReportMemoryUsage()) {
-        total_used_memory = instance.GetDeviceMemoryUsage();
+        u64 budget_now = 0;
+        instance.QueryMemory(total_used_memory, budget_now);
+        // A card (or what other programs leave of it) under 5.5 GB works from its live budget.
+        tight_budget = !Vulkan::Vram::Legacy() && !instance.IsIntegrated() && budget_now != 0 &&
+                       budget_now < 5632_MB;
         // bbport: images deleted but not yet destroyed (the GPU may still read them) are already
         // gone as far as the decisions below go; counting them evicted more and more.
-        const u64 pending = pending_free_bytes.load(std::memory_order_relaxed);
+        const u64 pending =
+            tight_budget ? pending_free_bytes.load(std::memory_order_relaxed) : 0;
         total_used_memory = total_used_memory > pending ? total_used_memory - pending : 0;
         if (tight_budget) {
             // Small cards: marks relative to what everything else (buffer arenas, upscaler,
             // swapchain) leaves for images, under the driver's current budget.
-            const u64 budget = instance.GetDeviceMemoryBudgetNow();
-            const u64 images = std::min(Vulkan::Vram::image_bytes.load(std::memory_order_relaxed),
+            const u64 budget = budget_now;
+            const u64 live_images = Vulkan::Vram::image_bytes.load(std::memory_order_relaxed);
+            const u64 images = std::min(live_images > pending ? live_images - pending : 0,
                                         total_used_memory);
             const u64 others = total_used_memory - images;
             const u64 limit = budget / 100 * 90;
@@ -1050,9 +1056,6 @@ void TextureCache::GarbageCollectImages() {
             critical_gc_memory = others + room;
             if (Vulkan::Vram::urgent.exchange(false, std::memory_order_relaxed)) {
                 // An allocation just went over the budget: this pass is a critical one.
-                trigger_gc_memory = 0;
-                pressure_gc_memory = 0;
-                critical_gc_memory = 0;
                 urgent_pass = true;
             }
         }
@@ -1075,7 +1078,7 @@ void TextureCache::GarbageCollectImages() {
             }
         }
     }
-    if (total_used_memory < trigger_gc_memory) {
+    if (total_used_memory < trigger_gc_memory && !urgent_pass) {
         return;
     }
     std::scoped_lock lock{mutex};
@@ -1093,6 +1096,10 @@ void TextureCache::GarbageCollectImages() {
             // Pressure widens the set of eviction candidates here (it narrowed it).
             ticks_to_destroy = urgent_pass ? 2 : aggresive ? 4 : pressured ? 8 : 16;
             num_deletions = aggresive ? 80 : pressured ? 40 : 10;
+            if (urgent_pass) {
+                pressured = true;
+                num_deletions = std::max<size_t>(num_deletions, 40);
+            }
         }
         ticks_to_destroy = std::min(ticks_to_destroy, gc_tick);
     };

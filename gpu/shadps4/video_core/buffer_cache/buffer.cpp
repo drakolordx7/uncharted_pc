@@ -250,7 +250,7 @@ Buffer::Buffer(const Vulkan::Instance& instance, VAddr cpu_addr_, u64 size_bytes
     if (Vulkan::Vram::Log() && size_bytes >= (8u << 20)) {
         std::printf("VRAM: buffer '%s' %s %llu MiB (vram counted %llu MiB)\n",
                     debug_name.empty() ? "?" : std::string(debug_name).c_str(),
-                    BufferTypeName(mem_type), (unsigned long long)(size_bytes >> 20),
+                    std::string(BufferTypeName(mem_type)).c_str(), (unsigned long long)(size_bytes >> 20),
                     (unsigned long long)(buffer.vram_bytes >> 20));
     }
     if (mem_type != MemoryType::Sparse) {

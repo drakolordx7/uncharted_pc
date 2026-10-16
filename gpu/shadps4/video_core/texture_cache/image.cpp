@@ -136,7 +136,7 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
         // memory out; on a card that really has no room this still fails).
         Vulkan::Vram::failed_allocs.fetch_add(1, std::memory_order_relaxed);
         Vulkan::Vram::urgent.store(true, std::memory_order_relaxed);
-        if (Vulkan::Vram::Allows(estimate)) {
+        if (!Vulkan::Vram::Strict() || Vulkan::Vram::Allows(estimate)) {
             VmaAllocationCreateInfo relaxed = alloc_ci;
             relaxed.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
             result = vmaCreateImage(allocator, &image_ci_unsafe, &relaxed, &unsafe_image,
