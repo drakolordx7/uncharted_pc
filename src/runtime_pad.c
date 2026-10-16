@@ -243,8 +243,8 @@ static int camera_take(int queue, float *dx, float *dy) {
     return 1;
 }
 /* The follow camera's collision/position update runs once a frame with the camera object (U1
- * CUSA02343 1.00 and others with the same code; U2 and U3 have the same function, found by its
- * instructions): its horizontal direction (x, y, z) at +0x1310 (U2 +0x9ec0, U3 +0x78c0) and the
+ * 1.00 and 1.02; U2 and U3 have the same function, in code compiled differently in each build, so the
+ * hooks are found by instruction patterns, see guest_callbacks): its horizontal direction (x, y, z) at +0x1310 (U2 +0x9ec0, U3 +0x78c0) and the
  * vertical arc position at +0x12bc (U2 +0x9e60, U3 +0x7874: the right stick up lowers it). */
 static float wrap_degrees(float a) {
     while (a>180.0f) a-=360.0f;
@@ -682,10 +682,10 @@ static void sample_host(PadData *d) {
     if (rx) d->right_x=(uint8_t)(rx<0 ? 0 : 255);
     if (ry) d->right_y=(uint8_t)(ry<0 ? 0 : 255);
     /* Where the game's camera or joypad state takes the mouse directly (their callbacks ran in the
-     * last 100 ms), the motion goes there. U2 and U3 have no joypad callback: the follow camera turns
-     * with the mouse (vertically too where its arc is known), with the right stick held a little the
-     * same way (follow_push); aiming, other cameras and a follow camera that keeps no turns get the
-     * mouse as a right stick here. */
+     * last 100 ms), the motion goes there: the follow camera turns with the mouse (vertically too where
+     * its arc is known), with the right stick held a little the same way (follow_push); aiming, other
+     * cameras and a follow camera that keeps no turns get the mouse as a right stick value in the joypad
+     * state (all three games). Where a build's hooks were not found, the mouse is a right stick byte here. */
     pthread_mutex_lock(&camera_lock);
     const int following=camera_hook_us && now-camera_hook_us<100000;
     const int joypad=sticks_hook_us && now-sticks_hook_us<100000;
@@ -868,7 +868,7 @@ static void sample(PadData *d) {
     if (injected.buttons & BTN_R2) d->r2=255;
     uint8_t *axes[4]={&d->left_x,&d->left_y,&d->right_x,&d->right_y};
     for (int i=0;i<4;++i) if (injected.stick[i]>=0) *axes[i]=(uint8_t)injected.stick[i];
-    /* U2, U3 (no joypad callback): the right stick held a little while the mouse turns the follow
+    /* Builds without a joypad callback: the right stick held a little while the mouse turns the follow
      * camera's direction (follow_push, see follow_camera), unless the stick is in use */
     const uint64_t now=now_us();
     if (follow_push!=0.0f && camera_hook_us && now-camera_hook_us<100000 &&
