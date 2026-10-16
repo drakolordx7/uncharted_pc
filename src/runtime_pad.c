@@ -720,9 +720,9 @@ static void sample_host(PadData *d) {
 /* BB_PAD_FILE=<file>: scripted input for automated runs. The file holds whitespace-separated
  * tokens, re-read when it changes: button names (cross circle square triangle l1 r1 l2 r2 l3 r3
  * options touchpad touchpad_left touchpad_right up down left right) are held while listed;
- * touchpad defaults to a left-side click; lx= ly= rx= ry= (0..255) override
+ * touchpad defaults to a left-side click; touch_ul touch_ur touch=X,Y click with the finger at that point; lx= ly= rx= ry= (0..255) override
  * the sticks. An empty file releases everything. */
-static struct { uint32_t buttons; int stick[4]; int touch_side; float mouse[2]; } injected={0,{-1,-1,-1,-1},-1,{0,0}};
+static struct { uint32_t buttons; int stick[4]; int touch_side; float mouse[2]; int touch_x, touch_y; } injected={0,{-1,-1,-1,-1},-1,{0,0},-1,-1};
 static int replay_armed;      /* 1 while a BB_PAD_REPLAY recording plays, 2 once it ended */
 static uint64_t replay_start; /* 0: (re)start at the next sample */
 static void read_inject(void) {
@@ -753,6 +753,7 @@ static void read_inject(void) {
     static const char *sticks[]={"lx=","ly=","rx=","ry="};
     injected.buttons=0;
     injected.touch_side=-1;
+    injected.touch_x=injected.touch_y=-1;
     for (int i=0;i<4;++i) injected.stick[i]=-1;
     injected.mouse[0]=injected.mouse[1]=0.0f;
     char token[64];
@@ -762,6 +763,10 @@ static void read_inject(void) {
             injected.buttons|=BTN_TOUCHPAD;
             injected.touch_side=!strcmp(token,"touchpad_right");
         }
+        /* touch=X,Y (0..1919, 0..942) / touch_ul / touch_ur: a click with the finger there (the games read the pad's zones: upper left / right) */
+        if (!strcmp(token,"touch_ul") || !strcmp(token,"touch_ur")) { injected.touch_x=!strcmp(token,"touch_ur") ? 1440 : 480; injected.touch_y=100; }
+        if (!strncmp(token,"touch=",6)) { int x,y; if (sscanf(token+6,"%d,%d",&x,&y)==2) { injected.touch_x=x; injected.touch_y=y; } }
+        if (injected.touch_x>=0) injected.buttons|=BTN_TOUCHPAD;
         for (size_t i=0;i<sizeof(names)/sizeof(*names);++i) if (!strcmp(token,names[i].name)) injected.buttons|=names[i].ps;
         for (int i=0;i<4;++i) if (!strncmp(token,sticks[i],3)) { int v=atoi(token+3); injected.stick[i]=v<0 ? 0 : v>255 ? 255 : v; }
         if (!strncmp(token,"mx=",3)) injected.mouse[0]=(float)atof(token+3); /* mouse motion, pixels/s */
@@ -862,7 +867,10 @@ static void sample(PadData *d) {
     replay_sample(d);
     d->buttons|=injected.buttons;
     aim_held=(d->buttons & BTN_L2)!=0;
-    if (injected.touch_side>=0) touch_click(d,injected.touch_side);
+    if (injected.touch_x>=0) {
+        d->buttons|=BTN_TOUCHPAD; d->touch_count=1;
+        d->touches[0]=(PadTouch){.x=(uint16_t)injected.touch_x,.y=(uint16_t)injected.touch_y,.id=0};
+    } else if (injected.touch_side>=0) touch_click(d,injected.touch_side);
     else if ((d->buttons & BTN_TOUCHPAD) && !d->touch_count) touch_click(d,0);
     if (injected.buttons & BTN_L2) d->l2=255;
     if (injected.buttons & BTN_R2) d->r2=255;
