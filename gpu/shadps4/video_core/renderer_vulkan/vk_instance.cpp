@@ -743,6 +743,19 @@ void Instance::CreateAllocator() {
         .vkGetDeviceProcAddr = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr,
     };
 
+    // bbport: VMA takes device memory in 256 MiB blocks on big heaps: on a card of 6 GB or less
+    // that left ~180 MiB of slack with 1.3 GB allocated. 64 MiB blocks (dedicated allocations
+    // for anything big) cost nothing noticeable.
+    u64 local_heap = ~u64{0};
+    for (u32 i = 0; i < memory_properties.memoryHeapCount; ++i) {
+        if (memory_properties.memoryHeaps[i].flags & vk::MemoryHeapFlagBits::eDeviceLocal) {
+            local_heap = std::min<u64>(local_heap, memory_properties.memoryHeaps[i].size);
+        }
+    }
+    if (const u64 test_limit = Vram::TestLimit()) {
+        local_heap = std::min(local_heap, test_limit);
+    }
+    const bool small_card = !IsIntegrated() && !Vram::Legacy() && local_heap <= 6_GB;
     const VmaAllocatorCreateInfo allocator_info = {
         // bbport: with VK_EXT_memory_budget VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT (images,
         // buffers) compares with the driver's budget, which counts the buffer arenas and the
@@ -751,6 +764,7 @@ void Instance::CreateAllocator() {
                  (supports_memory_budget ? VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT : 0u),
         .physicalDevice = physical_device,
         .device = *device,
+        .preferredLargeHeapBlockSize = small_card ? 64_MB : 0,
         .pVulkanFunctions = &functions,
         .instance = *instance,
         .vulkanApiVersion = TargetVulkanApiVersion,
@@ -924,6 +938,21 @@ u64 Instance::GetDeviceMemoryBudgetNow() const {
     return total_budget;
 }
 
+void Instance::QueryMemory(u64& usage, u64& budget) const {
+    vk::PhysicalDeviceMemoryBudgetPropertiesEXT memory_budget_props{};
+    vk::PhysicalDeviceMemoryProperties2 props = {.pNext = &memory_budget_props};
+    physical_device.getMemoryProperties2(&props);
+    usage = 0;
+    budget = 0;
+    for (const size_t heap : valid_heaps) {
+        usage += memory_budget_props.heapUsage[heap];
+        budget += memory_budget_props.heapBudget[heap];
+    }
+    if (const u64 test_limit = Vram::TestLimit(); test_limit && !IsIntegrated()) {
+        budget = std::min<u64>(budget, test_limit / 10 * 9);
+    }
+}
+
 bool Instance::VramAllows(u64 bytes) const {
     const u64 limit = Vram::TestLimit();
     if (!limit || !Vram::TestHard() || IsIntegrated()) {
@@ -951,11 +980,12 @@ void Instance::ReportMemory(const char* why) const {
         vma_count += vma[heap].statistics.allocationCount;
         vma_block_count += vma[heap].statistics.blockCount;
     }
-    std::printf("VRAM%s%s: allocs %llu+%llu; process %llu MiB, driver budget %llu of %llu MiB; VMA blocks %llu MiB, "
+    std::printf("VRAM%s%s: allocs %llu+%llu (limit %u); process %llu MiB, driver budget %llu of %llu MiB; VMA blocks %llu MiB, "
                 "allocations %llu MiB; images %llu (%llu MiB), arenas %llu (%llu MiB, %llu MiB in system memory), buffers "
                 "%llu MiB; allocation failures %llu, recovered %llu, host fallbacks %llu\n",
                 why[0] ? " " : "", why, (unsigned long long)vma_block_count,
-                (unsigned long long)Vram::arena_count.load(), (unsigned long long)(usage >> 20),
+                (unsigned long long)Vram::arena_count.load(),
+                properties.limits.maxMemoryAllocationCount, (unsigned long long)(usage >> 20),
                 (unsigned long long)(heap_budget >> 20), (unsigned long long)(size >> 20),
                 (unsigned long long)(vma_blocks >> 20), (unsigned long long)(vma_allocs >> 20),
                 (unsigned long long)Vram::image_count.load(),

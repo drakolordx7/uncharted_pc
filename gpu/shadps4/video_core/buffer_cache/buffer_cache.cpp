@@ -1038,6 +1038,23 @@ u64 BufferCache::AllocateArenaMemory(u64 size, vk::DeviceMemory& memory) {
         }
     }
     Vulkan::Vram::failed_allocs.fetch_add(1, std::memory_order_relaxed);
+    Vulkan::Vram::urgent.store(true, std::memory_order_relaxed);
+    if (arena_host_memory_type_index == ~0u && !Vulkan::Vram::Strict() && !host_arena_active) {
+        // Sparse binds cannot use system memory on this driver (NVIDIA): go over the budget and
+        // let the driver page (the simulated card, BB_TEST_VRAM_MB, is let through here).
+        alloc_info.allocationSize = std::max(size, chunk_size);
+        const auto r = instance.GetDevice().allocateMemory(alloc_info);
+        if (r.result == vk::Result::eSuccess) {
+            arena_chunks.push_back({r.value, alloc_info.allocationSize, size, false});
+            Vulkan::Vram::arena_bytes.fetch_add(alloc_info.allocationSize,
+                                                std::memory_order_relaxed);
+            Vulkan::Vram::arena_count.fetch_add(1, std::memory_order_relaxed);
+            Vulkan::Vram::recovered_allocs.fetch_add(1, std::memory_order_relaxed);
+            memory = r.value;
+            return 0;
+        }
+        result = r.result;
+    }
     ASSERT_MSG(arena_host_memory_type_index != ~0u && !Vulkan::Vram::Legacy(),
                "Failed allocating arena memory: vk::Result={}", vk::to_string(result));
     alloc_info.memoryTypeIndex = arena_host_memory_type_index;

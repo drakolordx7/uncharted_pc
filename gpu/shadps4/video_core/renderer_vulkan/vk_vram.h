@@ -43,6 +43,17 @@ inline bool Legacy() {
     return legacy;
 }
 
+/// BB_TEST_VRAM_STRICT=1: an image allocation that does not fit the simulated card fails for
+/// good (a driver that cannot page); otherwise the over-budget fallback is let through (the
+/// usual Windows behaviour: the driver pages other memory out).
+inline bool Strict() {
+    static const bool strict = [] {
+        const char* env = std::getenv("BB_TEST_VRAM_STRICT");
+        return env && env[0] == '1';
+    }();
+    return strict;
+}
+
 inline bool Log() {
     static const bool log = [] {
         const char* env = std::getenv("BB_VRAM_LOG");
