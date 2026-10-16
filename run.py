@@ -96,6 +96,30 @@ def prepare(game, exe, out):
     stamp.write_text(source, encoding='utf-8')
 
 
+def game_res(env):
+    """BB_GAME_RES=WxH: the game renders and displays at that size (runtime_display.c patches its
+    display configuration). Its GPU memory pool (render targets) grows with the pixel count and the
+    system's direct memory with it (the game checks the sum): BB_GAME_MEM_MB is the extra, BB_DMEM_MB
+    the total (retail PS4: 5056 MiB)."""
+    value = env.get('BB_GAME_RES', '').lower().replace('\u00d7', 'x')
+    try:
+        width, height = (int(part) for part in value.split('x'))
+    except ValueError:
+        env.pop('BB_GAME_RES', None)
+        return
+    if not (640 <= width <= 7680 and 360 <= height <= 4320) or (width, height) == (1920, 1080):
+        env.pop('BB_GAME_RES', None)
+        return
+    env['BB_GAME_RES'] = f'{width}x{height}'
+    ratio = width * height / (1920 * 1080)
+    extra = int(env['BB_GAME_MEM_MB']) if env.get('BB_GAME_MEM_MB', '').isdigit() else (int((ratio - 1) * 1100) + 256 if ratio > 1 else 0)
+    extra = -(-extra // 64) * 64   # the game wants its heaps in multiples of 2 MiB
+    env['BB_GAME_MEM_MB'] = str(extra)
+    if extra and not env.get('BB_DMEM_MB'):
+        env['BB_DMEM_MB'] = str(min(16384, 5056 + extra))
+    print(f"Game resolution {width}x{height}: GPU memory +{extra} MiB, direct memory {env.get('BB_DMEM_MB', 5056)} MiB", flush=True)
+
+
 def main():
     args = sys.argv[1:]
     if len(args) >= 2 and args[0] == '--after':
@@ -135,6 +159,7 @@ def main():
         if clang64.is_dir():
             env['PATH'] = f'{clang64}{os.pathsep}{env.get("PATH", "")}'
 
+    game_res(env)
     exe = executable_name(env.get('BB_EXE', ''))
     user_dir = Path(env.get('BB_USER_DIR', data / 'user')).resolve()
     user_dir.mkdir(parents=True, exist_ok=True)
