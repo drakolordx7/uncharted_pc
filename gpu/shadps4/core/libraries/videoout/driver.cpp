@@ -486,6 +486,13 @@ void VideoOutDriver::Flip(const Request& req) {
                             median, std::sqrt(std::max(0.0, sq / intervals.size() - mean * mean)),
                             sorted[std::min(sorted.size() - 1, sorted.size() * 99 / 100)], spikes);
             }
+            // The guest's frame-ahead wait (sceGnmSubmitAndFlipCommandBuffers) in the window.
+            std::printf("Frame-ahead wait: %.1f ms total over %llu flips, %llu waits over 2 ms, "
+                        "longest %.1f ms\n",
+                        BbStats::frame_wait_ns.exchange(0) / 1e6,
+                        static_cast<unsigned long long>(BbStats::frame_wait_flips.exchange(0)),
+                        static_cast<unsigned long long>(BbStats::frame_wait_long.exchange(0)),
+                        BbStats::frame_wait_max_ns.exchange(0) / 1e6);
             intervals.clear();
             window_start = now;
             frames = 0;
@@ -553,6 +560,7 @@ std::atomic<s64> last_flip_submit_ns{0}, last_flip_interval_ns{0};
 
 namespace {
 std::atomic<u64> eop_flips_reached{0};
+std::atomic<u64> gpu_progress{0};
 std::mutex eop_flip_mutex;
 std::condition_variable eop_flip_cv;
 } // namespace
@@ -583,16 +591,15 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
             }
         }
     }
-    {
+    // bbport: an end-of-pipe flip was counted as pending when the guest submitted it
+    // (ReserveEopFlip); the GPU side only reaches it here.
+    if (!is_eop) {
         std::unique_lock lock{port->port_mutex};
         if (index != -1 && port->flip_status.flip_pending_num > 16) {
             LOG_ERROR(Lib_VideoOut, "Flip queue is full");
             return false;
         }
 
-        if (is_eop) {
-            ++port->flip_status.gc_queue_num;
-        }
         ++port->flip_status.flip_pending_num; // integral GPU and CPU pending flips counter
         port->flip_status.submit_tsc = Libraries::Kernel::sceKernelReadTsc();
     }
@@ -602,6 +609,7 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
         liverpool->SendCommand([=, this]() { SubmitFlipInternal(port, index, flip_arg, is_eop); });
     } else {
         SubmitFlipInternal(port, index, flip_arg, is_eop);
+        gpu_progress.fetch_add(1, std::memory_order_relaxed);
         {
             std::scoped_lock lock{eop_flip_mutex};
             eop_flips_reached.fetch_add(1, std::memory_order_relaxed);
@@ -612,15 +620,59 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
     return true;
 }
 
+bool VideoOutDriver::ReserveEopFlip(VideoOutPort* port) {
+    std::unique_lock lock{port->port_mutex};
+    if (port->flip_status.flip_pending_num > 16) {
+        LOG_ERROR(Lib_VideoOut, "Flip queue is full");
+        return false;
+    }
+    ++port->flip_status.gc_queue_num;
+    ++port->flip_status.flip_pending_num;
+    port->flip_status.submit_tsc = Libraries::Kernel::sceKernelReadTsc();
+    return true;
+}
+
 u64 EopFlipsReached() {
     return eop_flips_reached.load(std::memory_order_relaxed);
 }
 
-void WaitEopFlipsReached(u64 count, u32 timeout_ms) {
-    std::unique_lock lock{eop_flip_mutex};
-    eop_flip_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [count] {
+u64 GpuProgress() {
+    return gpu_progress.load(std::memory_order_relaxed);
+}
+
+void NoteGpuProgress() {
+    gpu_progress.fetch_add(1, std::memory_order_relaxed);
+}
+
+bool WaitEopFlipsReached(u64 count, u32 stall_cap_ms, bool (*give_up)()) {
+    using clock = std::chrono::steady_clock;
+    constexpr auto slice = std::chrono::milliseconds(25);
+    const auto reached = [count] {
         return eop_flips_reached.load(std::memory_order_relaxed) >= count;
-    });
+    };
+    u64 seen = gpu_progress.load(std::memory_order_relaxed);
+    auto last_progress = clock::now();
+    std::unique_lock lock{eop_flip_mutex};
+    while (!reached()) {
+        // Not met: either the GPU side is working (progress), or nothing is left that could
+        // meet it (it retired everything it was given: the count is out of step).
+        if (give_up && give_up()) {
+            return false;
+        }
+        eop_flip_cv.wait_for(lock, slice, reached);
+        if (reached()) {
+            break;
+        }
+        const u64 now_progress = gpu_progress.load(std::memory_order_relaxed);
+        if (now_progress != seen) {
+            seen = now_progress;
+            last_progress = clock::now();
+        } else if (stall_cap_ms && clock::now() - last_progress >=
+                                       std::chrono::milliseconds(stall_cap_ms)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop) {

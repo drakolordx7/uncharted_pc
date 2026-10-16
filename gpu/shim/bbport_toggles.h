@@ -126,6 +126,10 @@ inline std::atomic<std::uint64_t> reduced_draws{0}, scene_draws{0};
 /// for host copies before a submission or fence, and for GPU ticks.
 inline std::atomic<std::uint64_t> sync_recording_ns{0}, host_copies_wait_ns{0}, tick_wait_ns{0},
     copy_threads_wait_ns{0}, host_copy_waits{0};
+/// The guest's frame-ahead wait in submit-and-flip (sceGnmSubmitAndFlipCommandBuffers): time (ns),
+/// waits over 2 ms, the longest (ns) and the number of flips submitted, per report window.
+inline std::atomic<std::uint64_t> frame_wait_ns{0}, frame_wait_long{0}, frame_wait_max_ns{0},
+    frame_wait_flips{0};
 struct WaitTimer {
     std::atomic<std::uint64_t>& total;
     std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();

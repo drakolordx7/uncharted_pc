@@ -30,8 +30,17 @@ s64 LastFlipIntervalNs();
 /// bbport: end-of-pipe flips the GPU side has reached so far (counted by SubmitFlip).
 u64 EopFlipsReached();
 
-/// bbport: waits until the GPU side has reached `count` end-of-pipe flips (at most `timeout_ms`).
-void WaitEopFlipsReached(u64 count, u32 timeout_ms);
+/// bbport: the GPU side wrote an end-of-pipe label or reached a flip (any forward progress).
+void NoteGpuProgress();
+
+/// bbport: count of such progress events so far (a stall detector compares it over time).
+u64 GpuProgress();
+
+/// bbport: waits until the GPU side has reached `count` end-of-pipe flips. Returns false when it
+/// stopped waiting for another reason: `give_up()` says nothing more can arrive (the GPU is idle,
+/// so the count is out of step), or the GPU side made no progress at all for `stall_cap_ms`
+/// (0: never). A slow GPU side (shaders compiling) is waited for, however long it takes.
+bool WaitEopFlipsReached(u64 count, u32 stall_cap_ms, bool (*give_up)());
 
 struct VideoOutPort {
     SceVideoOutResolutionStatus resolution;
@@ -107,6 +116,11 @@ public:
                               const BufferAttribute* attribute);
 
     bool SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop = false);
+
+    /// bbport: counts an end-of-pipe flip as pending when the guest submits it (as the PS4 kernel
+    /// does), not when the GPU side reaches it: the guest paces itself by sceVideoOutGetFlipStatus
+    /// (gcQueueNum, flipPendingNum). Returns false when the flip queue is full.
+    bool ReserveEopFlip(VideoOutPort* port);
 
 private:
     struct Request {
