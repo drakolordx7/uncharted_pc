@@ -126,13 +126,12 @@ def game_res(env):
             env[name] = str(-(-int(scale * per_pixel_mib) // 64) * 64)   # the game wants its heaps in multiples of 2 MiB
         return int(env[name])
     rt, rt2 = grow('BB_GAME_RT_MB', RT_MIB_PER_1080P), grow('BB_GAME_RT2_MB', RT2_MIB_PER_1080P)
-    excess = max(0, rt + rt2 - POOL_HEADROOM_MIB)
     if not env.get('BB_GAME_FREE_MB', '').isdigit():
-        env['BB_GAME_FREE_MB'] = str(min(excess, 160))
+        env['BB_GAME_FREE_MB'] = '0'   # the game's later 144 MiB allocation needs the unreserved remainder
     # The movie player's four frame buffers (4 MiB each for 1920x1088): a movie frame is fitted into the game's
     # size, luma rows padded to 64, plus the picture info.
     if not env.get('BB_GAME_MOVIE_MB', '').isdigit():
-        frame_bytes = (-(-width // 64) * 64) * (-(-height // 64) * 64) * 3 // 2 + 65536
+        frame_bytes = (-(-width // 16) * 16) * (-(-height // 64) * 64) * 3 // 2 + 65536
         env['BB_GAME_MOVIE_MB'] = str(max(4, -(-frame_bytes // (2 << 20)) * 2))
     pool = rt + rt2 - int(env['BB_GAME_FREE_MB'])
     if not env.get('BB_DMEM_MB') and pool > 0:
