@@ -116,6 +116,7 @@ void DataBase::Open() {
         if (!std::filesystem::exists(cache_path)) {
             std::filesystem::create_directories(cache_path);
         }
+        directory = cache_path;
     }
 
     io_worker = std::jthread{ProcessIO};
@@ -274,10 +275,22 @@ void DataBase::ForEachBlob(BlobType type, const std::function<void(std::vector<u
 
 std::vector<std::string> DataBase::ListBlobNames(BlobType type) {
     std::vector<std::string> names;
-    if (!opened || EmulatorSettings.IsPipelineCacheArchived()) {
+    if (!opened) {
         return names;
     }
     const auto ext = "." + GetBlobFileExtension(type);
+    if (EmulatorSettings.IsPipelineCacheArchived()) {
+        const auto num_files = mz_zip_reader_get_num_files(&zip_ar);
+        for (int index = 0; index < num_files; ++index) {
+            std::array<char, MZ_ZIP_MAX_ARCHIVE_FILENAME_SIZE> file_name{};
+            mz_zip_reader_get_filename(&zip_ar, index, file_name.data(), file_name.size());
+            const std::string entry{file_name.data()};
+            if (entry.ends_with(ext)) {
+                names.push_back(entry.substr(0, entry.size() - ext.size()));
+            }
+        }
+        return names;
+    }
     std::error_code ec;
     for (const auto& entry : std::filesystem::directory_iterator(cache_path, ec)) {
         if (entry.path().extension().string() == ext) {

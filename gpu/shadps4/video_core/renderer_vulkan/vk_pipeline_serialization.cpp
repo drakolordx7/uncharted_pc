@@ -247,8 +247,9 @@ void PipelineCache::StartWarmUp() {
     if (!EmulatorSettings.IsPipelineCacheEnabled()) {
         return;
     }
-    // BB_WARM_MODE: 0 = no preload, 1 = all (default), 2 = everything but the motion shaders.
+    // BB_WARM_MODE=0: no preload (the pipelines compile as the game needs them).
     if (const char* mode = std::getenv("BB_WARM_MODE"); mode && mode[0] == '0') {
+        Storage::DataBase::Instance().FinishPreload();
         warm_done.store(true, std::memory_order_release);
         return;
     }
@@ -311,11 +312,12 @@ void PipelineCache::WarmUpThread() {
         return;
     }
 
-    const char* warm_mode = std::getenv("BB_WARM_MODE");
-    const bool skip_motion = warm_mode && warm_mode[0] == '2';
     u32 threads = std::clamp<u32>(BbThreads::Available() > 2 ? BbThreads::Available() - 2 : 1, 1, 16);
     if (const char* env = std::getenv("BB_WARM_THREADS")) { // 1 = the old serial load, for timing
         threads = std::clamp<u32>(static_cast<u32>(std::atoi(env)), 1, 64);
+    }
+    if (EmulatorSettings.IsPipelineCacheArchived()) {
+        threads = 1; // the zip reader is not thread-safe
     }
     const auto device = instance.GetDevice();
 
@@ -395,7 +397,7 @@ void PipelineCache::WarmUpThread() {
         const auto& info = stage.program->info;
         if (info.hw_stage == Shader::HwStage::Vertex &&
             stage.spec.runtime_info.hw.vs.motion_vectors &&
-            (Shader::MotionVectors::positions_address == 0 || skip_motion)) {
+            Shader::MotionVectors::positions_address == 0) {
             return;
         }
         std::vector<u32> spv{};
@@ -407,6 +409,8 @@ void PipelineCache::WarmUpThread() {
         stage.module = CompileSPV(spv, device);
     });
     const double t_shaders = elapsed_ms();
+    // Everything is read: an archived cache turns writable now (the game saves what it compiles).
+    db.FinishPreload();
 
     // 3. Into the program cache, in order. A permutation lives at its original index.
     std::unordered_map<u64, LoadedStage*> by_hash;
@@ -543,7 +547,6 @@ void PipelineCache::WarmUpThread() {
                 num_pipelines.load(), num_total_pipelines, u32(stages.size()), threads, elapsed_ms(),
                 t_keys, t_shaders - t_keys, t_programs - t_shaders, elapsed_ms() - t_programs,
                 t_ready);
-    db.FinishPreload();
     // The driver's cache gets the entries this preload had to compile.
     if (driver_cache_loaded_size != DriverCacheSize()) {
         driver_cache_dirty.fetch_add(1);
