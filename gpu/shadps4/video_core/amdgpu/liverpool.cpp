@@ -325,10 +325,12 @@ namespace {
 // of shader/pipeline compiles, texture streaming under memory pressure, a slow GPU) holds them
 // back past the limit: assertion m_gfxEopTick, issue cluster C1. Every end-of-pipe packet is
 // noted when its command buffer is submitted; when the GPU side has made no progress for
-// BB_EOP_WATCHDOG_MS (default 1200, 0: off) the labels of packets submitted that long ago are
+// BB_EOP_WATCHDOG_MS (default 0: off; e.g. 1200) the labels of packets submitted that long ago are
 // written (and their interrupt raised) by this thread, and the packet skips both when it runs.
 // The frame such a stall holds may draw from memory the game has recycled meanwhile: a glitch
 // for that frame instead of a crash. Nothing is written early while the GPU side makes progress.
+// Off by default since probe.c patch_eop_tick_wait makes that check wait; kept for builds where
+// the check is not found.
 struct EopEntry {
     PM4CmdEventWriteEop packet;
     std::chrono::steady_clock::time_point submitted;
@@ -345,7 +347,7 @@ EopWatch& Watch() {
 u32 EopWatchdogMs() {
     static const u32 ms = [] {
         const char* env = std::getenv("BB_EOP_WATCHDOG_MS");
-        return env ? static_cast<u32>(std::strtoull(env, nullptr, 10)) : 1200u;
+        return env ? static_cast<u32>(std::strtoull(env, nullptr, 10)) : 0u;
     }();
     return ms;
 }
