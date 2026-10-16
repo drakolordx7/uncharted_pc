@@ -82,7 +82,13 @@ inline void MakeBelowNormal() {
     setpriority(PRIO_PROCESS, static_cast<id_t>(gettid()), 5);
 }
 
-struct ScopedNormalPriority {};
+/// Does nothing here: a thread that went to SCHED_IDLE or nice 19 cannot raise itself again
+/// without privileges, so a helper holding a claim is only slowed while every core is busy.
+/// (The empty constructor keeps -Wunused-variable quiet at the call sites.)
+struct ScopedNormalPriority {
+    ScopedNormalPriority() {}
+    ~ScopedNormalPriority() {}
+};
 #endif
 
 } // namespace BbThreads
