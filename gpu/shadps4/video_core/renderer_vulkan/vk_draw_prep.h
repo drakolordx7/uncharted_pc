@@ -127,6 +127,8 @@ public:
         std::atomic<bool> scanned{false};
         std::atomic<bool> claimed{false};
         std::atomic<bool> gpu_done{false};
+        /// Draws a helper already took for pipeline compilation (see WorkerLoop, assist).
+        std::unique_ptr<std::atomic<bool>[]> draw_taken;
     };
 
 private:
