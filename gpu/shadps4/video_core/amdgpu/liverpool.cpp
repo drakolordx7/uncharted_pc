@@ -2,7 +2,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <chrono>
+#include <deque>
+#include <mutex>
 #include <pthread.h>
+#include <thread>
+#include <vector>
 #ifndef _WIN32
 #include <sys/resource.h>
 #endif
@@ -39,6 +43,44 @@ static std::chrono::microseconds SubmitDelay() {
         return env ? std::strtoll(env, nullptr, 10) : 0LL;
     }()};
     return delay;
+}
+
+// bbport test: BB_TEST_GPU_DELAY_MS=<n> makes the GPU command thread sleep n ms before it starts
+// a submission, as a slow GPU (a GTX 1650, an iGPU, shaders compiling) would hold the guest's
+// fences back. BB_TEST_GPU_DELAY_EVERY=<k> delays every k-th submission only (default 1; a long
+// delay such as 2500 with k=200 is a stall like a first-run shader compile).
+// BB_TEST_GPU_DELAY_RANDOM=1 sleeps a random time up to n ms instead of exactly n.
+static std::chrono::milliseconds TestGpuDelay() {
+    static const long long delay_ms = [] {
+        const char* env = std::getenv("BB_TEST_GPU_DELAY_MS");
+        return env ? std::strtoll(env, nullptr, 10) : 0LL;
+    }();
+    if (delay_ms <= 0) {
+        return {};
+    }
+    static const long long every = [] {
+        const char* env = std::getenv("BB_TEST_GPU_DELAY_EVERY");
+        const long long k = env ? std::strtoll(env, nullptr, 10) : 1LL;
+        return k > 0 ? k : 1LL;
+    }();
+    static const bool random = [] {
+        const char* env = std::getenv("BB_TEST_GPU_DELAY_RANDOM");
+        return env && env[0] == '1';
+    }();
+    static std::atomic<long long> submissions{0};
+    static std::atomic<unsigned> rng{0x9e3779b9u};
+    if (submissions.fetch_add(1, std::memory_order_relaxed) % every != 0) {
+        return {};
+    }
+    if (!random) {
+        return std::chrono::milliseconds(delay_ms);
+    }
+    unsigned x = rng.load(std::memory_order_relaxed); // xorshift; only this thread calls it
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    rng.store(x, std::memory_order_relaxed);
+    return std::chrono::milliseconds(x % (delay_ms + 1));
 }
 
 static const char* dcb_task_name{"DCB_TASK"};
@@ -160,12 +202,14 @@ void Liverpool::Process(std::stop_token stoken) {
 
             Task::Handle task{};
             std::chrono::steady_clock::time_point not_before{};
+            bool first_resume = false;
             {
                 std::scoped_lock lock{queue.m_access};
                 if (queue.submits.empty()) {
                     continue;
                 }
                 task = queue.submits.front();
+                first_resume = !queue.front_started;
                 if (!queue.front_started && !queue.submit_times.empty()) {
                     not_before = queue.submit_times.front() + SubmitDelay();
                 }
@@ -173,6 +217,11 @@ void Liverpool::Process(std::stop_token stoken) {
             }
             if (not_before > std::chrono::steady_clock::now()) {
                 std::this_thread::sleep_until(not_before);
+            }
+            if (first_resume) {
+                if (const auto delay = TestGpuDelay(); delay.count()) {
+                    std::this_thread::sleep_for(delay);
+                }
             }
             task.resume();
 
@@ -269,7 +318,39 @@ bool PipelinedOpcode(PM4ItOpcode opcode) {
 } // namespace
 
 namespace {
-void SignalEop(const PM4CmdEventWriteEop& eop) {
+// bbport: end-of-pipe watchdog. Uncharted waits for the GPU's end-of-pipe label of the frame it is
+// about to recycle (FrameBegin: m_gfxEopTick) with a time limit of about two seconds and stops
+// when it passes (the GPU hang check of its engine; a PS4 GPU never takes that long). Here the
+// labels are written when the GPU side gets to the packet, and a long stall of that side (a burst
+// of shader/pipeline compiles, texture streaming under memory pressure, a slow GPU) holds them
+// back past the limit: assertion m_gfxEopTick, issue cluster C1. Every end-of-pipe packet is
+// noted when its command buffer is submitted; when the GPU side has made no progress for
+// BB_EOP_WATCHDOG_MS (default 1200, 0: off) the labels of packets submitted that long ago are
+// written (and their interrupt raised) by this thread, and the packet skips both when it runs.
+// The frame such a stall holds may draw from memory the game has recycled meanwhile: a glitch
+// for that frame instead of a crash. Nothing is written early while the GPU side makes progress.
+struct EopEntry {
+    PM4CmdEventWriteEop packet;
+    std::chrono::steady_clock::time_point submitted;
+    bool forced = false;
+};
+struct EopWatch {
+    std::mutex mutex;
+    std::deque<EopEntry> entries; // submission order
+};
+EopWatch& Watch() {
+    static auto* watch = new EopWatch; // never destroyed: the watchdog thread outlives statics
+    return *watch;
+}
+u32 EopWatchdogMs() {
+    static const u32 ms = [] {
+        const char* env = std::getenv("BB_EOP_WATCHDOG_MS");
+        return env ? static_cast<u32>(std::strtoull(env, nullptr, 10)) : 1200u;
+    }();
+    return ms;
+}
+
+void WriteEop(const PM4CmdEventWriteEop& eop) {
     eop.SignalFence(
         [](void* address, u64 data, u32 num_bytes) {
             auto* memory = Core::Memory::Instance();
@@ -279,6 +360,137 @@ void SignalEop(const PM4CmdEventWriteEop& eop) {
             }
         },
         [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); });
+}
+
+bool SameEop(const PM4CmdEventWriteEop& a, const PM4CmdEventWriteEop& b) {
+    return a.address_lo == b.address_lo && a.data_control == b.data_control &&
+           a.data_lo == b.data_lo && a.data_hi == b.data_hi;
+}
+
+void EopWatchdogThread() {
+    Common::SetCurrentThreadName("bb:eop-watchdog");
+    using Clock = std::chrono::steady_clock;
+    const auto limit = std::chrono::milliseconds(EopWatchdogMs());
+    u64 seen = Libraries::VideoOut::GpuProgress();
+    auto last_change = Clock::now();
+    u32 reports = 0;
+    for (;;) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        const auto now = Clock::now();
+        if (const u64 progress = Libraries::VideoOut::GpuProgress(); progress != seen) {
+            seen = progress;
+            last_change = now;
+        }
+        auto& watch = Watch();
+        std::scoped_lock lock{watch.mutex};
+        // Entries that never ran (skipped packets) must not pile up or be forced much later.
+        while (!watch.entries.empty() && now - watch.entries.front().submitted > limit * 10) {
+            watch.entries.pop_front();
+        }
+        if (now - last_change < limit) {
+            continue;
+        }
+        u32 forced = 0;
+        for (auto& entry : watch.entries) {
+            if (entry.forced || now - entry.submitted < limit) {
+                continue;
+            }
+            WriteEop(entry.packet);
+            entry.forced = true;
+            ++forced;
+        }
+        if (forced && reports++ < 20) {
+            std::printf("EOP watchdog: the GPU side made no progress for %lld ms, wrote %u "
+                        "end-of-pipe labels early\n",
+                        static_cast<long long>(
+                            std::chrono::duration_cast<std::chrono::milliseconds>(now - last_change)
+                                .count()),
+                        forced);
+        }
+    }
+}
+
+void ScanEops(std::span<const u32> commands, u32 depth, std::vector<PM4CmdEventWriteEop>& out) {
+    for (size_t at = 0; at < commands.size() && out.size() < 4096;) {
+        const auto* header = reinterpret_cast<const PM4Header*>(commands.data() + at);
+        if (header->type == 2) {
+            ++at;
+            continue;
+        }
+        if (header->type != 3) {
+            return;
+        }
+        const size_t words = header->type3.NumWords() + 1;
+        if (at + words > commands.size()) {
+            return;
+        }
+        switch (header->type3.opcode) {
+        case PM4ItOpcode::EventWriteEop:
+            if (words * sizeof(u32) >= sizeof(PM4CmdEventWriteEop)) {
+                const auto& eop = *reinterpret_cast<const PM4CmdEventWriteEop*>(header);
+                if (eop.data_sel.Value() != DataSelect::None ||
+                    eop.int_sel.Value() != InterruptSelect::None) {
+                    out.push_back(eop);
+                }
+            }
+            break;
+        case PM4ItOpcode::IndirectBuffer: {
+            const auto& ib = *reinterpret_cast<const PM4CmdIndirectBuffer*>(header);
+            if (depth < 4 && ib.Address<const u32>() && ib.ib_size.Value()) {
+                ScanEops({ib.Address<const u32>(), ib.ib_size.Value()}, depth + 1, out);
+            }
+            break;
+        }
+        case PM4ItOpcode::CondExec: {
+            // Packets the condition may skip are not noted: they could be forced without running.
+            const auto& cond = *reinterpret_cast<const PM4CmdCondExec*>(header);
+            at += words + cond.exec_count.Value();
+            continue;
+        }
+        default:
+            break;
+        }
+        at += words;
+    }
+}
+
+/// Notes the end-of-pipe packets of a submission (guest thread, as it is submitted).
+void NoteSubmissionEops(std::span<const u32> dcb) {
+    if (!EopWatchdogMs()) {
+        return;
+    }
+    std::vector<PM4CmdEventWriteEop> found;
+    ScanEops(dcb, 0, found);
+    if (found.empty()) {
+        return;
+    }
+    static std::once_flag started;
+    std::call_once(started, [] { std::thread(EopWatchdogThread).detach(); });
+    const auto now = std::chrono::steady_clock::now();
+    auto& watch = Watch();
+    std::scoped_lock lock{watch.mutex};
+    for (const auto& packet : found) {
+        watch.entries.push_back({packet, now, false});
+    }
+}
+
+void SignalEop(const PM4CmdEventWriteEop& eop) {
+    Libraries::VideoOut::NoteGpuProgress();
+    if (EopWatchdogMs()) {
+        auto& watch = Watch();
+        std::scoped_lock lock{watch.mutex};
+        for (auto it = watch.entries.begin(); it != watch.entries.end(); ++it) {
+            if (SameEop(it->packet, eop)) {
+                const bool forced = it->forced;
+                watch.entries.erase(it);
+                if (forced) {
+                    return; // the watchdog wrote the label and raised the interrupt
+                }
+                break;
+            }
+        }
+    }
+    WriteEop(eop);
 }
 
 // bbport: end-of-pipe/-shader events run in order with the draws (Rasterizer::RunInOrder: on
@@ -361,6 +573,7 @@ void RunDmaData(Vulkan::Rasterizer& rasterizer, const u8* data) {
 }
 
 void SignalFlip(Vulkan::Rasterizer& rasterizer, const u8*) {
+    Libraries::VideoOut::NoteGpuProgress();
     rasterizer.WaitDeferredSignals();
     rasterizer.OnGuestFlip();
     rasterizer.GetBufferCache().CheckStableBindings();
@@ -1728,6 +1941,7 @@ void Liverpool::SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb) {
     if (EmulatorSettings.IsCopyGpuBuffers()) {
         std::tie(dcb, ccb) = CopyCmdBuffers(dcb, ccb);
     }
+    NoteSubmissionEops(dcb);
 
     // The copy for the draw preparation workers is made before taking the queue lock, which
     // the GPU thread needs to pick up work.

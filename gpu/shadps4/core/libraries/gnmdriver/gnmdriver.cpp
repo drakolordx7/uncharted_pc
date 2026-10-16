@@ -2300,9 +2300,17 @@ s32 PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffersForWorkload(
     // up. A GPU side that falls behind (shaders compiling on a first run) let the engines run
     // several frames ahead; Uncharted then finds a frame it recycles without its end-of-pipe
     // tick and stops (assertion m_gfxEopTick in FrameBegin). BB_MAX_FRAMES_AHEAD=N (0: no limit).
+    // The wait is for as long as the GPU side works: a fixed timeout (2 s before) let the guest
+    // run ahead after one long stall. It ends early only when the GPU side is idle (the flip
+    // count is out of step: nothing more will arrive) or made no progress at all for
+    // BB_FRAME_WAIT_CAP_MS (default 20000, 0: never): a deadlock with the guest must not hang it.
     static const u64 max_ahead = [] {
         const char* env = std::getenv("BB_MAX_FRAMES_AHEAD");
         return env ? std::strtoull(env, nullptr, 10) : 1ull;
+    }();
+    static const u32 stall_cap_ms = [] {
+        const char* env = std::getenv("BB_FRAME_WAIT_CAP_MS");
+        return env ? static_cast<u32>(std::strtoull(env, nullptr, 10)) : 20000u;
     }();
     static std::atomic<u64> flips_submitted{0};
     u64 frame = 0;
@@ -2323,9 +2331,27 @@ s32 PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffersForWorkload(
             frame = flips_submitted.fetch_add(1, std::memory_order_relaxed) + 1;
         }
     }
+    BbStats::frame_wait_flips.fetch_add(1, std::memory_order_relaxed);
     if (max_ahead && frame > max_ahead) {
-        // Bounded: a flip the GPU side never reaches must not hang the game.
-        VideoOut::WaitEopFlipsReached(frame - max_ahead, 2000);
+        const auto wait_start = std::chrono::steady_clock::now();
+        // Outside the submit lock: the GPU side may need it (sceGnmSubmitDone) to go on.
+        if (!VideoOut::WaitEopFlipsReached(frame - max_ahead, stall_cap_ms,
+                                           [] { return liverpool->IsGpuIdle(); })) {
+            static std::atomic<u32> gave_up{0};
+            if (gave_up.fetch_add(1, std::memory_order_relaxed) < 8) {
+                std::printf("Frame limiter: stopped waiting for the GPU side at frame %llu "
+                            "(idle or no progress)\n",
+                            static_cast<unsigned long long>(frame));
+            }
+        }
+        const u64 waited_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                  std::chrono::steady_clock::now() - wait_start).count();
+        BbStats::frame_wait_ns.fetch_add(waited_ns, std::memory_order_relaxed);
+        BbStats::frame_wait_long.fetch_add(waited_ns > 2'000'000, std::memory_order_relaxed);
+        u64 longest = BbStats::frame_wait_max_ns.load(std::memory_order_relaxed);
+        while (waited_ns > longest && !BbStats::frame_wait_max_ns.compare_exchange_weak(
+                                          longest, waited_ns, std::memory_order_relaxed)) {
+        }
     }
     return result;
 }
