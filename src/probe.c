@@ -604,11 +604,15 @@ static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t imag
     uint8_t installed[32]={0};
     guest_image_size=image_size;
     if (count>sizeof(installed)) count=sizeof(installed);
+    /* A/B tests: BB_CALLBACKS=0 installs none, BB_CALLBACKS_SKIP=<text> none whose name contains the text */
+    const char *off=getenv("BB_CALLBACKS"), *skip=getenv("BB_CALLBACKS_SKIP");
+    if (off && off[0]=='0') { printf("Callbacks: disabled (BB_CALLBACKS=0)\n"); return; }
     for (size_t i=0;i<count;++i) {
         const RuntimeGuestCallback *c=&callbacks[i];
         int again=0;
         for (size_t j=0;j<i;++j) if (installed[j] && !strcmp(callbacks[j].name,c->name)) again=1;
         if (again) continue;                                          /* a variant already matched */
+        if (skip && *skip && strstr(c->name,skip)) continue;
         uint64_t found=0;
         size_t length=0, matches=find_pattern(segments,ns,c->pattern,&found,&length);
         if (matches>1) { printf("Callbacks: %s: %zu matches, not installed\n",c->name,matches); continue; }
@@ -957,6 +961,7 @@ int main(int argc, char **argv) {
         uint64_t image_end=0;
         for (uint64_t s=0;s<ns;++s) if (segments[s].address+segments[s].size>image_end) image_end=segments[s].address+segments[s].size;
         install_game_callbacks(segments, ns, image_end);
+        runtime_display_patch(image, image_end);
     }
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
