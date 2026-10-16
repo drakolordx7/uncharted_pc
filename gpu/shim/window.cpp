@@ -1,4 +1,5 @@
 // bbport: SDL3 window for the Vulkan swapchain (X11 or Wayland).
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <SDL3/SDL.h>
@@ -53,8 +54,33 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     }
     SDL_PropertiesID props = SDL_CreateProperties();
     SDL_SetStringProperty(props, SDL_PROP_WINDOW_CREATE_TITLE_STRING, title);
-    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_X_NUMBER, SDL_WINDOWPOS_CENTERED);
-    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_Y_NUMBER, SDL_WINDOWPOS_CENTERED);
+    // bbport: test windows (scripted runs next to the player's desktop), all off by default:
+    //   BB_WINDOW_POS=x,y     where the window opens (e.g. -3000,0: off every screen)
+    //   BB_NO_FOCUS=1         never takes the focus or the taskbar button (cannot be activated)
+    //   BB_WINDOW_HIDDEN=1    created hidden; the game keeps rendering, the frame dump still works
+    //   BB_WINDOW_MINIMIZED=1 created minimized (the presenter then skips presenting)
+    int pos_x = SDL_WINDOWPOS_CENTERED, pos_y = SDL_WINDOWPOS_CENTERED;
+    if (const char* pos = std::getenv("BB_WINDOW_POS")) {
+        int x = 0, y = 0;
+        if (std::sscanf(pos, "%d,%d", &x, &y) == 2) {
+            pos_x = x;
+            pos_y = y;
+        }
+    }
+    const auto flag = [](const char* name) {
+        const char* value = std::getenv(name);
+        return value && value[0] == '1';
+    };
+    if (flag("BB_NO_FOCUS")) {
+        SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
+        SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_FOCUSABLE_BOOLEAN, false);
+        SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_UTILITY_BOOLEAN, true);
+        window_focused = false;
+    }
+    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_HIDDEN_BOOLEAN, flag("BB_WINDOW_HIDDEN"));
+    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_MINIMIZED_BOOLEAN, flag("BB_WINDOW_MINIMIZED"));
+    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_X_NUMBER, pos_x);
+    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_Y_NUMBER, pos_y);
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, width_);
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, height_);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true);
