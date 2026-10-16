@@ -1170,9 +1170,9 @@ class Launcher:
                  '60 FPS. Above your display\'s refresh rate use Mailbox or Immediate.')
         if refresh:
             hint += ' ' + _('Your display runs at {} Hz.').format(refresh)
-        self.row(f, _('Frame rate'), self.choice(f, 'frame_rate', FRAME_RATES, 34), hint)
+        self.row(f, _('Engine frame rate'), self.choice(f, 'frame_rate', FRAME_RATES, 34), hint)
         self.row(f, _('Frame rate limit'), self.choice(f, 'fps_limit', FPS_LIMITS, 34),
-                 _('Caps rendered frames before external frame generation. Default keeps the port\'s normal behavior.'))
+                 _('The engine frame rate is the highest it can go. Default keeps the port\'s normal behavior.'))
         self.section(f, _('Resolution'))
         self.row(f, _('Render resolution'), self.choice(f, 'render_height', RENDER_HEIGHTS, 34),
                  _('The size the games draw at, so a 1440p or 4K screen gets a sharper picture, not an enlarged '
