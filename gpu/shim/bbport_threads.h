@@ -31,6 +31,23 @@ inline unsigned Available() {
 inline void MakeBackground() {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_IDLE);
 }
+
+/// The calling thread yields to the game's own threads but is not starved by them.
+inline void MakeBelowNormal() {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+}
+
+/// Normal priority while in scope (a background helper that holds something the GPU thread may
+/// wait for must not be starved by busy game threads).
+struct ScopedNormalPriority {
+    int previous = GetThreadPriority(GetCurrentThread());
+    ScopedNormalPriority() {
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
+    }
+    ~ScopedNormalPriority() {
+        SetThreadPriority(GetCurrentThread(), previous);
+    }
+};
 #else
 
 /// Hardware threads available to the process.
@@ -50,6 +67,13 @@ inline void MakeBackground() {
         setpriority(PRIO_PROCESS, static_cast<id_t>(gettid()), 19);
     }
 }
+
+/// The calling thread yields to the game's own threads but is not starved by them.
+inline void MakeBelowNormal() {
+    setpriority(PRIO_PROCESS, static_cast<id_t>(gettid()), 5);
+}
+
+struct ScopedNormalPriority {};
 #endif
 
 } // namespace BbThreads
