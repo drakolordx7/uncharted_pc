@@ -19,6 +19,8 @@ import subprocess
 import sys
 
 PORT = Path(__file__).resolve().parent
+sys.path.insert(0, str(PORT / 'scripts'))
+import cheats
 EXECUTABLES = {'u1': 'eboot.bin', 'u2': 'big2-ps4_Shipping.elf', 'u3': 'big3-ps4_Shipping.elf'}
 LOADEXEC_EXIT = 101  # runtime_services.c: the game asked for another executable
 
@@ -76,6 +78,12 @@ def locate(env, name):
     if own and not (folder / name).is_file() and (folder / 'eboot.bin').is_file():
         name = 'eboot.bin'
     return folder, name
+
+
+def game_cheats(enabled, exe):
+    """BB_CHEATS ("u1:health,u2:ammo") reduced to the running executable's own entries ("health")."""
+    key = next((k for k, name in EXECUTABLES.items() if name == exe), None)
+    return ','.join(c.split(':', 1)[1] for c in enabled.split(',') if key and c.startswith(f'{key}:'))
 
 
 def prepare(game, exe, out):
@@ -200,6 +208,7 @@ def main():
     player_merge = env.get('BB_GPU_MERGE')
     player_tiny = env.get('BB_TINY_READBACK')
     player_copy = env.get('BB_SCALAR_COPY64_SYNC')
+    all_cheats = env.setdefault('BB_CHEATS_ALL', env.get('BB_CHEATS', ''))
     while True:
         if player_merge is None:
             if exe == EXECUTABLES['u2']:
@@ -230,9 +239,13 @@ def main():
                        *(['--own'] if env.get(f'BB_GAME_DIR_{key.upper()}') else []))
         this = ['--run'] if getattr(sys, 'frozen', False) else [str(Path(__file__).resolve())]
         env['BB_EXE'] = exe
+        env['BB_CHEATS'] = game_cheats(all_cheats, exe)
+        patches = cheats.build(game / exe, out, [c for c in env['BB_CHEATS'].split(',') if c])
         env['BB_RESTART_COMMAND'] = subprocess.list2cmdline([sys.executable, *this, '--after', str(os.getpid()), *args])
         command = [str(probe), str(out / 'boot-linked.bin'), '--content-profile', str(out / 'content.bin'),
                    '--app0', str(game), '--user', str(user_dir), '--timeout', env.get('BB_TIMEOUT', '0')]
+        if patches:
+            command += ['--patches', str(patches)]
         if guest_argv:
             command += ['--guest-argv', str(guest_argv)]
         if key and (trophy_dir / 'trophies.txt').is_file():
