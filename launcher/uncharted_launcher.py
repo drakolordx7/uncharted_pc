@@ -65,7 +65,8 @@ PRESENT_MODES = [('Mailbox', 'Mailbox (low latency, no tearing)'), ('Fifo', 'FIF
 # the prerecorded cutscenes keep 60 frames per second at every setting.
 FRAME_RATES = [('30', '30 FPS'), ('60', '60 FPS (as on PS4)'), ('120', '120 FPS'), ('144', '144 FPS (experimental)'),
                ('165', '165 FPS (experimental)'), ('240', '240 FPS (experimental)')]
-FPS_LIMITS = [('0', 'Default'), ('30', '30 FPS'), ('45', '45 FPS')]
+FPS_LIMITS = [('0', 'Default'), ('30', '30 FPS'), ('45', '45 FPS'), ('60', '60 FPS'),
+              ('90', '90 FPS'), ('120', '120 FPS'), ('240', '240 FPS')]
 # The window (or the screen in fullscreen) shows the game's picture at its size: FSR 1 (EASU) or
 # bilinear when the picture is smaller, then RCAS sharpening (BB_RCAS_ATTENUATION, lower is sharper).
 WINDOW_SIZES = [('1280x720', '1280 × 720'), ('1600x900', '1600 × 900'),
