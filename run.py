@@ -96,12 +96,20 @@ def prepare(game, exe, out):
     stamp.write_text(source, encoding='utf-8')
 
 
+# Render target memory the games need per extra 1080p worth of pixels (measured; docs/resolution.md), and
+# how much the GPU pool (2988 MiB, 3052 in Uncharted 3) can grow before its 32-bit size overflows 4 GiB.
+RT_MIB_PER_1080P = 300
+RT2_MIB_PER_1080P = 150
+POOL_HEADROOM_MIB = 1000
+
+
 def game_res(env):
     """BB_GAME_RES=WxH: the game renders and displays at that size (runtime_display.c patches its
-    display configuration). Its GPU memory pool (render targets) grows with the pixel count and the
-    system's direct memory with it (the game checks the sum): BB_GAME_MEM_MB is the extra, BB_DMEM_MB
-    the total (retail PS4: 5056 MiB)."""
-    value = env.get('BB_GAME_RES', '').lower().replace('\u00d7', 'x')
+    display configuration). Its render target heaps grow with the pixel count: BB_GAME_RT_MB and
+    BB_GAME_RT2_MB are the extra MiB of the two heaps, BB_GAME_FREE_MB the unreserved GPU memory
+    given up to keep the pool below the 4 GiB the game's arena can address, BB_DMEM_MB the system
+    direct memory (retail PS4: 5056 MiB) that holds the bigger pool. All can be set by hand."""
+    value = env.get('BB_GAME_RES', '').lower().replace('×', 'x')
     try:
         width, height = (int(part) for part in value.split('x'))
     except ValueError:
@@ -111,13 +119,22 @@ def game_res(env):
         env.pop('BB_GAME_RES', None)
         return
     env['BB_GAME_RES'] = f'{width}x{height}'
-    ratio = width * height / (1920 * 1080)
-    extra = int(env['BB_GAME_MEM_MB']) if env.get('BB_GAME_MEM_MB', '').isdigit() else (int((ratio - 1) * 1100) + 256 if ratio > 1 else 0)
-    extra = -(-extra // 64) * 64   # the game wants its heaps in multiples of 2 MiB
-    env['BB_GAME_MEM_MB'] = str(extra)
-    if extra and not env.get('BB_DMEM_MB'):
-        env['BB_DMEM_MB'] = str(min(16384, 5056 + extra))
-    print(f"Game resolution {width}x{height}: GPU memory +{extra} MiB, direct memory {env.get('BB_DMEM_MB', 5056)} MiB", flush=True)
+    scale = max(0.0, width * height / (1920 * 1080) - 1)
+
+    def grow(name, per_pixel_mib):
+        if not env.get(name, '').lstrip('-').isdigit():
+            env[name] = str(-(-int(scale * per_pixel_mib) // 64) * 64)   # the game wants its heaps in multiples of 2 MiB
+        return int(env[name])
+    rt, rt2 = grow('BB_GAME_RT_MB', RT_MIB_PER_1080P), grow('BB_GAME_RT2_MB', RT2_MIB_PER_1080P)
+    excess = max(0, rt + rt2 - POOL_HEADROOM_MIB)
+    if not env.get('BB_GAME_FREE_MB', '').isdigit():
+        env['BB_GAME_FREE_MB'] = str(min(excess, 160))
+    pool = rt + rt2 - int(env['BB_GAME_FREE_MB'])
+    if not env.get('BB_DMEM_MB') and pool > 0:
+        env['BB_DMEM_MB'] = str(min(16384, 5056 + pool))
+    print(f"Game resolution {width}x{height}: render target heaps +{rt} +{rt2} MiB, unreserved GPU memory -"
+          f"{env['BB_GAME_FREE_MB']} MiB, direct memory {env.get('BB_DMEM_MB', 5056)} MiB"
+          + ('; above what the game can address (4 GiB GPU pool)' if pool > POOL_HEADROOM_MIB else ''), flush=True)
 
 
 def main():
