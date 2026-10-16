@@ -232,6 +232,7 @@ std::shared_ptr<DrawPreparation::Submission> DrawPreparation::Build(
         submission->num_draws += IsDirectDraw(header->type3.opcode);
     });
     submission->draws = std::make_unique<PreparedDraw[]>(submission->num_draws);
+    submission->draw_taken = std::make_unique<std::atomic<bool>[]>(submission->num_draws);
     return submission;
 }
 
@@ -404,19 +405,52 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
         return {};
     };
 
+    // Compile assist: while pipelines are being compiled (the GPU thread and the owner of a
+    // buffer meet them one after another), the other helpers replay the same buffer and build
+    // the pipelines of the draws they take, so several compile at once.
+    u64 assisted_seq = 0;
+    bool assisted_any = false;
+    const auto assistable = [&]() -> std::shared_ptr<Submission> {
+        if (!pipeline_cache.CompilingRecently()) {
+            return {};
+        }
+        const u64 gpu = gpu_seq.load(std::memory_order_acquire);
+        for (const auto& submission : submissions) {
+            if (submission->seq >= gpu && submission->seq <= gpu + 1 &&
+                submission->seq >= tail_seq && (!assisted_any || submission->seq > assisted_seq) &&
+                submission->scanned.load(std::memory_order_acquire) &&
+                submission->claimed.load(std::memory_order_relaxed) &&
+                !submission->gpu_done.load(std::memory_order_acquire) && submission->num_draws) {
+                return submission;
+            }
+        }
+        return {};
+    };
+
     while (!stop.stop_requested()) {
         std::shared_ptr<Submission> target;
+        bool assisting = false;
         {
             std::unique_lock lk{mutex};
             // gpu_seq moves without the lock: keep the candidate the predicate found.
             cv.wait(lk, stop, [&] {
                 target = baseline_ready ? claimable() : nullptr;
+                assisting = false;
+                if (!target && baseline_ready) {
+                    target = assistable();
+                    assisting = target != nullptr;
+                }
                 return target != nullptr;
             });
             if (stop.stop_requested() || !target) {
                 return;
             }
-            target->claimed.store(true, std::memory_order_relaxed);
+            if (assisting) {
+                assisted_seq = target->seq;
+                assisted_any = true;
+            } else {
+                target->claimed.store(true, std::memory_order_relaxed);
+            }
             // Buffers between this worker's state and the target: their deltas. A position
             // already collected (or past the target) restarts from the queue's tail state.
             if (position == NoPosition || position < tail_seq || position > target->seq) {
@@ -436,14 +470,34 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
         u64 checksum = target->start_checksum;
         u32 ordinal = 0;
         arena = FlatArena{};
+        bool abandoned = false;
         ForEachPacket(target->commands, [&](const AmdGpu::PM4Header* header) {
+            if (abandoned) {
+                return;
+            }
             AmdGpu::Liverpool::ApplyGraphicsRegisterPacket(*regs, header, checksum);
             if (!IsDirectDraw(header->type3.opcode)) {
+                return;
+            }
+            if (assisting) {
+                // Only the pipeline is wanted; the buffer's owner prepares the draw itself.
+                if (target->gpu_done.load(std::memory_order_acquire) ||
+                    target->seq < gpu_seq.load(std::memory_order_acquire)) {
+                    abandoned = true;
+                } else if (ordinal < target->num_draws &&
+                           !target->draw_taken[ordinal].exchange(true)) {
+                    prep_worker.stages.clear();
+                    prep_worker.failed = false;
+                    sel.draw_indirect_params = {};
+                    pipeline_cache.PrepareGraphicsPipeline(sel);
+                }
+                ++ordinal;
                 return;
             }
             // Past the GPU thread the draws are no longer worth preparing.
             if (ordinal < target->num_draws &&
                 target->seq >= gpu_seq.load(std::memory_order_acquire)) {
+                target->draw_taken[ordinal].store(true, std::memory_order_relaxed);
                 auto& draw = target->draws[ordinal];
                 prep_worker.stages.clear();
                 prep_worker.failed = false;
@@ -477,6 +531,11 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
             }
             ++ordinal;
         });
+        if (assisting) {
+            arena = FlatArena{};
+            position = abandoned ? NoPosition : target->seq + 1;
+            continue;
+        }
         // The arena's chunks live as long as the submission.
         target->flat_chunks = std::move(arena.chunks);
         position = target->seq + 1;
