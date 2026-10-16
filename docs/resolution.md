@@ -76,8 +76,9 @@ surround output on this machine).
   leaves (the texture heap would have to shrink by over 500 MiB, and the movie player's
   memory check then fails). The launcher stops at 5.8 million pixels (3200x1800). Raising it
   needs the arena's 32-bit size handled in the game's code.
-- Uncharted 1 and 3 were checked at 2560x1440 (U1: menus and the opening movie and cutscenes;
-  U3: the pub fight) and 1.00 only at the title menu of U2; larger sizes on them are untested.
+- Uncharted 1 and 3 were checked at 2560x1440 (U1: menus, the opening movie and cutscenes;
+  U3: the pub fight; U3 also at 3200x1800 and 3840x1620) and 1.00 only at the title menu of U2.
+  One white blob appeared on a character in the 3840x1620 U3 shot (a flash like the one in the
+  README's known problems, not confirmed as resolution related).
 - Fixed-size effects of the games (bloom radii, shadow maps) do not grow with the picture.
-- The movie player's frame buffers were measured up to 8 MiB (2880x1620, 3440x1440); 3200x1800
-  movies were not played.
+- Movies were played at 2560x1440, 3440x1440 and (Uncharted 1, opening movie and cutscenes) 3200x1800.
