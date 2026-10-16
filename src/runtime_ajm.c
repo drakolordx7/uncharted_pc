@@ -280,7 +280,7 @@ static uint32_t read_bits(const uint8_t *data, size_t *offset, unsigned count) {
 static ABI int32_t mp3_parse_frame(const uint8_t *data, uint32_t size, int parse_ofl, Mp3Frame *frame) {
     if (!data || size<4 || !frame) return ERR_INVALID_PARAMETER;
     uint32_t h=(uint32_t)data[0]<<24 | (uint32_t)data[1]<<16 | (uint32_t)data[2]<<8 | data[3];
-    if ((h>>21)!=0x7ff) return ERR_INVALID_PARAMETER;
+    if ((h>>21)!=0x7ff || ((h>>17)&3)!=1) return ERR_INVALID_PARAMETER; /* sync word, Layer III */
     unsigned version=(h>>19)&3, protection=(h>>16)&1, bitrate_index=(h>>12)&15, rate_index=(h>>10)&3;
     unsigned padding=(h>>9)&1, mono=((h>>6)&3)==3;
     frame->sample_rate=(uint32_t)mp3_rates[version][rate_index];
