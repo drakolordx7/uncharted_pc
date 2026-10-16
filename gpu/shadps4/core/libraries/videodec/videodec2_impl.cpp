@@ -21,6 +21,14 @@ namespace Libraries::Videodec2 {
 // The games read the chroma plane after luma rows padded to 64 (1088 for 1080p; 1472 for 1440p).
 static constexpr u32 kHeightAlignment = 64;
 
+// Frames fitted into a game display size (BB_GAME_RES) use the display's own row length (3440 for
+// 3440x1440), which the games take as the pitch of the movie planes; others the usual 64.
+static u32 PitchAlignment() {
+    s32 w = 0, h = 0;
+    GameResolution(w, h);
+    return w ? 16 : 64;
+}
+
 VdecDecoder::VdecDecoder(const OrbisVideodec2DecoderConfigInfo& config_info,
                          const OrbisVideodec2DecoderMemoryInfo& memory_info) {
     const AVCodec* codec = avcodec_find_decoder(
@@ -119,11 +127,11 @@ s32 VdecDecoder::Decode(const OrbisVideodec2InputData& input_data,
     const u64 info_size =
         is_avc ? sizeof(OrbisVideodec2AvcPictureInfo) : sizeof(OrbisVideodec2HevcPictureInfo);
     Videodec::CopyNV12Data((u8*)frame_buffer.frame_buffer,
-                           frame_buffer.frame_buffer_size - info_size, *frame, kHeightAlignment);
+                           frame_buffer.frame_buffer_size - info_size, *frame, kHeightAlignment, PitchAlignment());
     frame_buffer.is_accepted = true;
 
     const auto width = Common::AlignUp<u32>(frame->width, 16);
-    const auto pitch = Common::AlignUp<u32>(frame->width, 64);
+    const auto pitch = Common::AlignUp<u32>(frame->width, PitchAlignment());
     const auto height = Common::AlignUp<u32>(frame->height, kHeightAlignment);
 
     output_info.is_valid = true;
@@ -213,11 +221,11 @@ s32 VdecDecoder::Flush(OrbisVideodec2FrameBuffer& frame_buffer,
     const u64 info_size =
         is_avc ? sizeof(OrbisVideodec2AvcPictureInfo) : sizeof(OrbisVideodec2HevcPictureInfo);
     Videodec::CopyNV12Data((u8*)frame_buffer.frame_buffer,
-                           frame_buffer.frame_buffer_size - info_size, *frame, kHeightAlignment);
+                           frame_buffer.frame_buffer_size - info_size, *frame, kHeightAlignment, PitchAlignment());
     frame_buffer.is_accepted = true;
 
     const auto width = Common::AlignUp<u32>(frame->width, 16);
-    const auto pitch = Common::AlignUp<u32>(frame->width, 64);
+    const auto pitch = Common::AlignUp<u32>(frame->width, PitchAlignment());
     const auto height = Common::AlignUp<u32>(frame->height, kHeightAlignment);
 
     output_info.is_valid = true;
