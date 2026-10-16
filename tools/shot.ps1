@@ -13,7 +13,7 @@ public static class Win {
 '@
 [void][Win]::SetProcessDpiAwarenessContext([IntPtr](-4))  # per-monitor v2: real pixels
 $p = if ($ProcessId) { Get-Process -Id $ProcessId -ErrorAction SilentlyContinue } else {
-    Get-Process bb-probe -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1 }
+    Get-Process -Name 'bb-probe*' -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1 }
 if (-not $p) { Write-Error 'No game window'; exit 1 }
 $r = New-Object Win+RECT
 [void][Win]::GetClientRect($p.MainWindowHandle, [ref]$r)

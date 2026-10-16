@@ -487,17 +487,21 @@ struct CompileTimer {
     const char* kind;
     u64 id;
     u32 extra;
+    bool worker;
     std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
     CompileTimer(const char* kind_, u64 id_ = 0, u32 extra_ = 0)
-        : kind{kind_}, id{id_}, extra{extra_} {
+        : kind{kind_}, id{id_}, extra{extra_}, worker{std::strstr(kind_, "-w") != nullptr} {
         g_last_compile_ms.store(NowMs(), std::memory_order_relaxed);
     }
     ~CompileTimer() {
         const auto ns = u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                 std::chrono::steady_clock::now() - start)
                                 .count());
-        g_bb_compile_ns += ns;
-        ++g_bb_compiles;
+        // The frame statistics count what the GPU thread itself spent (workers: kind "...-w").
+        if (!worker) {
+            g_bb_compile_ns += ns;
+            ++g_bb_compiles;
+        }
         g_last_compile_ms.store(NowMs(), std::memory_order_relaxed);
         static const bool log = std::getenv("BB_COMPILE_LOG") != nullptr;
         if (log) {
@@ -681,7 +685,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     num_new_pipelines.fetch_add(1, std::memory_order_relaxed);
     driver_cache_dirty.fetch_add(1, std::memory_order_relaxed);
 
-    const GraphicsPipeline* result = pipeline.get();
+    const GraphicsPipeline* result = nullptr;
     {
         std::unique_lock lock{pipelines_mutex};
         if (EmulatorSettings.IsShaderCollect()) {
@@ -692,7 +696,9 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
                 }
             }
         }
-        graphics_pipelines.emplace(sel.graphics_key, std::move(pipeline));
+        // The preload may have inserted the same one meanwhile: keep that.
+        result = graphics_pipelines.try_emplace(sel.graphics_key, std::move(pipeline))
+                     .first->second.get();
     }
     ReleaseClaim(claim_id);
     sel.fetch_shader.reset();
@@ -704,25 +710,32 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
     if (!RefreshComputeKey()) {
         return nullptr;
     }
-    const auto [it, is_new] = compute_pipelines.try_emplace(compute_key);
-    if (is_new) {
-        const auto pipeline_hash = std::hash<ComputePipelineKey>{}(compute_key);
-        LOG_INFO(Render_Vulkan, "Compiling compute pipeline {:#x}", pipeline_hash);
-        CompileTimer timer{"cpipe", pipeline_hash};
-
-        ComputePipeline::SerializationSupport sdata{};
-        it.value() = std::make_unique<ComputePipeline>(instance, scheduler, desc_heap, profile,
-                                                       *pipeline_cache, compute_key, *sel.infos[0],
-                                                       sel.modules[0], sdata, false);
-        RegisterPipelineData(compute_key, sdata);
-        num_new_pipelines.fetch_add(1, std::memory_order_relaxed);
-        driver_cache_dirty.fetch_add(1, std::memory_order_relaxed);
-
-        if (EmulatorSettings.IsShaderCollect()) {
-            auto& m = sel.modules[0];
-            module_related_pipelines[m].emplace_back(compute_key);
+    {
+        std::shared_lock lock{pipelines_mutex};
+        const auto it = compute_pipelines.find(compute_key);
+        if (it != compute_pipelines.end()) {
+            return it->second.get();
         }
     }
+    const auto pipeline_hash = std::hash<ComputePipelineKey>{}(compute_key);
+    LOG_INFO(Render_Vulkan, "Compiling compute pipeline {:#x}", pipeline_hash);
+    CompileTimer timer{"cpipe", pipeline_hash};
+
+    ComputePipeline::SerializationSupport sdata{};
+    auto pipeline = std::make_unique<ComputePipeline>(instance, scheduler, desc_heap, profile,
+                                                      *pipeline_cache, compute_key, *sel.infos[0],
+                                                      sel.modules[0], sdata, false);
+    RegisterPipelineData(compute_key, sdata);
+    num_new_pipelines.fetch_add(1, std::memory_order_relaxed);
+    driver_cache_dirty.fetch_add(1, std::memory_order_relaxed);
+
+    std::unique_lock lock{pipelines_mutex};
+    if (EmulatorSettings.IsShaderCollect()) {
+        auto& m = sel.modules[0];
+        module_related_pipelines[m].emplace_back(compute_key);
+    }
+    // The preload may have inserted the same one meanwhile: keep that.
+    const auto [it, inserted] = compute_pipelines.try_emplace(compute_key, std::move(pipeline));
     return it->second.get();
 }
 
@@ -1047,7 +1060,7 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
     LOG_INFO(Render_Vulkan, "Compiling {} shader {:#x} {}", info.hw_stage, info.pgm_hash,
              perm_idx != 0 ? "(permutation)" : "");
     DumpShader(code, info.pgm_hash, info.hw_stage, perm_idx, "bin");
-    CompileTimer timer{"shader", info.pgm_hash, u32(perm_idx) | (u32(info.hw_stage) << 16) | ((info.hw_stage == HwStage::Vertex && runtime_info.hw.vs.motion_vectors) ||
+    CompileTimer timer{&translate_pools == &pools ? "shader" : "shader-w", info.pgm_hash, u32(perm_idx) | (u32(info.hw_stage) << 16) | ((info.hw_stage == HwStage::Vertex && runtime_info.hw.vs.motion_vectors) ||
                                     (info.hw_stage == HwStage::Fragment && runtime_info.hw.fs.motion_vectors)
                                 ? 0x80000000u
                                 : 0u)};
@@ -1083,7 +1096,30 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
 
 void PipelineCache::AcquireClaim(u64 id) {
     std::unique_lock lock{claim_mutex};
-    claim_cv.wait(lock, [&] { return !claims.contains(id); });
+    if (claims.contains(id)) {
+        // Somebody else is building it: the time spent waiting is a stall of the caller.
+        const auto start = std::chrono::steady_clock::now();
+        while (!claim_cv.wait_for(lock, std::chrono::seconds(1),
+                                  [&] { return !claims.contains(id); })) {
+            std::printf("Claim wait: %016llx held for over %lld ms (%s thread)\n",
+                        static_cast<unsigned long long>(id),
+                        static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                   std::chrono::steady_clock::now() - start)
+                                                   .count()),
+                        BbThreads::IsBackground() ? "worker" : "GPU");
+        }
+        const auto ns = u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now() - start)
+                                .count());
+        if (!BbThreads::IsBackground()) {
+            g_bb_compile_ns += ns;
+        }
+        static const bool log = std::getenv("BB_COMPILE_LOG") != nullptr;
+        if (log && ns > 200000) {
+            std::printf("Compile: wait%s %016llx 0 %.2f ms\n", BbThreads::IsBackground() ? "-w" : "",
+                        static_cast<unsigned long long>(id), double(ns) / 1e6);
+        }
+    }
     claims.insert(id);
 }
 
