@@ -43,9 +43,22 @@ public:
 
     void ForEachBlob(BlobType type, const std::function<void(std::vector<u8>&& data)>& func);
 
+    /// bbport: names (without extension) of the stored blobs of a type, for loading them one by
+    /// one through Load() (in parallel for a folder cache; the zip reader is not thread-safe).
+    std::vector<std::string> ListBlobNames(BlobType type);
+    /// bbport: the cache folder (valid after Open(); empty for an archived cache).
+    [[nodiscard]] const std::filesystem::path& Directory() const {
+        return directory;
+    }
+
+    /// bbport: waits (at most `max_ms`) until the queued writes are on disk, so a game that
+    /// ends right after a compile does not lose it.
+    void Flush(u32 max_ms);
+
 private:
     std::jthread io_worker{};
     std::filesystem::path cache_path{};
+    std::filesystem::path directory{}; ///< cache_path for a folder cache, empty for an archive
     bool opened{};
 };
 

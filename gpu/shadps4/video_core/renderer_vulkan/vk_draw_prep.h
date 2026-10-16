@@ -9,7 +9,10 @@
 // the graphics pipeline and resource sharps of each direct draw. All helpers run as
 // SCHED_IDLE: they only use idle cores. The GPU thread uses a prepared draw only when the
 // running register checksums match and the flattened user data it computes itself equals the
-// worker's; otherwise it takes the regular path. Workers never create or compile anything.
+// worker's; otherwise it takes the regular path. Workers also translate the programs and build the
+// pipelines a draw needs and the GPU thread does not have yet (PipelineCache::GetProgram,
+// EnsureWorkerPipeline), and while that goes on the idle ones help with the same buffer
+// (compile assist), so a scene's new pipelines compile on several threads at once.
 
 #pragma once
 
@@ -127,6 +130,8 @@ public:
         std::atomic<bool> scanned{false};
         std::atomic<bool> claimed{false};
         std::atomic<bool> gpu_done{false};
+        /// Draws a helper already took for pipeline compilation (see WorkerLoop, assist).
+        std::unique_ptr<std::atomic<bool>[]> draw_taken;
     };
 
 private:

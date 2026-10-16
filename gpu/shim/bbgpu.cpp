@@ -248,6 +248,7 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
         }
         std::printf("Window closed (close button, Alt+F4 or system quit request)\n");
         std::fflush(stdout);
+        Vulkan::FlushPipelineCacheForExit();
         std::_Exit(0);
     });
     g_window_thread.detach();
