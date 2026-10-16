@@ -129,6 +129,11 @@ def game_res(env):
     excess = max(0, rt + rt2 - POOL_HEADROOM_MIB)
     if not env.get('BB_GAME_FREE_MB', '').isdigit():
         env['BB_GAME_FREE_MB'] = str(min(excess, 160))
+    # The movie player's four frame buffers (4 MiB each for 1920x1088): a movie frame is fitted into the game's
+    # size, luma rows padded to 64, plus the picture info.
+    if not env.get('BB_GAME_MOVIE_MB', '').isdigit():
+        frame_bytes = (-(-width // 64) * 64) * (-(-height // 64) * 64) * 3 // 2 + 65536
+        env['BB_GAME_MOVIE_MB'] = str(max(4, -(-frame_bytes // (2 << 20)) * 2))
     pool = rt + rt2 - int(env['BB_GAME_FREE_MB'])
     if not env.get('BB_DMEM_MB') and pool > 0:
         env['BB_DMEM_MB'] = str(min(16384, 5056 + pool))
