@@ -165,9 +165,20 @@ static void check_cpu(void) {
         {(basic>>23)&1,"POPCNT"}, {(basic>>20)&1,"SSE4.2"},
     };
     char missing[64]="";
-    for (size_t i=0;i<sizeof(features)/sizeof(*features);++i)
-        if (!features[i].present) { if (*missing) strcat(missing,", "); strcat(missing,features[i].name); }
-    if (!*missing) return;
+    int no_movbe=0;
+    for (size_t i=0;i<sizeof(features)/sizeof(*features);++i) {
+        if (features[i].present) continue;
+#ifdef _WIN32
+        /* MOVBE alone (AMD FX): the fault handler does it (emulate_movbe). */
+        if (!strcmp(features[i].name,"MOVBE")) { no_movbe=1; continue; }
+#endif
+        if (*missing) strcat(missing,", ");
+        strcat(missing,features[i].name);
+    }
+    if (!*missing) {
+        if (no_movbe) printf("CPU: no MOVBE, the game's MOVBE instructions are emulated (slower)\n");
+        return;
+    }
     unsigned words[12]={0};
     char brand[49]="";
     if (__get_cpuid_max(0x80000000,NULL)>=0x80000004)
@@ -230,6 +241,69 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
     TerminateProcess(GetCurrentProcess(),3);
     return EXCEPTION_CONTINUE_SEARCH;
 }
+/* AMD FX (Piledriver) has everything the PS4's code needs except MOVBE (byte-swapped loads and
+ * stores, a few hundred places in each game). There it raises an illegal instruction: the load
+ * or store is done here and the guest goes on after it (issue #251). Register operand forms do
+ * not exist; segment and address-size prefixes are left to the fault report. */
+static volatile LONG64 movbe_emulated;
+/* Decodes a MOVBE with a memory operand at p (regs: Rax, Rcx, Rdx, Rbx, Rsp, Rbp, Rsi, Rdi,
+ * R8-R15, as in CONTEXT): its length, or 0 when it is not one. */
+static int movbe_decode(const unsigned char *p, const uint64_t *regs, uint64_t rip, uint64_t *address,
+                        int *reg, int *width, int *store) {
+    int n=0, size16=0, rex=0;
+    while (n<3 && p[n]==0x66) { size16=1; ++n; }
+    if ((p[n]&0xf0)==0x40) rex=p[n++];
+    if (p[n]!=0x0f || p[n+1]!=0x38 || (p[n+2]!=0xf0 && p[n+2]!=0xf1)) return 0;
+    *store=p[n+2]==0xf1;
+    n+=3;
+    const unsigned char modrm=p[n++];
+    const int mod=modrm>>6, rm=modrm&7;
+    *reg=((modrm>>3)&7)|((rex&4)<<1);
+    if (mod==3) return 0;
+    uint64_t at=0;
+    int rip_relative=0;
+    if (rm==4) {
+        const unsigned char sib=p[n++];
+        const int index=((sib>>3)&7)|((rex&2)<<2), base=(sib&7)|((rex&1)<<3);
+        if (index!=4) at+=regs[index]<<(sib>>6);
+        if ((sib&7)==5 && mod==0) { int32_t d; memcpy(&d,p+n,4); n+=4; at+=(uint64_t)(int64_t)d; }
+        else at+=regs[base];
+    } else if (rm==5 && mod==0) {
+        int32_t d; memcpy(&d,p+n,4); n+=4; at=(uint64_t)(int64_t)d; rip_relative=1;
+    } else {
+        at=regs[rm|((rex&1)<<3)];
+    }
+    if (mod==1) { at+=(uint64_t)(int64_t)(int8_t)p[n]; n+=1; }
+    else if (mod==2) { int32_t d; memcpy(&d,p+n,4); n+=4; at+=(uint64_t)(int64_t)d; }
+    if (rip_relative) at+=rip+(uint64_t)n;
+    *address=at;
+    *width=(rex&8) ? 8 : size16 ? 2 : 4;
+    return n;
+}
+static int emulate_movbe(CONTEXT *c) {
+    DWORD64 *regs=&c->Rax;
+    uint64_t address;
+    int reg, width, store;
+    const int n=movbe_decode((const unsigned char *)(uintptr_t)c->Rip,(const uint64_t *)regs,c->Rip,
+                             &address,&reg,&width,&store);
+    if (!n) return 0;
+    void *memory=(void *)(uintptr_t)address;
+    if (store) {
+        const uint64_t v=regs[reg];
+        if (width==8) { uint64_t s=__builtin_bswap64(v); memcpy(memory,&s,8); }
+        else if (width==4) { uint32_t s=__builtin_bswap32((uint32_t)v); memcpy(memory,&s,4); }
+        else { uint16_t s=__builtin_bswap16((uint16_t)v); memcpy(memory,&s,2); }
+    } else if (width==8) {
+        uint64_t v; memcpy(&v,memory,8); regs[reg]=__builtin_bswap64(v);
+    } else if (width==4) {
+        uint32_t v; memcpy(&v,memory,4); regs[reg]=__builtin_bswap32(v);
+    } else {
+        uint16_t v; memcpy(&v,memory,2); regs[reg]=(regs[reg]&~(DWORD64)0xffff)|__builtin_bswap16(v);
+    }
+    c->Rip+=(DWORD64)n;
+    InterlockedIncrement64(&movbe_emulated);
+    return 1;
+}
 static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
     const EXCEPTION_RECORD *record=info->ExceptionRecord;
     DWORD code=record->ExceptionCode;
@@ -249,6 +323,9 @@ static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
             return EXCEPTION_CONTINUE_EXECUTION;
         }
     }
+    if (code==EXCEPTION_ILLEGAL_INSTRUCTION && image &&
+        (uintptr_t)info->ContextRecord->Rip-(uintptr_t)image<0x20000000 &&
+        emulate_movbe(info->ContextRecord)) return EXCEPTION_CONTINUE_EXECUTION;
     if (code==EXCEPTION_ACCESS_VIOLATION || code==EXCEPTION_ILLEGAL_INSTRUCTION || code==EXCEPTION_PRIV_INSTRUCTION ||
         code==EXCEPTION_STACK_OVERFLOW || code==EXCEPTION_INT_DIVIDE_BY_ZERO || code==EXCEPTION_DATATYPE_MISALIGNMENT) {
         /* Faults in guest code, the loader or the runtime end the process with a report; drivers
