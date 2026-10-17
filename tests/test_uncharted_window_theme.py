@@ -3,7 +3,7 @@ from contextlib import ExitStack
 import sys
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from paths import ROOT
 
@@ -15,6 +15,10 @@ class FakeRoot:
     def __init__(self):
         self.calls = []
         self.map_callback = None
+        self.tk = Mock()
+
+    def update(self):
+        pass
 
     def title(self, value):
         self.calls.append(('title', value))
@@ -41,7 +45,8 @@ class FakeRoot:
         self.calls.append(('after', value))
 
     def bind(self, sequence, callback, add=None):
-        self.map_callback = callback
+        if sequence == '<Map>':
+            self.map_callback = callback
         self.calls.append(('bind', sequence, add))
         return 'map-binding'
 
@@ -72,6 +77,9 @@ class LauncherWindowThemeTests(unittest.TestCase):
             stack.enter_context(patch.object(uncharted_launcher.ctypes, 'windll', fake_windll))
             stack.enter_context(patch.object(
                 uncharted_launcher, 'load_json', return_value={'check_updates': False}))
+            stack.enter_context(patch.object(uncharted_launcher, 'work_metrics', return_value=(None, None)))
+            stack.enter_context(patch.object(uncharted_launcher.Launcher, 'content', Mock(), create=True))
+            stack.enter_context(patch.object(uncharted_launcher.Launcher, 'pages', {}, create=True))
             for method in ('configure_art', 'set_icon', 'load_fonts', 'style', 'build', 'show'):
                 stack.enter_context(patch.object(uncharted_launcher.Launcher, method))
 
