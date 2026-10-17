@@ -255,7 +255,10 @@ struct HwComputeRuntimeInfo {
     std::array<bool, 3> tgid_enable;
 
     bool operator==(const HwComputeRuntimeInfo& other) const noexcept {
-        return workgroup_size == other.workgroup_size && tgid_enable == other.tgid_enable;
+        // bbport: the shared memory size too: it sizes the shared array and bounds its accesses
+        // (SharedMemoryBoundsPass), and the same shader is dispatched with different sizes.
+        return shared_memory_size == other.shared_memory_size &&
+               workgroup_size == other.workgroup_size && tgid_enable == other.tgid_enable;
     }
 };
 
