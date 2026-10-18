@@ -723,6 +723,7 @@ static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t imag
     unsigned char *thunks=NULL;
     size_t used=0;
     uint8_t installed[32]={0};
+    uint64_t hook_offsets[32]; size_t hooks_done=0;
     guest_image_size=image_size;
     if (count>sizeof(installed)) count=sizeof(installed);
     /* A/B tests: BB_CALLBACKS=0 installs none, BB_CALLBACKS_SKIP=<text> none whose name contains the text */
@@ -730,15 +731,16 @@ static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t imag
     if (off && off[0]=='0') { printf("Callbacks: disabled (BB_CALLBACKS=0)\n"); return; }
     for (size_t i=0;i<count;++i) {
         const RuntimeGuestCallback *c=&callbacks[i];
-        int again=0;
-        for (size_t j=0;j<i;++j) if (installed[j] && !strcmp(callbacks[j].name,c->name)) again=1;
-        if (again) continue;                                          /* a variant already matched */
         if (skip && *skip && strstr(c->name,skip)) continue;
         uint64_t found=0;
         size_t length=0, matches=find_pattern(segments,ns,c->pattern,&found,&length);
         if (matches>1) { printf("Callbacks: %s: %zu matches, not installed\n",c->name,matches); continue; }
         if (!matches) continue;
         const uint64_t offset=found+c->skip;
+        int hooked=0;
+        for (size_t j=0;j<hooks_done;++j) if (hook_offsets[j]==offset) hooked=1;
+        if (hooked) continue;                                          /* an earlier entry took this site */
+        if (hooks_done<sizeof(hook_offsets)/sizeof(*hook_offsets)) hook_offsets[hooks_done++]=offset;
         if (!c->callback) {
             memcpy(image+offset,c->patch,c->moved);
             installed[i]=1;

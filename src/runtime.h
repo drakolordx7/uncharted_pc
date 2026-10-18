@@ -99,7 +99,8 @@ void runtime_fiber_report(void);
  * (RIP-relative displacements, call targets). The pattern must match exactly once in the
  * executable segments; the hook sits `skip` bytes into the match, and `moved` bytes of whole
  * position-independent instructions there move to the thunk. Entries with the same name are
- * variants (one per build of the code): the first that matches is installed.
+ * variants (one per build of the code, or one per copy of the code in a build): each one that matches is
+ * installed, in table order, and a site is hooked once (an entry may be a catch-all after specific ones).
  * The callback gets the guest's rdi, rsi and r14 there, the image base, and the registers the
  * thunk saved. Without a callback, `patch` (`moved` bytes) replaces the code at the hook instead
  * (a fix in the game's code). */
