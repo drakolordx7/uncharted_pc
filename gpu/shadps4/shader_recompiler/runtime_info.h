@@ -275,6 +275,8 @@ struct RuntimeInfo {
         u32 num_user_data;
         u32 num_input_vgprs;
         u32 num_allocated_vgprs;
+        /// DX10_CLAMP: the clamp output modifier turns NaN into 0 (shadPS4 PR #5257).
+        u32 dx10_clamp;
         bool operator==(const Properties&) const noexcept = default;
     } props;
     union SwInfo {

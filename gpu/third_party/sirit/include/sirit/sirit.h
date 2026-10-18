@@ -856,6 +856,10 @@ public:
     /// used by min() and max() are those of FMin and FMax.
     Id OpFClamp(Id result_type, Id x, Id min_val, Id max_val);
 
+    /// Result is min(max(x, minVal), maxVal), with the NaN semantics of NMin and NMax: a NaN x
+    /// gives minVal. Result is undefined if minVal > maxVal.
+    Id OpNClamp(Id result_type, Id x, Id min_val, Id max_val);
+
     /// Result is min(max(x, minVal), maxVal), where x, minVal and maxVal are interpreted as
     /// unsigned integers. Result is undefined if minVal > maxVal.
     Id OpUClamp(Id result_type, Id x, Id min_val, Id max_val);
