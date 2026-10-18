@@ -36,8 +36,8 @@ Starting
   C Circle, F Square, E Triangle, Q/G L1/R1, Left Shift/V L3/R3, arrows and wheel d-pad,
   Escape/Enter Options, Tab touchpad. The cursor stays in the game window; hold Left Alt to
   free it. Insert opens the in-game settings menu. Bindings are saved in input.ini.
-  Mouse look works in Drake's Fortune and Drake's Deception on game versions 1.00 and 1.02; in Among
-  Thieves it is the same code, tested so far only up to the opening train scene.
+  Mouse look works in all three games, aiming included, on game versions 1.00 and 1.02
+  (Among Thieves 1.00: checked only up to the opening scene).
 
 Data
 - Saves and shader caches: user\ next to Uncharted.exe (the launcher can pick another folder).
