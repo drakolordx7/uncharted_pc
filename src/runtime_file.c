@@ -391,17 +391,26 @@ static int commit_file(const File *f) {
    original size. The logos cannot be skipped with a button. Reported missing, opened empty or
    cut short without the padding, the movie player re-streams it until it asserts
    (m_debugStreamCount <= 10 in UpdateFileStreaming); one picture padded never ended. U3 shows its
-   title screen ~8 s after start instead of ~16 s. */
-static int skip_intro_movie(const char *guest) {
+   title screen ~8 s after start instead of ~16 s. The music over the logos is its own file
+   (shareddata/sound/sce-ndi-logos.xvag): reported missing, it is simply not played. */
+static int skip_intro_enabled(void) {
     static int enabled=-1;
     if (enabled<0) { const char *env=getenv("BB_SKIP_INTRO"); enabled=env && env[0]=='1'; }
-    if (!enabled) return 0;
-    const char *name=strrchr(guest,'/');
-    return name && !strcmp(name+1,"sce-ndi-logos.bsf");
+    return enabled;
 }
+static int skip_intro_file(const char *guest,const char *file) {
+    const char *name=strrchr(guest,'/');
+    return skip_intro_enabled() && name && !strcmp(name+1,file);
+}
+static int skip_intro_movie(const char *guest) { return skip_intro_file(guest,"sce-ndi-logos.bsf"); }
 /* All operations return >=0 or -(host errno); wrappers adapt the convention. */
 static int64_t do_open(const char *guest,int flags,int mode) {
     if (game_path(guest) && (flags & (3|0x8|0x400|0x800))) return -EROFS;
+    /* The logo music plays from its own file (shareddata/sound/sce-ndi-logos.xvag). */
+    if (skip_intro_file(guest,"sce-ndi-logos.xvag")) {
+        printf("Runtime: open(%s) -> intro music skipped (BB_SKIP_INTRO)\n",guest);
+        return -ENOENT;
+    }
     char path[1024];
     int e=translate(guest,path,sizeof(path));
     if (e) return -e;

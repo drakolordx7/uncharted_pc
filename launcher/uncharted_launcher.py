@@ -1451,7 +1451,7 @@ class Launcher:
         self.row(f, _('Player name'), name)
         self.check(f, 'skip_intro', _('Skip intro logos'),
                    _('Starts at the title screen without the Sony, Naughty Dog and Bluepoint logos '
-                     '(they cannot be skipped with a button). All three games.'))
+                     'and their music (they cannot be skipped with a button). All three games.'))
 
     def build_display(self):
         f = self.page('display', _('Display'), '')
