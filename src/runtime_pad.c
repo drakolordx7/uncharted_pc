@@ -272,8 +272,28 @@ static uint64_t follow_moved_us;          /* last frame the mouse moved */
 static volatile float follow_correction;  /* degrees the direction is short of the wanted heading */
 static volatile float follow_push;        /* the right stick while the direction turns (-0.3, 0, 0.3) */
 static volatile int follow_has_arc;       /* the follow camera's vertical arc is known */
-/* arc_degrees: the camera pitch one unit of arc covers (U1 61; measured in U2 about 135, in U3 about 105, steeper upwards) */
-static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_offset, float arc_degrees) {
+/* The follow camera's vertical arc (0..1) against the pitch of the camera the game shows (degrees, up is
+ * positive), measured with slow mouse sweeps (.weaver/arcfit.py): the arc is far from linear (U1: 16 degrees
+ * per unit near the top of its range, 55 near the bottom). The mouse moves the pitch, not the arc, so a pixel
+ * is the same turn everywhere. Outside the table the end slopes continue. */
+typedef struct { int n; float arc[12], pitch[12]; } ArcTable;
+static const ArcTable u1_arc={11,{0,.1f,.2f,.3f,.4f,.5f,.6f,.7f,.8f,.9f,1},
+    {0.6f,-1.5f,-4.7f,-7.4f,-10.0f,-12.4f,-14.8f,-18.6f,-24.0f,-29.0f,-33.0f}};
+static const ArcTable u2_arc={6,{.5f,.6f,.7f,.8f,.9f,1},{-8.0f,-19.4f,-33.7f,-48.3f,-57.2f,-64.5f}};
+static const ArcTable u3_arc={6,{.5f,.6f,.7f,.8f,.9f,1},{-9.5f,-20.2f,-34.1f,-47.6f,-59.4f,-65.8f}};
+static float arc_to_pitch(const ArcTable *t, float arc) {
+    int i=0;
+    while (i<t->n-2 && arc>t->arc[i+1]) ++i;
+    const float slope=(t->pitch[i+1]-t->pitch[i])/(t->arc[i+1]-t->arc[i]);
+    return t->pitch[i]+(arc-t->arc[i])*slope;
+}
+static float pitch_to_arc(const ArcTable *t, float pitch) {   /* pitch falls as the arc grows */
+    int i=0;
+    while (i<t->n-2 && pitch<t->pitch[i+1]) ++i;
+    const float slope=(t->pitch[i+1]-t->pitch[i])/(t->arc[i+1]-t->arc[i]);
+    return t->arc[i]+(pitch-t->pitch[i])/slope;
+}
+static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_offset, const ArcTable *arc_table) {
     const uint64_t now=now_us();
     follow_has_arc=arc_offset!=0;
     if (camera_hook_us && now-camera_hook_us>100000) {
@@ -340,8 +360,8 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
     if (correction>4.0f) correction=4.0f;
     const float total=turn+correction;
     follow_push=total>0.05f ? 0.3f : total<-0.05f ? -0.3f : 0.0f;
-    if (mouse_debug()) printf("Mouse: follow t=%.4f dx=%.1f heading=%.2f shown=%.2f target=%.2f turn=%.2f total=%.2f\n",
-                              now*1e-6,dx,heading,shown,follow_target,turn,total);
+    if (mouse_debug()) printf("Mouse: follow t=%.4f dx=%.1f dy=%.1f heading=%.2f shown=%.2f target=%.2f turn=%.2f total=%.2f arc=%.4f\n",
+                              now*1e-6,dx,dy,heading,shown,follow_target,turn,total,arc_offset ? *(float *)(uintptr_t)(camera+arc_offset) : -1.0f);
     if (total!=0.0f) {
         const float a=total*0.017453293f, c=SDL_cosf(a), s=SDL_sinf(a);
         const float x=dir[0], z=dir[2];
@@ -355,24 +375,25 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
     }
     if (dy!=0.0f && arc_offset) {
         float *arc=(float *)(uintptr_t)(camera+arc_offset);
-        float v=*arc+(input.mouse_invert_y ? -dy : dy)*(MOUSE_DEGREES_PER_PIXEL/arc_degrees)*input.mouse_sensitivity;
+        const float pitch=arc_to_pitch(arc_table,*arc)-(input.mouse_invert_y ? -dy : dy)*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity;
+        const float v=pitch_to_arc(arc_table,pitch);
         *arc=v<0.0f ? 0.0f : v>1.0f ? 1.0f : v;
     }
 }
 static void __attribute__((ms_abi)) u1_follow_camera(uint64_t camera, uint64_t unused, uint64_t image, uint64_t r14, const RuntimeGuestRegs *regs) {
     (void)regs;
     (void)unused; (void)image; (void)r14;
-    follow_camera(camera,0x1310,0x12bc,61.0f);
+    follow_camera(camera,0x1310,0x12bc,&u1_arc);
 }
 static void __attribute__((ms_abi)) u2_follow_camera(uint64_t camera, uint64_t unused, uint64_t image, uint64_t r14, const RuntimeGuestRegs *regs) {
     (void)regs;
     (void)unused; (void)image; (void)r14;
-    follow_camera(camera,0x9ec0,0x9e60,135.0f);
+    follow_camera(camera,0x9ec0,0x9e60,&u2_arc);
 }
 static void __attribute__((ms_abi)) u3_follow_camera(uint64_t camera, uint64_t unused, uint64_t image, uint64_t r14, const RuntimeGuestRegs *regs) {
     (void)regs;
     (void)unused; (void)image; (void)r14;
-    follow_camera(camera,0x78c0,0x7874,105.0f);
+    follow_camera(camera,0x78c0,0x7874,&u3_arc);
 }
 /* U1: the game's pad update (image+0x117200) fills the caller's joypad state (its first argument):
  * the sticks as floats lx ly rx ry at +0 and again at +0x10, converted from the pad's bytes. Cameras
@@ -381,9 +402,34 @@ static void __attribute__((ms_abi)) u3_follow_camera(uint64_t camera, uint64_t u
 static uint64_t joypad_state;         /* the state the pad update fills (its first argument) */
 static uint64_t sticks_last_us;
 static float aim_test=-1.0f;          /* BB_MOUSE_AIM_TEST=<x>: right stick x while not following */
-static float aim_stick(float rate) {
+/* The aiming camera's response to the right stick: degrees/s at stick values 0.1.. (measured in real aiming
+ * with a gun, per game and build: .weaver/ka*.log). Version 1.02 turns the stick up to 1 and nothing above is
+ * faster (about 46 degrees/s sideways, 30 or 20 up and down); 1.00 keeps getting faster above 1 and is slower
+ * in the middle. U2 and U3 turn alike in 1.02; U2 1.00 is not measured (its dev menu task jump fails) and uses
+ * the U3 1.00 numbers. The mouse asks for a rate; the stick that gives it is looked up here. */
+typedef struct { int n; float x[12], rate[12]; } StickTable;
+typedef struct { StickTable h, v; } AimCurve;
+static const AimCurve u1_100_aim={
+    {12,{.1f,.2f,.3f,.4f,.5f,.6f,.7f,.8f,.9f,1,1.5f,3},{0,1.1f,3.1f,6.0f,10.1f,15.3f,21.6f,29.3f,38.3f,47.8f,74.1f,157}},
+    {12,{.1f,.2f,.3f,.4f,.5f,.6f,.7f,.8f,.9f,1,1.5f,3},{0,.5f,1.4f,2.5f,4.3f,6.4f,9.1f,12.3f,16.1f,19.8f,31,39.6f}}};
+static const AimCurve u1_102_aim={
+    {10,{.1f,.2f,.3f,.4f,.5f,.6f,.7f,.8f,.9f,1},{0,3.3f,7.1f,11.4f,16.2f,21.5f,27.0f,33.0f,39.1f,45.0f}},
+    {10,{.1f,.2f,.3f,.4f,.5f,.6f,.7f,.8f,.9f,1},{0,1.5f,3.1f,5.1f,7.1f,9.5f,11.9f,14.6f,17.1f,19.9f}}};
+static const AimCurve u23_100_aim={
+    {12,{.1f,.2f,.3f,.4f,.5f,.6f,.7f,.8f,.9f,1,1.5f,3},{0,1.1f,3.0f,5.9f,9.8f,14.8f,21.0f,28.3f,37.0f,46.3f,72.1f,153.9f}},
+    {12,{.1f,.2f,.3f,.4f,.5f,.6f,.7f,.8f,.9f,1,1.5f,3},{0,.65f,1.85f,3.65f,6.15f,9.4f,13.4f,18.1f,23.6f,29.5f,46.5f,62.6f}}};
+static const AimCurve u23_102_aim={
+    {10,{.1f,.2f,.3f,.4f,.5f,.6f,.7f,.8f,.9f,1},{0,3.4f,6.8f,11.2f,16.3f,21.5f,26.9f,33.1f,40.5f,46.0f}},
+    {10,{.1f,.2f,.3f,.4f,.5f,.6f,.7f,.8f,.9f,1},{0,2.1f,4.5f,7.4f,10.5f,14.0f,17.7f,21.6f,25.8f,30.0f}}};
+static float stick_for_rate(const StickTable *t, float rate) {
     const float r=rate<0 ? -rate : rate;
-    const float x=r<=45.0f ? SDL_sqrtf(r/45.0f) : (r+9.0f)/54.0f;
+    float x=t->x[t->n-1];
+    if (r<t->rate[t->n-1]) {
+        int i=0;
+        while (i<t->n-2 && r>t->rate[i+1]) ++i;
+        x=t->x[i]+(r-t->rate[i])/(t->rate[i+1]-t->rate[i])*(t->x[i+1]-t->x[i]);
+    }
+    if (r<=0.0f) x=0.0f;
     return rate<0 ? -x : x;
 }
 /* The follow camera's response to the right stick value (measured in U1): about 144 x^2 degrees/s up
@@ -405,7 +451,7 @@ static void __attribute__((ms_abi)) u1_pad_update(uint64_t state, uint64_t unuse
 }
 /* The mouse as a right stick value in a float joypad state (lx ly rx ry at +0 and again at +0x10),
  * called once a frame by the hook of the game's pad update for pad 0. */
-static void mouse_sticks(float *pad) {
+static void mouse_sticks(float *pad, const AimCurve *aim) {
     const uint64_t now=now_us();
     sticks_hook_us=now;
     float dt=sticks_last_us ? (float)(now-sticks_last_us)*1e-6f : 1.0f/60.0f;
@@ -419,7 +465,11 @@ static void mouse_sticks(float *pad) {
     camera_take(1,&dx,&dy);
     if (aim_test<0.0f) { const char *t=getenv("BB_MOUSE_AIM_TEST"); aim_test=t ? (float)atof(t) : 0.0f; }
     float x=0.0f, y=0.0f;
-    if (aim_test>0.0f) x=aim_test;
+    static int cal=-1;                /* BB_MOUSE_CAL=<pixels/s per stick unit>: the mouse is a raw stick value (measuring) */
+    static float cal_scale;
+    if (cal<0) { const char *t=getenv("BB_MOUSE_CAL"); cal_scale=t ? (float)atof(t) : 0.0f; cal=cal_scale>0.0f; }
+    if (cal) { x=dx/dt/cal_scale; y=dy/dt/cal_scale; }
+    else if (aim_test>0.0f) x=aim_test;
     else {
         /* the turn rate (degrees/s) the mouse asks for, through the inverse of the aiming curve
          * measured in U1: 45 x^2 degrees/s up to x = 1, then about 54 x - 9 (x = 3: 152, x = 6: 324) */
@@ -430,11 +480,16 @@ static void mouse_sticks(float *pad) {
             dx=dy=0.0f;
             push=follow_push;
         }
-        float (*curve)(float)=aim_held ? aim_stick : follow_stick;
         /* following through the joypad: the shortfall is made up within about a quarter second */
         const float extra=!aim_held && following && !follow_direct ? follow_correction*4.0f : 0.0f;
-        x=curve(dx*scale+extra)+push;
-        y=curve((input.mouse_invert_y ? -dy : dy)*scale);
+        const float ry=(input.mouse_invert_y ? -dy : dy)*scale;
+        if (aim_held) {
+            x=stick_for_rate(&aim->h,dx*scale);
+            y=stick_for_rate(&aim->v,ry);
+        } else {
+            x=follow_stick(dx*scale+extra)+push;
+            y=follow_stick(ry);
+        }
     }
     if (mouse_debug()) printf("Mouse: aim t=%.4f dt=%.4f dx=%.1f x=%.3f game=%.3f\n",now*1e-6,dt,dx,x,pad[2]);
     if (x!=0.0f) { pad[2]+=x; pad[6]+=x; }
@@ -443,33 +498,38 @@ static void mouse_sticks(float *pad) {
 static void __attribute__((ms_abi)) u1_joypad_sticks(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t r14, const RuntimeGuestRegs *regs) {
     (void)regs; (void)unused0; (void)unused1; (void)image;
     if (!joypad_state || r14-0x62!=joypad_state) return; /* pad 0 only */
-    mouse_sticks((float *)(uintptr_t)joypad_state);
+    mouse_sticks((float *)(uintptr_t)joypad_state,&u1_100_aim);
+}
+static void __attribute__((ms_abi)) u1_joypad_sticks_102(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t r14, const RuntimeGuestRegs *regs) {
+    (void)regs; (void)unused0; (void)unused1; (void)image;
+    if (!joypad_state || r14-0x62!=joypad_state) return; /* pad 0 only */
+    mouse_sticks((float *)(uintptr_t)joypad_state,&u1_102_aim);
 }
 /* U2 and U3 fill the same float state (an array of pads in U3: pad 0 first, a pad every 0x64 bytes), in
  * code of their own; the hooks sit after the stick values are stored, in each build's registers. */
 static void __attribute__((ms_abi)) u2_sticks_r14(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14, const RuntimeGuestRegs *regs) {
     (void)rdi; (void)rsi; (void)image; (void)regs;
-    mouse_sticks((float *)(uintptr_t)r14);
+    mouse_sticks((float *)(uintptr_t)r14,&u23_100_aim);
 }
 static void __attribute__((ms_abi)) u2_sticks_r12(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14, const RuntimeGuestRegs *regs) {
     (void)rdi; (void)rsi; (void)image; (void)r14;
-    mouse_sticks((float *)(uintptr_t)regs->r12);
+    mouse_sticks((float *)(uintptr_t)regs->r12,&u23_102_aim);
 }
 static void __attribute__((ms_abi)) u3_sticks_r13(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14, const RuntimeGuestRegs *regs) {
     (void)rdi; (void)rsi; (void)image; (void)r14;
-    mouse_sticks((float *)(uintptr_t)regs->r13);
+    mouse_sticks((float *)(uintptr_t)regs->r13,&u23_100_aim);
 }
 static void __attribute__((ms_abi)) u3_sticks_pair_r13(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14, const RuntimeGuestRegs *regs) {
     (void)rdi; (void)rsi; (void)image; (void)r14;
-    if (regs->rcx==0x64) mouse_sticks((float *)(uintptr_t)regs->r13); /* the pad at r13 + rcx - 0x64 */
+    if (regs->rcx==0x64) mouse_sticks((float *)(uintptr_t)regs->r13,&u23_100_aim); /* the pad at r13 + rcx - 0x64 */
 }
 static void __attribute__((ms_abi)) u3_sticks_r12_rdx(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14, const RuntimeGuestRegs *regs) {
     (void)rdi; (void)rsi; (void)image; (void)r14;
-    if (regs->rdx==0) mouse_sticks((float *)(uintptr_t)regs->r12); /* the pad at r12 + rdx */
+    if (regs->rdx==0) mouse_sticks((float *)(uintptr_t)regs->r12,&u23_102_aim); /* the pad at r12 + rdx */
 }
 static void __attribute__((ms_abi)) u3_sticks_pair_r12(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14, const RuntimeGuestRegs *regs) {
     (void)rdi; (void)rsi; (void)image; (void)r14;
-    if (regs->rdx==(uint64_t)-0x64) mouse_sticks((float *)(uintptr_t)regs->r12); /* the pad at r12 + rdx + 0x64 */
+    if (regs->rdx==(uint64_t)-0x64) mouse_sticks((float *)(uintptr_t)regs->r12,&u23_102_aim); /* the pad at r12 + rdx + 0x64 */
 }
 /* U2 UpdateFocus (player-base.cpp:1101): the camera's look-at spring went NaN once at 240 Hz and
  * the game's assertion ended it. The assertion's call now restarts the spring at the player's
@@ -523,10 +583,30 @@ static const RuntimeGuestCallback guest_callbacks[]={
       "6f 60 41 8a 5f 5d 48 8b 85 38 ff ff ff 41 89 47 60 41 c6 47 "
       "5d 00 89 c1 c1 e9 1f 48 8d 15 ?? ?? ?? ?? 88 0a 48 89 c1",
       0x0, 6, u1_pad_update, NULL},
-    /* U1 joypad sticks, build 100 */
+    /* U1 joypad sticks. The aiming response differs between 1.00 and 1.02, and the code is the same: the first
+     * two entries tell the builds apart by the displacement of a constant (unmasked), the last one is any other
+     * build (aimed like 1.02). Entries are tried in order, a site is hooked once. */
+    {"U1 joypad sticks (mouse)",
+      "c5 f9 6f 05 f0 f1 68 00 c5 f8 28 0d ?? ?? ?? ?? c5 f8 28 15 "
+      "?? ?? ?? ?? 48 ba 00 00 00 00 00 00 80 bf c5 fa 10 1d ?? ?? "
+      "?? ?? 66 66 66 66 66 2e 0f 1f 84 00 00 00 00 00 80 7c 01 6c "
+      "00 0f 84 ?? ?? ?? ?? c4 e2 79 31 64 01 50 c5 d9 db e0 c5 f8 "
+      "5b e4 c5 d8 59 e1 c5 d8 58 e2 c4 c1 78 11 66 9e c4 c1 78 11 "
+      "66 ae 80 7c 01 6d 00 74 3b c5 e2 59 64 01 40 c4 c1 7a 11 66 "
+      "be",
+      102, 5, u1_joypad_sticks, NULL},
+    {"U1 joypad sticks (mouse)",
+      "c5 f9 6f 05 70 68 68 00 c5 f8 28 0d ?? ?? ?? ?? c5 f8 28 15 "
+      "?? ?? ?? ?? 48 ba 00 00 00 00 00 00 80 bf c5 fa 10 1d ?? ?? "
+      "?? ?? 66 66 66 66 66 2e 0f 1f 84 00 00 00 00 00 80 7c 01 6c "
+      "00 0f 84 ?? ?? ?? ?? c4 e2 79 31 64 01 50 c5 d9 db e0 c5 f8 "
+      "5b e4 c5 d8 59 e1 c5 d8 58 e2 c4 c1 78 11 66 9e c4 c1 78 11 "
+      "66 ae 80 7c 01 6d 00 74 3b c5 e2 59 64 01 40 c4 c1 7a 11 66 "
+      "be",
+      102, 5, u1_joypad_sticks_102, NULL},
     {"U1 joypad sticks (mouse)",
       "80 7c 01 6d 00 74 3b c5 e2 59 64 01 40 c4 c1 7a 11 66 be",
-      0x0, 5, u1_joypad_sticks, NULL},
+      0x0, 5, u1_joypad_sticks_102, NULL},
     /* U2 follow camera, build 100 */
     {"U2 follow camera (mouse)",
       "55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec 48 01 00 00 "
@@ -567,6 +647,13 @@ static const RuntimeGuestCallback guest_callbacks[]={
       "7a 11 74 24 18 c4 c1 7a 11 5c 24 1c 80 7c 08 6d 00 74 36 c5 "
       "fa 10 5c 08 40 c4 c1 7a 11 5c 24 20",
       0x20, 5, u2_sticks_r12, NULL},
+    /* U2 joypad sticks, build 102: the copy for one pad (the code above is the copy for several pads, which
+     * the game does not use) */
+    {"U2 joypad sticks (mouse)",
+      "c4 c1 7a 11 2c 24 c5 e2 59 de c4 c1 7a 11 5c 24 04 c4 c1 7a "
+      "11 6c 24 10 c4 c1 7a 11 5c 24 14 80 7c 08 6d 00 74 36 c5 fa "
+      "10 5c 08 40 c4 c1 7a 11 5c 24 20",
+      0x1f, 5, u2_sticks_r12, NULL},
     /* U3 joypad sticks, build 100 */
     {"U3 joypad sticks (mouse)",
       "c4 e2 79 31 40 50 c5 f9 db 05 ?? ?? ?? ?? c5 f8 5b c0 c5 f8 "
