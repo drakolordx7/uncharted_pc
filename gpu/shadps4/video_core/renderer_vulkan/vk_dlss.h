@@ -30,6 +30,8 @@ public:
                                 std::vector<const char*>& enabled);
     /// After the device exists.
     void Initialize(vk::Instance instance, vk::PhysicalDevice physical, vk::Device device);
+    /// The device could not be made with DLSS's extensions: DLSS stays off this run.
+    void Disable(const std::string& reason);
     void Shutdown();
 
     [[nodiscard]] bool Available() const;
