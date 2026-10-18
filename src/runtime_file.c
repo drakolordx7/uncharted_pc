@@ -385,12 +385,70 @@ static int commit_file(const File *f) {
 #endif
     return 0;
 }
+/* BB_SKIP_INTRO=1: the logo movie the three Uncharted games play at boot (Sony, Naughty Dog and
+   Bluepoint: shareddata/movies/ps4/sce-ndi-logos.bsf, a raw H.264 stream of 689 frames, black
+   for its first 49) opens as a stand-in that keeps only those 49 black pictures, padded to the
+   original size. The logos cannot be skipped with a button. Reported missing, opened empty or
+   cut short without the padding, the movie player re-streams it until it asserts
+   (m_debugStreamCount <= 10 in UpdateFileStreaming); one picture padded never ended. U3 shows its
+   title screen ~8 s after start instead of ~16 s. */
+static int skip_intro_movie(const char *guest) {
+    static int enabled=-1;
+    if (enabled<0) { const char *env=getenv("BB_SKIP_INTRO"); enabled=env && env[0]=='1'; }
+    if (!enabled) return 0;
+    const char *name=strrchr(guest,'/');
+    return name && !strcmp(name+1,"sce-ndi-logos.bsf");
+}
 /* All operations return >=0 or -(host errno); wrappers adapt the convention. */
 static int64_t do_open(const char *guest,int flags,int mode) {
     if (game_path(guest) && (flags & (3|0x8|0x400|0x800))) return -EROFS;
     char path[1024];
     int e=translate(guest,path,sizeof(path));
     if (e) return -e;
+    if (skip_intro_movie(guest)) {
+        /* The stand-in, written to the host's temporary directory. */
+        const char *tmp=getenv("TEMP");
+        if (!tmp) tmp=getenv("TMPDIR");
+        if (!tmp) tmp="/tmp";
+        char cut[1024];
+        snprintf(cut,sizeof(cut),"%s/bb-skip-intro.bsf",tmp);
+        FILE *in=fopen(path,"rb");
+        unsigned char *data=NULL;
+        long size=0;
+        if (in && !fseek(in,0,SEEK_END) && (size=ftell(in))>0 && size<(16<<20) && !fseek(in,0,SEEK_SET) &&
+            (data=malloc((size_t)size)) && fread(data,1,(size_t)size,in)==(size_t)size) {
+            /* The cut: before picture 49, the first with the Sony logo (a picture starts at a coded
+               slice, NAL type 1 or 5 after an Annex B start code, whose first_mb_in_slice is 0:
+               the first bit of its slice header set). */
+            const int keep=49;
+            long end=size;
+            int pictures=0;
+            for (long i=0;i+4<size;++i) {
+                if (data[i] || data[i+1] || data[i+2]!=1) continue;
+                const int type=data[i+3]&0x1f;
+                if ((type==1 || type==5) && (data[i+4]&0x80) && pictures++==keep) {
+                    end=i>0 && !data[i-1] ? i-1 : i;
+                    break;
+                }
+            }
+            /* The rest becomes one filler data NAL unit (type 12: 0xff bytes, then 0x80) that
+               decoders skip, so the file keeps its size. */
+            if (end+6<size) {
+                static const unsigned char filler_start[5]={0,0,0,1,0x0c};
+                memcpy(data+end,filler_start,5);
+                memset(data+end+5,0xff,(size_t)(size-end-6));
+                data[size-1]=0x80;
+                end=size;
+            }
+            FILE *out=fopen(cut,"wb");
+            if (pictures>keep && out && fwrite(data,1,(size_t)end,out)==(size_t)end && !fclose(out)) {
+                snprintf(path,sizeof(path),"%s",cut);
+                printf("Runtime: open(%s) -> intro logos skipped (BB_SKIP_INTRO)\n",guest);
+            } else if (out) fclose(out);
+        }
+        free(data);
+        if (in) fclose(in);
+    }
     /* O_CREAT on a read-only mount opens an existing file for reading, as FreeBSD does (U1
        reads its sound configuration this way); only creating a new file fails. */
     if (game_path(guest) && (flags & 0x200)) {
