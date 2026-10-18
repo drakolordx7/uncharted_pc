@@ -489,6 +489,16 @@ static void __attribute__((ms_abi)) u3_sticks_pair_r12(uint64_t rdi, uint64_t rs
 static const unsigned char u2_focus_reset_100[]={U2_FOCUS_RESET};              /* replaces 56 bytes */
 static const unsigned char u2_focus_reset_102[]={0x66,0x90,U2_FOCUS_RESET};    /* 58 bytes: a nop first */
 _Static_assert(sizeof(u2_focus_reset_100)==56 && sizeof(u2_focus_reset_102)==58,"patch sizes");
+/* U2 game/character-leg-ik.cpp:391, assertion IsFinite(deltaTransform): the root delta the leg IK
+ * gets from its caller can be NaN for a frame (train wreck, chapter 1: issues #88, #253) and the
+ * game stopped. The leg IK only adds its y to two accumulators, so a non-finite delta now counts as
+ * no movement: it is zeroed (also in the caller's vector at [r15]) and the update goes on. Build 100
+ * (US and EU 1.00) calls the assertion handler (5 bytes), build 102 loads it (7 bytes). */
+#define U2_LEG_IK_ZERO(jump)     0xc5,0xf8,0x57,0xc0,                          /* vxorps xmm0, xmm0, xmm0 */     0xc4,0xc1,0x78,0x29,0x07,                     /* vmovaps [r15], xmm0 */     0xeb,jump                                     /* jmp (the update) */
+#define CC8 0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc
+static const unsigned char u2_leg_ik_zero_100[]={U2_LEG_IK_ZERO(0x2d),CC8,CC8,CC8,CC8,CC8};
+static const unsigned char u2_leg_ik_zero_102[]={U2_LEG_IK_ZERO(0x2f),CC8,CC8,CC8,CC8,CC8,0xcc,0xcc};
+_Static_assert(sizeof(u2_leg_ik_zero_100)==51 && sizeof(u2_leg_ik_zero_102)==53,"patch sizes");
 /* The camera code, the pad code and the assertion are found by their instructions, so a build of the
  * game that has them works (version 1.00 and 1.02 are known; "build" below). RIP-relative
  * displacements and call targets are wildcards. Entries with one name are variants for the builds;
@@ -593,6 +603,18 @@ static const RuntimeGuestCallback guest_callbacks[]={
       "8c 00 00 00 00 00 00 00 c5 c8 57 f6 c4 c1 7a 11 b4 14 90 00 "
       "00 00",
       0x5c, 10, u3_sticks_pair_r12, NULL},
+    /* U2 leg IK NaN delta, build 100 */
+    {"U2 leg IK NaN delta",
+      "e8 ?? ?? ?? ?? 48 85 c0 74 27 48 8d 3d ?? ?? ?? ?? 48 8d 35 "
+      "?? ?? ?? ?? 48 8d 15 ?? ?? ?? ?? 48 8d 0d ?? ?? ?? ?? 41 b8 "
+      "87 01 00 00 45 31 c9 ff d0 cd 41 c4 c1 78 28 07 c4 e3 79 04 c0 01",
+      0x0, 51, NULL, u2_leg_ik_zero_100},
+    /* U2 leg IK NaN delta, build 102 */
+    {"U2 leg IK NaN delta",
+      "48 8b 05 ?? ?? ?? ?? 48 85 c0 74 27 48 8d 3d ?? ?? ?? ?? 48 "
+      "8d 35 ?? ?? ?? ?? 48 8d 15 ?? ?? ?? ?? 48 8d 0d ?? ?? ?? ?? "
+      "41 b8 87 01 00 00 45 31 c9 ff d0 cd 41 c4 c1 78 28 07 c4 e3 79 04 c0 01",
+      0x0, 53, NULL, u2_leg_ik_zero_102},
     /* U2 camera focus NaN reset, build 100 */
     {"U2 camera focus NaN reset",
       "e8 ?? ?? ?? ?? 48 85 c0 74 27 48 8d 3d ?? ?? ?? ?? 48 8d 35 "
