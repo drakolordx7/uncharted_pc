@@ -314,6 +314,15 @@ bool PipelinedOpcode(PM4ItOpcode opcode) {
     case PM4ItOpcode::WriteData:     // run in order on the recording thread (RunInOrder)
     case PM4ItOpcode::DmaData:
         return true;
+    case PM4ItOpcode::SetPredication: {
+        // Not implemented (ignored): nothing to wait for (from the God of War III port, where
+        // draining for it was ~60% of the GPU thread). BB_PREDICATION_DRAIN=1: drain as before.
+        static const bool drain = [] {
+            const char* env = std::getenv("BB_PREDICATION_DRAIN");
+            return env && env[0] == '1';
+        }();
+        return !drain;
+    }
     default:
         return false;
     }

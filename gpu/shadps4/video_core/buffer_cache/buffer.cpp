@@ -3,9 +3,11 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <numeric>
+#include <string_view>
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -36,12 +38,40 @@ std::string_view BufferTypeName(MemoryType type) {
     }
 }
 
+/// bbport (from the God of War III port): where the stream buffer lives, BB_STREAM_MEMORY.
+/// Every draw copies its small read-only buffers from guest memory into it on the recording
+/// thread. "device" (default, shadPS4's choice) is VRAM written through the PCIe BAR; "cached"
+/// is cached system memory the GPU reads over PCIe (faster on NVIDIA laptops there); "host" is
+/// uncached system memory.
+enum class StreamPlacement { Device, Host, Cached };
+static StreamPlacement StreamMemory() {
+    static const StreamPlacement placement = [] {
+        const char* env = std::getenv("BB_STREAM_MEMORY");
+        const std::string_view value = env ? env : "device";
+        const auto chosen = value == "cached" ? StreamPlacement::Cached
+                            : value == "host" ? StreamPlacement::Host
+                                              : StreamPlacement::Device;
+        std::printf("Stream buffer: %s memory (BB_STREAM_MEMORY=device|cached|host)\n",
+                    chosen == StreamPlacement::Cached ? "cached system"
+                    : chosen == StreamPlacement::Host ? "uncached system"
+                                                      : "GPU");
+        return chosen;
+    }();
+    return placement;
+}
+
 [[nodiscard]] VkMemoryPropertyFlags MemoryUsagePreferredVmaFlags(MemoryType type) {
+    if (type == MemoryType::Stream && StreamMemory() == StreamPlacement::Cached) {
+        return VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+    }
     return type != MemoryType::DeviceLocal ? VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
                                            : VkMemoryPropertyFlagBits{};
 }
 
 [[nodiscard]] VmaAllocationCreateFlags MemoryUsageVmaFlags(MemoryType type) {
+    if (type == MemoryType::Stream && StreamMemory() == StreamPlacement::Cached) {
+        return VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
+    }
     switch (type) {
     case MemoryType::HostUncached:
     case MemoryType::Stream:
@@ -56,6 +86,9 @@ std::string_view BufferTypeName(MemoryType type) {
 }
 
 [[nodiscard]] VmaMemoryUsage MemoryUsageVma(MemoryType type) {
+    if (type == MemoryType::Stream && StreamMemory() != StreamPlacement::Device) {
+        return VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+    }
     switch (type) {
     case MemoryType::DeviceLocal:
     case MemoryType::Stream:
