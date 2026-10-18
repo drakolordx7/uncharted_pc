@@ -273,7 +273,7 @@ static volatile float follow_correction;  /* degrees the direction is short of t
 static volatile float follow_push;        /* the right stick while the direction turns (-0.3, 0, 0.3) */
 static volatile int follow_has_arc;       /* the follow camera's vertical arc is known */
 /* The follow camera's vertical arc (0..1) against the pitch of the camera the game shows (degrees, up is
- * positive), measured with slow mouse sweeps (a local test script): the arc is far from linear (U1: 16 degrees
+ * positive), measured with slow mouse sweeps (BB_MOUSE_DEBUG prints the arc, BB_CAMERA_LOG the pitch the game shows): the arc is far from linear (U1: 16 degrees
  * per unit near the top of its range, 55 near the bottom). The mouse moves the pitch, not the arc, so a pixel
  * is the same turn everywhere. Outside the table the end slopes continue. */
 typedef struct { int n; float arc[12], pitch[12]; } ArcTable;
@@ -403,7 +403,7 @@ static uint64_t joypad_state;         /* the state the pad update fills (its fir
 static uint64_t sticks_last_us;
 static float aim_test=-1.0f;          /* BB_MOUSE_AIM_TEST=<x>: right stick x while not following */
 /* The aiming camera's response to the right stick: degrees/s at stick values 0.1.. (measured in real aiming
- * with a gun, per game and build: a local test script). Version 1.02 turns the stick up to 1 and nothing above is
+ * with a gun, per game and build, using BB_MOUSE_CAL). Version 1.02 turns the stick up to 1 and nothing above is
  * faster (about 46 degrees/s sideways, 30 or 20 up and down); 1.00 keeps getting faster above 1 and is slower
  * in the middle. U2 and U3 turn alike in 1.02; U2 1.00 is not measured (its dev menu task jump fails) and uses
  * the U3 1.00 numbers. The mouse asks for a rate; the stick that gives it is looked up here. */
@@ -561,8 +561,7 @@ static const unsigned char u2_leg_ik_zero_102[]={U2_LEG_IK_ZERO(0x2f),CC8,CC8,CC
 _Static_assert(sizeof(u2_leg_ik_zero_100)==51 && sizeof(u2_leg_ik_zero_102)==53,"patch sizes");
 /* The camera code, the pad code and the assertion are found by their instructions, so a build of the
  * game that has them works (version 1.00 and 1.02 are known; "build" below). RIP-relative
- * displacements and call targets are wildcards. Entries with one name are variants for the builds;
- * a local test script generates and checks the patterns. */
+ * displacements and call targets are wildcards. Entries with one name are variants for the builds. */
 static const RuntimeGuestCallback guest_callbacks[]={
     /* U1 follow camera, build 100 */
     {"U1 follow camera (mouse)",
