@@ -1257,6 +1257,7 @@ int main(int argc, char **argv) {
         install_game_callbacks(segments, ns, image_end);
         patch_eop_tick_wait(image_end);
         patch_job_sleep(image_end);
+        runtime_display_patch(image, image_end);
     }
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
