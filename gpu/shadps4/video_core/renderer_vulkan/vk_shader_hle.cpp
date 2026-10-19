@@ -303,10 +303,19 @@ static bool ExecuteScalarCopyHLE(const Shader::Info& info, const AmdGpu::Compute
             const char* env = std::getenv("BB_SCALAR_COPY_BOTH");
             return !(env && env[0] == '0');
         }();
-        static const bool sync = [] {
+        static const bool sync_all = [] {
             const char* env = std::getenv("BB_SCALAR_COPY_SYNC");
             return env && env[0] == '1';
         }();
+        // The 64-dword copy (U2) moves the mesh raycaster's results into its CPU-resident record
+        // array (MeshRaycaster::HandleResults reads them in guest memory). Copied on the GPU only,
+        // the records the game read were not the ones this copy made (an assertion in
+        // GetSubMeshInstance after a checkpoint). BB_SCALAR_COPY64_SYNC=0: off (A/B).
+        static const bool sync_64 = [] {
+            const char* env = std::getenv("BB_SCALAR_COPY64_SYNC");
+            return !(env && env[0] == '0');
+        }();
+        const bool sync = sync_all || (sync_64 && group_size == 64);
         const bool src_written = src_gpu && buffer_cache.IsRangeGpuWritten(src.base_address, size);
         static const bool small_sync = [] {
             const char* env = std::getenv("BB_SCALAR_COPY_SMALL_SYNC");
