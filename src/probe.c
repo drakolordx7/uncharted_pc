@@ -824,34 +824,55 @@ static int64_t find_unique_pattern(uint64_t image_size, const char *pattern) {
  * The flag is treated as on in the worker loop, in its re-check before waiting and in the submit
  * path: all three or none. Found by BilalReloaded
  * (github.com/bc160201983/Uncharted-The-Nathan-Drake-Collection-PC-port, JOB_SLEEP_PATCHES in
- * tools/probe_uncharted.py). BB_JOB_SLEEP=0 keeps the spinning workers. */
+ * tools/probe_uncharted.py) on 01.09. The retail 01.02 (the EU dump) has the same three sites:
+ * its worker loop is identical, but its re-check loads the manager through r13 (not r15) and its
+ * submit path tests rdi and jumps with a short je. A build that matches no set keeps spinning.
+ * BB_JOB_SLEEP=0 keeps the spinning workers. */
 static void patch_job_sleep(uint64_t image_size) {
     const char *env=getenv("BB_JOB_SLEEP");
     if (env && env[0]=='0') { printf("Job workers: spin while idle (BB_JOB_SLEEP=0)\n"); return; }
-    static const struct {
+    struct Patch {
         const char *name, *pattern;
         unsigned offset, original_size, size;
         unsigned char original[2], replacement[6];
-    } patches[]={
-        /* je past the sleep -> nop nop */
-        {"worker loop","4d8d7001 807f5900 74?? 4981f8e8030000 7c??",8,1,2,{0x74},{0x90,0x90}},
-        {"re-check before waiting","498b07 80785900 74?? 4889c7 4883ef80",7,1,2,{0x74},{0x90,0x90}},
-        /* je rel32 past the wake-up -> 6-byte nop */
-        {"job submission wakes them","80785900 0f84????0000 4883c060",4,2,6,{0x0f,0x84},
-         {0x66,0x0f,0x1f,0x44,0x00,0x00}},
     };
-    int64_t at[3];
-    for (size_t i=0;i<3;++i) {
-        at[i]=find_unique_pattern(image_size,patches[i].pattern);
-        if (at[i]<0 || memcmp(image+at[i]+patches[i].offset,patches[i].original,patches[i].original_size)) {
-            printf("Job workers: %s not found, idle workers keep spinning\n",patches[i].name);
+    static const struct Patch builds[][3]={
+        {
+            /* je past the sleep -> nop nop */
+            {"worker loop","4d8d7001 807f5900 74?? 4981f8e8030000 7c??",8,1,2,{0x74},{0x90,0x90}},
+            {"re-check before waiting","498b07 80785900 74?? 4889c7 4883ef80",7,1,2,{0x74},{0x90,0x90}},
+            /* je rel32 past the wake-up -> 6-byte nop */
+            {"job submission wakes them","80785900 0f84????0000 4883c060",4,2,6,{0x0f,0x84},
+             {0x66,0x0f,0x1f,0x44,0x00,0x00}},
+        },
+        {
+            /* 01.02: same sites, r13 in the re-check and a short je through rdi in the submit */
+            {"worker loop","4d8d7001 807f5900 74?? 4981f8e8030000 7c??",8,1,2,{0x74},{0x90,0x90}},
+            {"re-check before waiting","498b4500 80785900 74?? 4889c7 4883ef80",8,1,2,{0x74},{0x90,0x90}},
+            {"job submission wakes them","807f5900 74?? 4883c760 beffffffff",4,1,2,{0x74},{0x90,0x90}},
+        },
+    };
+    const size_t nbuilds=sizeof(builds)/sizeof(builds[0]);
+    for (size_t b=0;b<nbuilds;++b) {
+        int64_t at[3];
+        size_t i;
+        for (i=0;i<3;++i) {
+            at[i]=find_unique_pattern(image_size,builds[b][i].pattern);
+            if (at[i]<0 || memcmp(image+at[i]+builds[b][i].offset,builds[b][i].original,
+                                  builds[b][i].original_size))
+                break;
+        }
+        if (i<3) {
+            if (b+1<nbuilds) continue;
+            printf("Job workers: %s not found, idle workers keep spinning\n",builds[b][i].name);
             return;
         }
-    }
-    for (size_t i=0;i<3;++i) {
-        memcpy(image+at[i]+patches[i].offset,patches[i].replacement,patches[i].size);
-        printf("Job workers: %s at %#" PRIx64 " (idle workers sleep)\n",patches[i].name,
-               (uint64_t)at[i]+patches[i].offset);
+        for (i=0;i<3;++i) {
+            memcpy(image+at[i]+builds[b][i].offset,builds[b][i].replacement,builds[b][i].size);
+            printf("Job workers: %s at %#" PRIx64 " (idle workers sleep)\n",builds[b][i].name,
+                   (uint64_t)at[i]+builds[b][i].offset);
+        }
+        return;
     }
 }
 /* Restarts the game through run.sh (the settings menu: a new render resolution is a patch
