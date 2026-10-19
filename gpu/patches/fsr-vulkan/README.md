@@ -10,3 +10,6 @@ patches here to its working tree when they are not applied yet:
 - `0003-...`: the FFX Vulkan backend never picks a protected memory type unless it asked for one;
   on RADV PHOENIX (Ryzen Z1 Extreme) it picked one for FSR 3.1's device-local resources, and the
   scene was full-screen noise (2026-10-19).
+- `0003-...`: FSR 3.1 frame generation tells the bridge its frame and retires it, so the
+  constant buffers and descriptor sets allocated per dispatch are freed (they leaked ~2-3 MB of
+  video memory a frame until the GPU ran out, in all three games).
