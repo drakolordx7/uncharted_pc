@@ -447,6 +447,19 @@ u32 FrameGenerator::Generate(vk::CommandBuffer cmdbuf, vk::Image color, vk::Imag
         reset = true;
         return 0;
     }
+    // Depth and motion larger than the frame: the first gameplay frames on a wide screen are
+    // still shown at 16:9 (2560x1440) while the ultrawide detector switches over, with the
+    // scene already at the window's 3440x1440. DLSS Frame Generation takes smaller inputs (the
+    // upscaled modes), not larger: it wrote out of bounds and the device was lost (4x, U3).
+    if (input_width > width || input_height > height) {
+        static int noted = 0;
+        if (noted++ < 3) {
+            std::printf("Frame generation: skipped a %ux%u frame with %ux%u depth and motion\n",
+                        width, height, input_width, input_height);
+        }
+        reset = true;
+        return 0;
+    }
     // The composed frame is read by compute (FSR 3.1) or NGX after the post pass wrote it.
     const vk::ImageMemoryBarrier2 color_ready{
         .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
