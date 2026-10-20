@@ -1233,9 +1233,11 @@ struct PM4CmdCondExec {
                                          ///< if bool pointed to is zero
     };
 
-    bool* Address() const {
-        return std::bit_cast<bool*>(u64(bool_addr_hi.Value()) << 32 | u64(bool_addr_lo.Value())
-                                                                          << 2);
+    // bbport: the condition is a whole dword (the CP skips when all 32 bits are zero); read as a
+    // bool, a value such as 0x100 counted as false and the block was skipped.
+    const u32* Address() const {
+        return std::bit_cast<const u32*>(u64(bool_addr_hi.Value()) << 32 |
+                                         u64(bool_addr_lo.Value()) << 2);
     }
 };
 

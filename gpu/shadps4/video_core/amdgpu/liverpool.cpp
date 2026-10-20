@@ -1630,7 +1630,25 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (cond_exec->command.Value() != 0) {
                     LOG_WARNING(Render, "IT_COND_EXEC used a reserved command");
                 }
-                const auto skip = *cond_exec->Address() == false;
+                const u32 condition = *cond_exec->Address();
+                const auto skip = condition == 0;
+                // bbport: BB_COND_EXEC_LOG=1 counts COND_EXEC packets and skips per second, and
+                // how many the old byte-wide test would have skipped.
+                static const bool cond_log = std::getenv("BB_COND_EXEC_LOG") != nullptr;
+                if (cond_log) {
+                    static u32 seen = 0, skipped = 0, byte_skips = 0;
+                    static auto window = std::chrono::steady_clock::now();
+                    ++seen;
+                    skipped += skip;
+                    byte_skips += (condition & 0xff) == 0 && !skip;
+                    const auto now = std::chrono::steady_clock::now();
+                    if (now - window > std::chrono::seconds(1)) {
+                        std::printf("COND_EXEC: %u/s, %u skipped, %u more with the old byte test\n",
+                                    seen, skipped, byte_skips);
+                        seen = skipped = byte_skips = 0;
+                        window = now;
+                    }
+                }
                 if (skip) {
                     dcb = NextPacket(dcb,
                                      header->type3.NumWords() + 1 + cond_exec->exec_count.Value());
