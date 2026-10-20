@@ -240,7 +240,7 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(PipelineSelection& se
         break;
     }
     case HwStage::Compute: {
-        const auto& cs_pgm = liverpool->GetCsRegs();
+        const auto& cs_pgm = sel.cs ? *sel.cs : liverpool->GetCsRegs();
         info.props.num_user_data = cs_pgm.settings.num_user_regs;
         info.props.num_allocated_vgprs = cs_pgm.settings.num_vgprs * 4;
         info.props.fp_denorm_mode32 = cs_pgm.settings.fp_denorm_mode32;
@@ -742,9 +742,21 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
             return it->second.get();
         }
     }
+    // A draw-preparation worker may be building it right now: wait for that instead of
+    // repeating the compile.
     const auto pipeline_hash = std::hash<ComputePipelineKey>{}(compute_key);
+    const u64 claim_id = pipeline_hash ^ PipelineClaimTag;
+    AcquireClaim(claim_id);
+    {
+        std::shared_lock lock{pipelines_mutex};
+        const auto it = compute_pipelines.find(compute_key);
+        if (it != compute_pipelines.end()) {
+            ReleaseClaim(claim_id);
+            return it->second.get();
+        }
+    }
     LOG_INFO(Render_Vulkan, "Compiling compute pipeline {:#x}", pipeline_hash);
-    CompileTimer timer{"cpipe", pipeline_hash};
+    CompileTimer timer{"cpipe", pipeline_hash, u32(liverpool->CurrentQueueId())};
 
     ComputePipeline::SerializationSupport sdata{};
     auto pipeline = std::make_unique<ComputePipeline>(instance, scheduler, desc_heap, profile,
@@ -754,14 +766,98 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
     num_new_pipelines.fetch_add(1, std::memory_order_relaxed);
     driver_cache_dirty.fetch_add(1, std::memory_order_relaxed);
 
-    std::unique_lock lock{pipelines_mutex};
-    if (EmulatorSettings.IsShaderCollect()) {
-        auto& m = sel.modules[0];
-        module_related_pipelines[m].emplace_back(compute_key);
+    const ComputePipeline* result = nullptr;
+    {
+        std::unique_lock lock{pipelines_mutex};
+        if (EmulatorSettings.IsShaderCollect()) {
+            auto& m = sel.modules[0];
+            module_related_pipelines[m].emplace_back(compute_key);
+        }
+        // The preload may have inserted the same one meanwhile: keep that.
+        result = compute_pipelines.try_emplace(compute_key, std::move(pipeline)).first->second.get();
     }
-    // The preload may have inserted the same one meanwhile: keep that.
-    const auto [it, inserted] = compute_pipelines.try_emplace(compute_key, std::move(pipeline));
-    return it->second.get();
+    ReleaseClaim(claim_id);
+    return result;
+}
+
+/// bbport: a draw-preparation worker translates the compute program a dispatch will run and builds
+/// its pipeline, like EnsureWorkerPipeline does for draws; the GPU thread then finds both.
+void PipelineCache::PrepareComputePipeline(PipelineSelection& worker_sel) {
+    if (!IsWarm() || !worker_sel.cs || !worker_sel.worker) {
+        return;
+    }
+    auto& worker = *worker_sel.worker;
+    worker.compile = worker_compile;
+    if (!worker.compile) {
+        return;
+    }
+    worker.stages.clear();
+    worker.failed = false;
+    // The program's code is read from guest memory, which may be reused by now.
+    sigjmp_buf recover;
+    if (sigsetjmp(recover, 0)) {
+        runtime_fault_recover = nullptr;
+        return;
+    }
+    runtime_fault_recover = &recover;
+    const auto& cs_pgm = *worker_sel.cs;
+    if (!cs_pgm.Address<u32*>()) {
+        runtime_fault_recover = nullptr;
+        return;
+    }
+    const auto cs_params = AmdGpu::GetParams(cs_pgm);
+    runtime_fault_recover = nullptr;
+    Shader::Backend::Bindings binding{};
+    ComputePipelineKey key{};
+    std::tie(worker_sel.infos[0], worker_sel.modules[0], worker_sel.fetch_shader, key.value) =
+        GetProgram(worker_sel, HwStage::Compute, SwStage::Compute, cs_params, binding);
+    if (worker.failed || !worker_sel.infos[0] || worker.stages.empty()) {
+        return;
+    }
+    const Program* program = worker.stages.back().program;
+    {
+        std::shared_lock lock{pipelines_mutex};
+        if (compute_pipelines.contains(key)) {
+            return;
+        }
+    }
+    const auto pipeline_hash = std::hash<ComputePipelineKey>{}(key);
+    const u64 claim_id = pipeline_hash ^ PipelineClaimTag;
+    BbThreads::ScopedNormalPriority boost; // the GPU thread may wait for this claim
+    AcquireClaim(claim_id);
+    {
+        std::shared_lock lock{pipelines_mutex};
+        if (compute_pipelines.contains(key)) {
+            ReleaseClaim(claim_id);
+            return;
+        }
+    }
+    // The sharps of the program's buffers are read from guest memory.
+    sigjmp_buf recover_build;
+    if (sigsetjmp(recover_build, 0)) {
+        runtime_fault_recover = nullptr;
+        ReleaseClaim(claim_id);
+        return;
+    }
+    runtime_fault_recover = &recover_build;
+    {
+        CompileTimer timer{"cpipe-w", pipeline_hash, u32(liverpool->CurrentQueueId())};
+        ComputePipeline::SerializationSupport sdata{};
+        auto pipeline = std::make_unique<ComputePipeline>(
+            instance, scheduler, desc_heap, profile, *pipeline_cache, key, *worker_sel.infos[0],
+            worker_sel.modules[0], sdata, false);
+        pipeline->RebindStage(&program->info);
+        RegisterPipelineData(key, sdata);
+        num_new_pipelines.fetch_add(1, std::memory_order_relaxed);
+        driver_cache_dirty.fetch_add(1, std::memory_order_relaxed);
+        std::unique_lock lock{pipelines_mutex};
+        if (EmulatorSettings.IsShaderCollect()) {
+            module_related_pipelines[worker_sel.modules[0]].emplace_back(key);
+        }
+        compute_pipelines.try_emplace(key, std::move(pipeline));
+    }
+    runtime_fault_recover = nullptr;
+    ReleaseClaim(claim_id);
 }
 
 bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
