@@ -756,26 +756,37 @@ static void patch_eop_tick_wait(uint64_t image_size) {
     if (!text) return;
     int patched=0;
     for (uint64_t at=0;at+7<=image_size;++at) {
-        /* lea rdi, [rip+rel32] -> the message */
-        if (image[at]!=0x48 || image[at+1]!=0x8d || image[at+2]!=0x3d) continue;
+        /* lea reg, [rip+rel32] -> the message (REX.W, any register) */
+        if ((image[at]&0xfb)!=0x48 || image[at+1]!=0x8d || (image[at+2]&0xc7)!=0x05) continue;
         int32_t rel; memcpy(&rel,image+at+3,4);
         if (image+at+7+rel!=text) continue;
-        /* Up to 64 bytes before: cmp qword [base(+index*scale)+disp8/32], 0 (REX.W 83 /7, mod
-         * 01/10, with or without SIB: 1.00 has [rax+0xa08], US 1.02 [rax+rcx+0xa08]); jne past
-         * the message, with room for the 4 patched bytes before it */
-        for (uint64_t back=10;back<=64 && back<=at;++back) {
-            unsigned char *c=image+at-back;
+        /* The assertion path ends in the int 0x41 shortly after the message is loaded. */
+        unsigned char *trap=NULL;
+        for (unsigned char *q=image+at+7;q<image+at+0x80 && q+2<=image+image_size;++q)
+            if (q[0]==0xcd && q[1]==0x41) { trap=q; break; }
+        if (!trap) continue;
+        /* Up to 0x100 bytes before the trap: cmp qword [base(+index*scale)+disp8/32], 0 (REX.W 83 /7,
+         * mod 01/10, with or without SIB: 1.00 has [rax+0xa08], US 1.02 [rax+rcx+0xa08]), then a short or
+         * near jne past the trap (the assertion is the fall-through) or je to the assertion. The assertion
+         * path is dead code ending in the trap; its first 7 bytes become pause; jmp back to the cmp. */
+        for (unsigned char *c=trap-2;c>image && trap-c<=0x100;--c) {
             if ((c[0]&0xf8)!=0x48 || c[1]!=0x83 || ((c[2]>>3)&7)!=7) continue;
             const int mod=c[2]>>6, sib=(c[2]&7)==4;
             if (mod!=1 && mod!=2) continue;
             const int length=3+sib+(mod==2 ? 4 : 1);
-            if (c[length]!=0x00 || c[length+1]!=0x75) continue;
-            unsigned char *jne=c+length+1, *ok=jne+2+(int8_t)jne[1];
-            if (ok<=image+at || image+at-(jne+2)<4) continue;
-            /* after the jne: pause; jmp back to the cmp */
-            jne[2]=0xf3; jne[3]=0x90; jne[4]=0xeb; jne[5]=(unsigned char)(int8_t)(c-(jne+6));
-            printf("Frame pacing: the EOP tick check at %#" PRIx64 " waits for the GPU\n",
-                   (uint64_t)(c-image));
+            if (c[length]!=0x00) continue;
+            unsigned char *j=c+length+1, *target, *after;
+            int jne;
+            if (j[0]==0x75 || j[0]==0x74) { target=j+2+(int8_t)j[1]; after=j+2; jne=j[0]==0x75; }
+            else if (j[0]==0x0f && (j[1]==0x85 || j[1]==0x84)) {
+                int32_t d; memcpy(&d,j+2,4); target=j+6+d; after=j+6; jne=j[1]==0x85;
+            } else continue;
+            unsigned char *path=jne ? after : target;
+            if (jne ? target<=trap : target<=c) continue;
+            if (path<c || path+7>trap+2) continue;
+            const int32_t back=(int32_t)(c-(path+7));
+            path[0]=0xf3; path[1]=0x90; path[2]=0xe9; memcpy(path+3,&back,4);
+            printf("Frame pacing: the EOP tick check at %#" PRIx64 " waits for the GPU\n",(uint64_t)(c-image));
             ++patched;
             break;
         }
