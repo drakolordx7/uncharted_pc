@@ -11,11 +11,16 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
+#include <utility>
 
 #include <vk_mem_alloc.h>
 
 #include "bbport_settings.h"
+#include "bbport_threads.h"
+#include "common/thread.h"
 #include "bbport_toggles.h"
+#include <chrono>
 #include "ffx_vk_portable.h"
 #include "video_core/host_shaders/upscale_merge_comp.h"
 #include "video_core/host_shaders/upscale_reactive_comp.h"
@@ -155,7 +160,68 @@ void PrintIssues(const char* what, u64 issues) {
     std::printf("\n");
 }
 
+FfxVkPortableDeviceInfo MakeDeviceInfo(const Instance& instance) {
+    FfxVkPortableDeviceInfo device_info{};
+    device_info.structSize = sizeof(device_info);
+    device_info.instance = instance.GetInstance();
+    device_info.physicalDevice = instance.GetPhysicalDevice();
+    device_info.device = instance.GetDevice();
+    device_info.getDeviceProcAddr = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr;
+    device_info.queue = instance.GetGraphicsQueue();
+    device_info.queueFamilyIndex = instance.GetGraphicsQueueFamilyIndex();
+    device_info.shaderFloat16Enabled = instance.IsShaderFloat16Enabled();
+    device_info.subgroupSizeControlEnabled = instance.IsSubgroupSizeControlEnabled();
+    device_info.synchronization2Enabled = VK_TRUE;
+    device_info.shaderStorageImageWriteWithoutFormatEnabled = VK_TRUE;
+    return device_info;
+}
+
+FfxVkPortableUpscaleCreateInfo MakeCreateInfo(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
+    FfxVkPortableUpscaleCreateInfo create_info{};
+    create_info.structSize = sizeof(create_info);
+    // Native AA runs on the HDR scene color; scaled presets on the game's tonemapped frame.
+    create_info.flags = hdr ? FFX_VK_PORTABLE_CONTEXT_HDR_COLOR_INPUT |
+                                  FFX_VK_PORTABLE_CONTEXT_AUTO_EXPOSURE
+                            : 0;
+    create_info.maxRenderSize = {w, h};
+    create_info.maxOutputSize = {ow, oh};
+    return create_info;
+}
+
 } // namespace
+
+void TemporalUpscaler::StartContextPrecreate(u32 w, u32 h, u32 ow, u32 oh, bool hdr,
+                                             bool make_context) {
+    precreate_started = true;
+    const FfxVkPortableDeviceInfo device_info = MakeDeviceInfo(instance);
+    const FfxVkPortableUpscaleCreateInfo create_info = MakeCreateInfo(w, h, ow, oh, hdr);
+    make_context = make_context && !ffxVkPortableValidateUpscaleCreateInfo(&create_info);
+    precreate_thread = std::jthread([this, device_info, create_info, w, h, ow, oh, hdr,
+                                     make_context] {
+        Common::SetCurrentThreadName("bb:FsrContext");
+        BbThreads::MakeBelowNormal();
+        const auto start = std::chrono::steady_clock::now();
+        // The pipelines do not depend on the size and are needed by every provider.
+        CreatePipelines();
+        std::printf("Upscaler: pipelines made ahead of the scene in %.1f ms\n",
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                              start)
+                        .count());
+        if (!make_context) {
+            return;
+        }
+        FfxVkPortableUpscaleContext* created = nullptr;
+        if (ffxVkPortableUpscaleContextCreate(&device_info, &create_info, &created) !=
+            FFX_VK_PORTABLE_OK) {
+            return;
+        }
+        precreated = {created, w, h, ow, oh, hdr};
+        std::printf("Upscaler: FSR 3 context %ux%u made ahead of the scene in %.1f ms\n", ow, oh,
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                              start)
+                        .count());
+    });
+}
 
 TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& scheduler_,
                                    VideoCore::TextureCache& texture_cache_, Runtime& runtime_,
@@ -223,6 +289,11 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
 }
 
 TemporalUpscaler::~TemporalUpscaler() {
+    precreate_thread = {}; // joins
+    if (precreated.context) {
+        ffxVkPortableUpscaleContextDestroy(precreated.context);
+        precreated.context = nullptr;
+    }
     if (resources_ready) scheduler.Finish();
     if (context) {
         scheduler.Finish();
@@ -327,6 +398,12 @@ bool TemporalUpscaler::OnFrameStart() {
                                                         {target_width, target_height}));
         render_width = scene_targets.Size().width;
         render_height = scene_targets.Size().height;
+        // Native AA (the only mode of this game) runs at the game's size on the HDR scene color:
+        // make the FSR 3 context for it now, behind the menus, instead of at the first 3D scene.
+        if (!precreate_started && enabled && !std::getenv("BB_NO_PRECREATE")) {
+            StartContextPrecreate(render_width, render_height, render_width, render_height, true,
+                                  upscaler == BbSettings::UpscalerFsr3);
+        }
     }
     BbSettings::Get().active_render_width = Scaled() ? render_width : scene_targets.Size().width;
     BbSettings::Get().active_render_height = Scaled() ? render_height : scene_targets.Size().height;
@@ -407,8 +484,13 @@ bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
         return true;
     }
     const auto device = instance.GetDevice();
+    const auto t_begin = std::chrono::steady_clock::now();
+    double ctx_ms = 0.0;
+    bool adopted = false;
     // FSR 4 owns no portable FSR 3 context, but its images can still be in flight.
     scheduler.Finish();
+    const double finish_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_begin).count();
     resources_ready = false;
     if (context) {
         ffxVkPortableUpscaleContextDestroy(context);
@@ -420,38 +502,37 @@ bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
     out_height = oh;
     context_hdr = hdr;
 
-    FfxVkPortableDeviceInfo device_info{};
-    device_info.structSize = sizeof(device_info);
-    device_info.instance = instance.GetInstance();
-    device_info.physicalDevice = instance.GetPhysicalDevice();
-    device_info.device = device;
-    device_info.getDeviceProcAddr = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr;
-    device_info.queue = instance.GetGraphicsQueue();
-    device_info.queueFamilyIndex = instance.GetGraphicsQueueFamilyIndex();
-    device_info.shaderFloat16Enabled = instance.IsShaderFloat16Enabled();
-    device_info.subgroupSizeControlEnabled = instance.IsSubgroupSizeControlEnabled();
-    device_info.synchronization2Enabled = VK_TRUE;
-    device_info.shaderStorageImageWriteWithoutFormatEnabled = VK_TRUE;
-
-    FfxVkPortableUpscaleCreateInfo create_info{};
-    create_info.structSize = sizeof(create_info);
-    // Native AA runs on the HDR scene color; scaled presets on the game's tonemapped frame.
-    create_info.flags = hdr ? FFX_VK_PORTABLE_CONTEXT_HDR_COLOR_INPUT |
-                                  FFX_VK_PORTABLE_CONTEXT_AUTO_EXPOSURE
-                            : 0;
-    create_info.maxRenderSize = {w, h};
-    create_info.maxOutputSize = {ow, oh};
+    // The context made ahead of the scene (StartContextPrecreate), if it is the one wanted now.
+    precreate_thread = {}; // joins: a creation still running is waited for
+    if (precreated.context &&
+        (use_fsr4 || use_taa || precreated.width != w || precreated.height != h ||
+         precreated.out_width != ow || precreated.out_height != oh || precreated.hdr != hdr)) {
+        ffxVkPortableUpscaleContextDestroy(precreated.context);
+        precreated.context = nullptr;
+    }
+    const FfxVkPortableDeviceInfo device_info = MakeDeviceInfo(instance);
+    const FfxVkPortableUpscaleCreateInfo create_info = MakeCreateInfo(w, h, ow, oh, hdr);
     // FSR 4 has its own model context (vk_fsr4); the images below are shared.
     if (!use_fsr4 && !use_taa) {
-        if (const u64 issues = ffxVkPortableValidateUpscaleCreateInfo(&create_info)) {
-            PrintIssues("create info", issues);
-            return false;
-        }
-        if (ffxVkPortableUpscaleContextCreate(&device_info, &create_info, &context) !=
-            FFX_VK_PORTABLE_OK) {
-            std::printf("Upscaler: FSR 3 context creation failed\n");
-            context = nullptr;
-            return false;
+        if (precreated.context) {
+            context = std::exchange(precreated.context, nullptr);
+            adopted = true;
+        } else {
+            if (const u64 issues = ffxVkPortableValidateUpscaleCreateInfo(&create_info)) {
+                PrintIssues("create info", issues);
+                return false;
+            }
+            const auto t_ctx = std::chrono::steady_clock::now();
+            const auto created =
+                ffxVkPortableUpscaleContextCreate(&device_info, &create_info, &context);
+            ctx_ms = std::chrono::duration<double, std::milli>(
+                         std::chrono::steady_clock::now() - t_ctx)
+                         .count();
+            if (created != FFX_VK_PORTABLE_OK) {
+                std::printf("Upscaler: FSR 3 context creation failed\n");
+                context = nullptr;
+                return false;
+            }
         }
     }
 
@@ -537,7 +618,10 @@ bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
         }
     }
     taa_next = 0;
+    const auto t_pipes = std::chrono::steady_clock::now();
     CreatePipelines();
+    const double pipes_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_pipes).count();
     opaque_valid = false;
     reset = true;
     resources_ready = true;
@@ -555,8 +639,14 @@ bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
     FfxVkPortableMemoryUsage usage{};
     usage.structSize = sizeof(usage);
     ffxVkPortableUpscaleContextGetMemoryUsage(context, &usage);
-    std::printf("Upscaler: FSR 3 context %ux%u -> %ux%u (%s), %.1f MB\n", w, h, ow, oh,
-                hdr ? "HDR scene color" : "tonemapped frame", usage.totalUsageInBytes / 1e6);
+    std::printf("Upscaler: FSR 3 context %ux%u -> %ux%u (%s), %.1f MB, %.1f ms on the GPU thread "
+                "(wait for the GPU %.1f, context %.1f, pipelines %.1f%s)\n",
+                w, h, ow, oh, hdr ? "HDR scene color" : "tonemapped frame",
+                usage.totalUsageInBytes / 1e6,
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                          t_begin)
+                    .count(),
+                finish_ms, ctx_ms, pipes_ms, adopted ? "; context made ahead of the scene" : "");
     return true;
 }
 
