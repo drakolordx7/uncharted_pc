@@ -304,6 +304,9 @@ void RunEventWriteEop(Vulkan::Rasterizer& rasterizer, const u8* data) {
     if (readback.second) {
         rasterizer.GetBufferCache().ReadMemory(readback.first, readback.second, false, true);
     }
+    // bbport: small buffers compute shaders wrote since the last event (see
+    // Rasterizer::NoteSmallWrittenBuffers): the game reads them from guest memory.
+    rasterizer.ReadBackSmallWrittenBuffers();
     // Guest memory copies on the copy threads precede the fence the guest sees.
     // BB_ASYNC_FENCES=1 writes it once they are done instead of waiting for them; measured
     // slower (79 vs 83 FPS): the guest waits on these fences, and later fences stall it more
