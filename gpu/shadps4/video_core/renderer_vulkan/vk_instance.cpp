@@ -16,6 +16,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_vram.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
+#include "bbport_hostmem.h"
 
 #include <vk_mem_alloc.h>
 
@@ -968,6 +969,7 @@ bool Instance::VramAllows(u64 bytes) const {
 }
 
 void Instance::ReportMemory(const char* why) const {
+    bbport::hostmem::Report();
     vk::PhysicalDeviceMemoryBudgetPropertiesEXT budget{};
     vk::PhysicalDeviceMemoryProperties2 props = {.pNext = &budget};
     physical_device.getMemoryProperties2(&props);
