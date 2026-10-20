@@ -3,7 +3,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
+#include <map>
+#include <mutex>
+#include <tuple>
 #include "core/memory.h"
 #include "shader_recompiler/info.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -246,6 +250,39 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
 static constexpr u64 SCALAR_COPY_SHADER_HASH = 0x2d215c3b;    // one dword per workgroup
 static constexpr u64 SCALAR_COPY64_SHADER_HASH = 0x6a6422a9;  // 64 dwords per workgroup (U2)
 
+// DIAG (BB_SC_LOG=1): per (src, dst, size) counts of the scalar copies next to GPU data and the
+// time the read back of a GPU-written source waited, printed every 10 s.
+static void sc_note(u64 group_size, u64 src, u64 dst, u64 size, bool src_written, bool synced,
+                    double ms, bool dst_cpu = false, bool dst_gpuw = false) {
+    static const bool on = std::getenv("BB_SC_LOG") != nullptr;
+    if (!on) {
+        return;
+    }
+    struct Stat { u64 n{}, written{}, synced{}, cpu{}, gpuw{}; double ms{}; };
+    static std::mutex m;
+    static std::map<std::tuple<u64, u64, u64, u64>, Stat> table;
+    static auto window = std::chrono::steady_clock::now();
+    static u64 tot_n = 0, tot_sync = 0; static double tot_ms = 0, max_ms = 0;
+    std::scoped_lock lk{m};
+    auto& st = table[{group_size, src, dst, size}];
+    ++st.n; st.cpu += dst_cpu; st.gpuw += dst_gpuw; st.written += src_written; st.synced += synced; st.ms += ms;
+    tot_n++; tot_sync += synced; tot_ms += ms; max_ms = std::max(max_ms, ms);
+    const auto now = std::chrono::steady_clock::now();
+    if (now - window >= std::chrono::seconds(10)) {
+        std::printf("SCSTALL 10s: copies %llu, synced %llu, wait %.1f ms total, max %.1f ms\n",
+                    (unsigned long long)tot_n, (unsigned long long)tot_sync, tot_ms, max_ms);
+        for (const auto& [k, v] : table) {
+            std::printf("SCCOPY g%llu 0x%llx -> 0x%llx %llu B: n %llu written %llu synced %llu dstcpu %llu dstgpuw %llu wait %.1f ms\n",
+                        (unsigned long long)std::get<0>(k), (unsigned long long)std::get<1>(k),
+                        (unsigned long long)std::get<2>(k), (unsigned long long)std::get<3>(k),
+                        (unsigned long long)v.n, (unsigned long long)v.written,
+                        (unsigned long long)v.synced, (unsigned long long)v.cpu,
+                        (unsigned long long)v.gpuw, v.ms);
+        }
+        table.clear(); tot_n = tot_sync = 0; tot_ms = max_ms = 0; window = now;
+    }
+}
+
 static bool ExecuteScalarCopyHLE(const Shader::Info& info, const AmdGpu::ComputeProgram& cs_program,
                                  Rasterizer& rasterizer, u64 group_size) {
     if (info.buffers.size() != 2 || BbToggle::Disabled(BbToggle::MultiCopyShader)) {
@@ -307,15 +344,19 @@ static bool ExecuteScalarCopyHLE(const Shader::Info& info, const AmdGpu::Compute
             const char* env = std::getenv("BB_SCALAR_COPY_SYNC");
             return env && env[0] == '1';
         }();
-        // The 64-dword copy (U2) moves the mesh raycaster's results into its CPU-resident record
-        // array (MeshRaycaster::HandleResults reads them in guest memory). Copied on the GPU only,
-        // the records the game read were not the ones this copy made (an assertion in
-        // GetSubMeshInstance after a checkpoint). BB_SCALAR_COPY64_SYNC=0: off (A/B).
-        static const bool sync_64 = [] {
+        // The 64-dword copy moves the results of the game's mesh raycasters (U1, U2 and U3) into
+        // their record arrays in guest memory (MeshRaycaster::HandleResults reads them there), in
+        // two steps: GPU output -> staging buffer, staging buffer -> record array. GPU readbacks are
+        // relaxed, so a read of the record array never fetches GPU data. Copied on the GPU only,
+        // the records the game read were not the ones this copy made (U2: assertion in
+        // GetSubMeshInstance, mostly after a checkpoint). The second step, whose destination the
+        // guest CPU writes, reads its source back and also copies in guest memory; the first step's
+        // destination is GPU-only and needs nothing. BB_SCALAR_COPY64_SYNC=0: off, 1: both steps
+        // (what 0.3.6 + the first version of this fix did), unset: second step only.
+        static const int sync_64 = [] {
             const char* env = std::getenv("BB_SCALAR_COPY64_SYNC");
-            return !(env && env[0] == '0');
+            return !env ? 2 : env[0] == '0' ? 0 : env[0] == '1' ? 1 : 2;
         }();
-        const bool sync = sync_all || (sync_64 && group_size == 64);
         const bool src_written = src_gpu && buffer_cache.IsRangeGpuWritten(src.base_address, size);
         static const bool small_sync = [] {
             const char* env = std::getenv("BB_SCALAR_COPY_SMALL_SYNC");
@@ -331,8 +372,17 @@ static bool ExecuteScalarCopyHLE(const Shader::Info& info, const AmdGpu::Compute
                 buffer_cache.ReadMemory(dst.base_address, size, false, true);
             }
         } else if (both && size < 1_MB) {
+            const bool d_cpu = buffer_cache.IsRegionCpuModified(dst.base_address, size);
+            const bool d_gpuw = buffer_cache.IsRangeGpuWritten(dst.base_address, size);
+            const bool sync = sync_all || (group_size == 64 && (sync_64 == 1 || (sync_64 == 2 && d_cpu)));
             if (src_written && sync) {
+                const auto t0 = std::chrono::steady_clock::now();
                 buffer_cache.ReadMemory(src.base_address, size, false, true);
+                sc_note(group_size, src.base_address, dst.base_address, size, src_written, true,
+                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
+                        d_cpu, d_gpuw);
+            } else {
+                sc_note(group_size, src.base_address, dst.base_address, size, src_written, false, 0.0, d_cpu, d_gpuw);
             }
             if ((!src_written || sync) && memory->IsValidGpuMapping(src.base_address, size) &&
                 memory->IsValidGpuMapping(dst.base_address, size)) {
