@@ -43,14 +43,19 @@ struct Slot {
     u8 icon;            ///< Action, Move, Look or DPad | lit directions
 };
 
+// What a sheet texture holds: U1 and U2 keep colour and alpha in one RGBA texture; U3 splits
+// them into a colour sheet (alpha 0) and a mask sheet (the alpha in R, G and B, alpha 0).
+enum class Layer : u8 { Rgba, Colour, Mask };
+
 struct Sheet {
     u64 hash;
     u32 width, height;
     const char* name;
     std::vector<Slot> slots;
+    Layer layer = Layer::Rgba;
 };
 
-// The PlayStation icon sheet, the same layout in Uncharted 1 and 2. SHARE has no key and stays.
+// The PlayStation icon sheet, the same layout in all three games. SHARE has no key and stays.
 const std::vector<Slot> ps4_sheet = {
     {5, 81, 59, 134, Circle},       {69, 80, 123, 134, Square},   {134, 81, 187, 134, Triangle},
     {197, 81, 251, 134, Cross},     {7, 144, 58, 194, R2},        {70, 144, 121, 194, L2},
@@ -68,6 +73,8 @@ const std::vector<Slot> ps4_sheet = {
 const Sheet sheets[] = {
     {0x97779d0906f16551ull, 512, 512, "Uncharted 2", ps4_sheet},
     {0xad5ada34fd34c76bull, 512, 512, "Uncharted 1", ps4_sheet},
+    {0x8d03f2ff457f032dull, 512, 512, "Uncharted 3 (colour)", ps4_sheet, Layer::Colour},
+    {0xae0c06306763d424ull, 512, 512, "Uncharted 3 (mask)", ps4_sheet, Layer::Mask},
 };
 
 // The big prompts and the weapon d-pad: whole BC1 pictures, stored upside down and cut out by
@@ -654,6 +661,63 @@ void DrawArrows(Canvas& c, const Font& font, const Slot& s, const Bindings& b) {
     }
 }
 
+/// For a colour sheet sampled apart from its mask: transparent pixels take the colour of their
+/// covered neighbours, so filtering at the edges doesn't pull in black (the game's own colour
+/// sheet extends past its mask the same way).
+void BleedColour(Canvas& c, int passes) {
+    for (int pass = 0; pass < passes; ++pass) {
+        const std::vector<float> src = c.px;
+        for (u32 y = 0; y < c.height; ++y) {
+            for (u32 x = 0; x < c.width; ++x) {
+                float* p = &c.px[(size_t(y) * c.width + x) * 4];
+                if (src[(size_t(y) * c.width + x) * 4 + 3] > 0.0f) {
+                    continue;
+                }
+                float sum[3]{}, weight = 0.0f;
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        const int sx = int(x) + dx, sy = int(y) + dy;
+                        if (sx < 0 || sy < 0 || sx >= int(c.width) || sy >= int(c.height)) {
+                            continue;
+                        }
+                        const float* q = &src[(size_t(sy) * c.width + sx) * 4];
+                        const bool filled = q[3] > 0.0f || q[0] + q[1] + q[2] > 0.0f;
+                        if (filled) {
+                            for (int k = 0; k < 3; ++k) {
+                                sum[k] += q[k];
+                            }
+                            weight += 1.0f;
+                        }
+                    }
+                }
+                if (weight > 0.0f) {
+                    for (int k = 0; k < 3; ++k) {
+                        p[k] = sum[k] / weight;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One canvas pixel as the sheet's four bytes.
+void StorePixel(u8* out, const float* src, Layer layer) {
+    const auto byte = [](float v) { return u8(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f)); };
+    switch (layer) {
+    case Layer::Rgba:
+        for (int k = 0; k < 4; ++k) {
+            out[k] = byte(src[k]);
+        }
+        break;
+    case Layer::Colour:
+        out[0] = byte(src[0]), out[1] = byte(src[1]), out[2] = byte(src[2]), out[3] = 0;
+        break;
+    case Layer::Mask:
+        out[0] = out[1] = out[2] = byte(src[3]), out[3] = 0;
+        break;
+    }
+}
+
 std::vector<Patch> Build(const Sheet& sheet, u32 levels) {
     const Bindings bindings = LoadBindings();
     const Font font;
@@ -678,6 +742,9 @@ std::vector<Patch> Build(const Sheet& sheet, u32 levels) {
     std::vector<Patch> patches;
     Canvas level = canvas;
     for (u32 mip = 0; mip < std::max(levels, 1u); ++mip) {
+        if (sheet.layer == Layer::Colour) {
+            BleedColour(level, 4); // past the 3 px around each picture that the patches cover
+        }
         for (const Slot& s : sheet.slots) {
             // The picture's bounds and its glow (3 px; the pictures are 8+ px apart).
             const u32 x0 = (std::max(int(s.x0) - 3, 0)) >> mip;
@@ -694,10 +761,7 @@ std::vector<Patch> Build(const Sheet& sheet, u32 levels) {
             for (u32 y = 0; y < p.height; ++y) {
                 for (u32 x = 0; x < p.width; ++x) {
                     const float* src = &level.px[(size_t(y0 + y) * level.width + x0 + x) * 4];
-                    for (int k = 0; k < 4; ++k) {
-                        p.data[(size_t(y) * p.width + x) * 4 + k] =
-                            u8(std::lround(std::clamp(src[k], 0.0f, 1.0f) * 255.0f));
-                    }
+                    StorePixel(&p.data[(size_t(y) * p.width + x) * 4], src, sheet.layer);
                 }
             }
             patches.push_back(std::move(p));
