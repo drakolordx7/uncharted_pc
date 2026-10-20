@@ -574,6 +574,21 @@ u64 Liverpool::HashRegisterPacket(u64 checksum, const u32* words, u32 count) {
     return checksum;
 }
 
+void Liverpool::ApplyComputeRegisterPacket(ComputeProgram& cs, const PM4Header* header) {
+    if (header->type3.opcode != PM4ItOpcode::SetShReg) {
+        return;
+    }
+    const auto* set_data = reinterpret_cast<const PM4CmdSetData*>(header);
+    const auto set_size = (header->type3.NumWords() - 1) * sizeof(u32);
+    if (set_data->reg_offset >= 0x200 &&
+        set_data->reg_offset <= (0x200 + sizeof(ComputeProgram) / 4) &&
+        set_size <= sizeof(ComputeProgram) &&
+        (set_data->reg_offset - 0x200) * sizeof(u32) + set_size <= sizeof(ComputeProgram)) {
+        std::memcpy(reinterpret_cast<u32*>(&cs) + (set_data->reg_offset - 0x200), header + 2,
+                    set_size);
+    }
+}
+
 void Liverpool::ApplyGraphicsRegisterPacket(Regs& regs, const PM4Header* header, u64& checksum,
                                              RegDirty* dirty) {
     const u32 count = header->type3.NumWords();
@@ -806,7 +821,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
     Vulkan::DrawPreparation* draw_prep =
         seq != NoSeq && rasterizer ? &rasterizer->GetDrawPreparation() : nullptr;
     if (draw_prep) {
-        draw_prep->BeginSubmission(seq, regs, gfx_reg_checksum);
+        draw_prep->BeginSubmission(seq, regs, gfx_reg_checksum, mapped_queues[GfxQueueId].cs_state);
     }
     static const bool dcb_stats = EmulatorSettingsImpl::Flag("BB_DCB_STATS", false);
     const int dcb_depth = g_dcb_depth;
