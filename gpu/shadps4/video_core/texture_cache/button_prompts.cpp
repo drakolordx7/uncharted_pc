@@ -12,6 +12,8 @@
 #include <mutex>
 #include <string>
 
+#include <SDL3/SDL_keyboard.h>
+
 // Our own copy of stb_truetype (ImGui's is internal to imgui_draw.cpp).
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-function"
@@ -111,6 +113,19 @@ struct Bindings {
     bool mouse_look = true;
 };
 
+/// The key's label in the player's keyboard layout. A default letter is a position, as in
+/// runtime_pad.c (W is the key labelled Z on AZERTY); a letter the player chose is that letter.
+std::string Labelled(const std::string& name, const char* fallback) {
+    if (name.size() != 1 || name != fallback) {
+        return name;
+    }
+    const SDL_Scancode code = SDL_GetScancodeFromName(name.c_str());
+    const SDL_Keycode key =
+        code == SDL_SCANCODE_UNKNOWN ? SDLK_UNKNOWN : SDL_GetKeyFromScancode(code, SDL_KMOD_NONE, false);
+    const char* label = key == SDLK_UNKNOWN ? nullptr : SDL_GetKeyName(key);
+    return label && label[0] ? label : name;
+}
+
 Bindings LoadBindings() {
     Bindings b;
     for (int a = 0; a < Actions; ++a) {
@@ -126,11 +141,8 @@ Bindings LoadBindings() {
     }
     const char* path = std::getenv("BB_INPUT_CONFIG");
     FILE* f = path && *path ? std::fopen(path, "r") : nullptr;
-    if (!f) {
-        return b;
-    }
     char line[256];
-    while (std::fgets(line, sizeof(line), f)) {
+    while (f && std::fgets(line, sizeof(line), f)) {
         line[std::strcspn(line, "\r\n")] = 0;
         char* eq = std::strchr(line, '=');
         if (line[0] == '#' || !eq) {
@@ -157,7 +169,15 @@ Bindings LoadBindings() {
             }
         }
     }
-    std::fclose(f);
+    if (f) {
+        std::fclose(f);
+    }
+    for (int a = 0; a < Actions; ++a) {
+        b.keys[a] = Labelled(b.keys[a], action_defaults[a]);
+    }
+    for (int i = 0; i < 4; ++i) {
+        b.move[i] = Labelled(b.move[i], move_defaults[i]);
+    }
     return b;
 }
 
