@@ -15,6 +15,7 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -172,6 +173,11 @@ private:
     [[nodiscard]] bool Active() const;
     [[nodiscard]] bool ReactiveOn() const;
     bool EnsureResources(u32 width, u32 height, u32 out_width, u32 out_height, bool hdr);
+    /// bbport: creates the upscaler's pipelines and (make_context) the FSR 3 context for the expected
+    /// scene size on a background thread, so the first 3D scene does not wait for them
+    /// (EnsureResources adopts the context when the size matches).
+    void StartContextPrecreate(u32 width, u32 height, u32 out_width, u32 out_height, bool hdr,
+                               bool make_context);
     void CreatePipelines();
     /// Records the reactive mask pass; false when there is no snapshot this frame.
     bool RecordReactive(vk::ImageView color_view);
@@ -261,6 +267,14 @@ private:
     std::mutex display_mutex;
     std::unordered_map<VAddr, DisplayImage> displays;
     FfxVkPortableUpscaleContext* context = nullptr;
+    struct PrecreatedContext {
+        FfxVkPortableUpscaleContext* context = nullptr;
+        u32 width = 0, height = 0, out_width = 0, out_height = 0;
+        bool hdr = false;
+    };
+    PrecreatedContext precreated{}; ///< written by precreate_thread, read after joining it
+    std::jthread precreate_thread;
+    bool precreate_started = false;
     bool resources_ready = false; ///< images below match width/height/out size
     bool resources_fsr4 = false;  ///< made for FSR 4 (no FSR 3 context)
     bool resources_taa = false;
