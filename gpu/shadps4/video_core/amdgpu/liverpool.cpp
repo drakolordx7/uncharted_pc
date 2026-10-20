@@ -562,11 +562,43 @@ struct ComputeFence {
 };
 
 void SignalComputeFence(const ComputeFence& fence) {
-    fence.release_mem.SignalFence(
-        [pipe_id = fence.pipe_id] {
-            Platform::IrqC::Instance()->Signal(static_cast<Platform::InterruptId>(pipe_id));
-        },
-        [](VAddr, u16, u16) { UNREACHABLE_MSG("GDS fence handed to the draw recording thread"); });
+    // Through the backing memory like SignalEop: this runs on a copy thread, where a store into
+    // a page the GPU caches track would fault and wait for the GPU command thread, which may be
+    // waiting for this very signal (Uncharted 3 froze ~15 s into gameplay).
+    const auto& release_mem = fence.release_mem;
+    u64 data = 0;
+    u32 num_bytes = 0;
+    switch (release_mem.data_sel.Value()) {
+    case DataSelect::Data32Low:
+        data = release_mem.DataDWord();
+        num_bytes = sizeof(u32);
+        break;
+    case DataSelect::Data64:
+        data = release_mem.DataQWord();
+        num_bytes = sizeof(u64);
+        break;
+    case DataSelect::GpuClock64:
+        data = GetGpuClock64();
+        num_bytes = sizeof(u64);
+        break;
+    case DataSelect::PerfCounter:
+        data = GetGpuPerfCounter();
+        num_bytes = sizeof(u64);
+        break;
+    default:
+        break;
+    }
+    if (num_bytes) {
+        void* address = release_mem.Address<void*>();
+        BbWriteLog::Note(reinterpret_cast<u64>(address), &data, num_bytes, BbWriteLog::Fence);
+        if (!Core::Memory::Instance()->TryWriteBacking(address, &data, num_bytes)) {
+            std::memcpy(address, &data, num_bytes);
+        }
+    }
+    const auto irq = release_mem.int_sel.Value();
+    if (irq == InterruptSelect::IrqUndocumented || irq == InterruptSelect::IrqWhenWriteConfirm) {
+        Platform::IrqC::Instance()->Signal(static_cast<Platform::InterruptId>(fence.pipe_id));
+    }
 }
 
 void RunComputeReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
