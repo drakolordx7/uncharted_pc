@@ -775,6 +775,18 @@ static void sample_host(PadData *d) {
             }
         }
     }
+    /* The device used last picks the button prompts: the game's PlayStation buttons or pictures
+     * of the bound keys (bbgpu_prompts_controller). A stick counts past half way, the mouse when
+     * it moves more than a few pixels. */
+    const int pad_used=g && (d->buttons || d->l2>60 || d->r2>60 || abs(d->left_x-128)>64 ||
+                             abs(d->left_y-128)>64 || abs(d->right_x-128)>64 || abs(d->right_y-128)>64);
+    int keys_used=mouse || wheel || (captured && SDL_fabsf(mdx)+SDL_fabsf(mdy)>3.0f);
+    for (int a=0;a<ACTIONS && !keys_used;++a) keys_used=action_down(a,k,mouse,now);
+    static int prompts_controller=-1;
+    if (pad_used!=keys_used && pad_used!=prompts_controller) {
+        prompts_controller=pad_used;
+        bbgpu_prompts_controller(pad_used);
+    }
     /* Keyboard and mouse, together with the controller. */
     for (int a=0;a<16;++a) if (action_down(a,k,mouse,now)) d->buttons|=actions[a].ps;
     if (d->buttons & BTN_L2) d->l2=255;
