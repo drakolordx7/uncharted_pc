@@ -4,6 +4,15 @@ The games only know PlayStation buttons. This port redraws their button pictures
 mouse buttons bound in `input.ini` while the keyboard or mouse was used last, and gives the game's
 own pictures back after controller input. It also makes the bindings follow the keyboard layout.
 
+| | |
+|---|---|
+| ![U3 title: Press SPACE](screenshots/keyboard-prompts-u3-title.webp) | ![U1: mouse buttons to aim and shoot](screenshots/keyboard-prompts-u1-mouse-aim-shoot.webp) |
+| U3 title screen | U1 hint with the mouse buttons |
+| ![U2: stealth attack hint, press F](screenshots/keyboard-prompts-u2-stealth-hint.webp) | ![U2: HOLD E prompt](screenshots/keyboard-prompts-u2-hold-prompt.webp) |
+| U2 hint with the bound key | U2 hold prompt |
+| ![U3: big E prompt in the bar fight](screenshots/keyboard-prompts-u3-big-prompt.webp) | ![U2: E to pick up a weapon](screenshots/keyboard-prompts-u2-weapon-pickup.webp) |
+| U3 big prompt | U2 weapon pickup |
+
 ## What is covered
 
 | Hash (XXH3 of mip 0) | Picture | Games | Seen in game |
