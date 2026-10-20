@@ -12,6 +12,7 @@
 typedef unsigned long long sigjmp_buf[32];
 extern "C" __attribute__((returns_twice)) int bb_setjmp(sigjmp_buf buffer);
 #define sigsetjmp(buffer, save) bb_setjmp(buffer)
+extern "C" [[noreturn]] void bb_longjmp(sigjmp_buf buffer, int value);
 #endif
 
 extern "C" std::uint64_t runtime_disabled_optimizations;
