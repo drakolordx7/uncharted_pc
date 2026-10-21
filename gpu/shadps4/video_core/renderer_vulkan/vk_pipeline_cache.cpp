@@ -602,7 +602,10 @@ void PipelineCache::EnsureWorkerPipeline(PipelineSelection& worker_sel) {
     }
     // A guest buffer the worker reads may be unmapped by now: the draw is left to the GPU thread.
     sigjmp_buf recover;
+    const size_t claim_mark = ClaimMark();
     if (sigsetjmp(recover, 0)) {
+        runtime_fault_recover = nullptr;
+        ReleaseClaimsAfter(claim_mark);
         ReleaseClaim(claim_id);
         worker.failed = true;
         return;
@@ -813,8 +816,10 @@ void PipelineCache::PrepareComputePipeline(PipelineSelection& worker_sel) {
     worker.failed = false;
     // The program's code is read from guest memory, which may be reused by now.
     sigjmp_buf recover;
+    const size_t claim_mark = ClaimMark();
     if (sigsetjmp(recover, 0)) {
         runtime_fault_recover = nullptr;
+        ReleaseClaimsAfter(claim_mark);
         return;
     }
     runtime_fault_recover = &recover;
@@ -852,8 +857,10 @@ void PipelineCache::PrepareComputePipeline(PipelineSelection& worker_sel) {
     }
     // The sharps of the program's buffers are read from guest memory.
     sigjmp_buf recover_build;
+    const size_t build_mark = ClaimMark();
     if (sigsetjmp(recover_build, 0)) {
         runtime_fault_recover = nullptr;
+        ReleaseClaimsAfter(build_mark);
         ReleaseClaim(claim_id);
         return;
     }
@@ -1250,19 +1257,35 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
     return module;
 }
 
+// bbport: claims this thread holds, in order (see ReleaseClaimsAfter).
+static thread_local std::vector<u64> t_held_claims;
+
 void PipelineCache::AcquireClaim(u64 id) {
+    const auto self = std::this_thread::get_id();
     std::unique_lock lock{claim_mutex};
+    if (const auto held = claims.find(id); held != claims.end() && held->second == self) {
+        // Left behind on this thread by a jump out of an earlier build (it would wait for
+        // itself forever): take it over.
+        std::printf("Claim: %016llx was still held by this thread, taken over\n",
+                    static_cast<unsigned long long>(id));
+        std::erase(t_held_claims, id);
+        claims.erase(held);
+    }
     if (claims.contains(id)) {
         // Somebody else is building it: the time spent waiting is a stall of the caller.
         const auto start = std::chrono::steady_clock::now();
         while (!claim_cv.wait_for(lock, std::chrono::seconds(1),
                                   [&] { return !claims.contains(id); })) {
-            std::printf("Claim wait: %016llx held for over %lld ms (%s thread)\n",
+            const auto owner = claims.find(id);
+            std::printf("Claim wait: %016llx held for over %lld ms (%s thread; holder %08x)\n",
                         static_cast<unsigned long long>(id),
                         static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                                    std::chrono::steady_clock::now() - start)
                                                    .count()),
-                        BbThreads::IsBackground() ? "worker" : "GPU");
+                        BbThreads::IsBackground() ? "worker" : "GPU",
+                        owner != claims.end()
+                            ? static_cast<u32>(std::hash<std::thread::id>{}(owner->second))
+                            : 0u);
         }
         const auto ns = u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                 std::chrono::steady_clock::now() - start)
@@ -1276,7 +1299,8 @@ void PipelineCache::AcquireClaim(u64 id) {
                         static_cast<unsigned long long>(id), double(ns) / 1e6);
         }
     }
-    claims.insert(id);
+    claims.emplace(id, self);
+    t_held_claims.push_back(id);
 }
 
 void PipelineCache::ReleaseClaim(u64 id) {
@@ -1284,7 +1308,23 @@ void PipelineCache::ReleaseClaim(u64 id) {
         std::scoped_lock lock{claim_mutex};
         claims.erase(id);
     }
+    if (const auto it = std::ranges::find(t_held_claims.rbegin(), t_held_claims.rend(), id);
+        it != t_held_claims.rend()) {
+        t_held_claims.erase(std::next(it).base());
+    }
     claim_cv.notify_all();
+}
+
+size_t PipelineCache::ClaimMark() {
+    return t_held_claims.size();
+}
+
+void PipelineCache::ReleaseClaimsAfter(size_t mark) {
+    while (t_held_claims.size() > mark) {
+        const u64 id = t_held_claims.back();
+        std::printf("Claim: %016llx released after a fault\n", static_cast<unsigned long long>(id));
+        ReleaseClaim(id);
+    }
 }
 
 Program* PipelineCache::FindProgram(u64 hash) {
@@ -1353,7 +1393,10 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
             // reused. A fault returns here (runtime_fault_recover) and the draw is left to the
             // GPU thread. A jump out of the specialization leaks its partial allocations (rare).
             sigjmp_buf recover;
+            const size_t claim_mark = ClaimMark();
             if (sigsetjmp(recover, 0)) {
+                runtime_fault_recover = nullptr;
+                ReleaseClaimsAfter(claim_mark);
                 worker.failed = true;
                 return {};
             }
@@ -1482,7 +1525,10 @@ bool PipelineCache::WorkerTranslate(PrepWorker& worker, HwStage hw_stage, SwStag
     BbThreads::ScopedNormalPriority boost; // the GPU thread may wait for this claim
     sigjmp_buf recover;
     AcquireClaim(params.hash);
+    const size_t claim_mark = ClaimMark();
     if (sigsetjmp(recover, 0)) {
+        runtime_fault_recover = nullptr;
+        ReleaseClaimsAfter(claim_mark);
         ReleaseClaim(params.hash);
         return false;
     }
