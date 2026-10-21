@@ -232,6 +232,10 @@ private:
     /// waits for the creator and then finds the result.
     void AcquireClaim(u64 id);
     void ReleaseClaim(u64 id);
+    /// bbport: the claims this thread holds, to release those taken after `mark` when a fault
+    /// jumps back to a recovery point (sigsetjmp skips the ReleaseClaim calls in between).
+    static size_t ClaimMark();
+    void ReleaseClaimsAfter(size_t mark);
     const Shader::RuntimeInfo& BuildRuntimeInfo(PipelineSelection& sel, Shader::HwStage stage,
                                                 Shader::SwStage l_stage);
 
@@ -258,7 +262,7 @@ private:
     static constexpr u64 PipelineClaimTag = 0x9E3779B97F4A7C15ull;
     std::mutex claim_mutex;
     std::condition_variable claim_cv;
-    std::unordered_set<u64> claims;
+    std::unordered_map<u64, std::thread::id> claims; ///< id -> the thread building it
     bool worker_compile = true; ///< BB_PREP_COMPILE=0 keeps all compiles on the GPU thread
     tsl::robin_map<ComputePipelineKey, std::unique_ptr<ComputePipeline>> compute_pipelines;
     tsl::robin_map<GraphicsPipelineKey, std::unique_ptr<GraphicsPipeline>> graphics_pipelines;
