@@ -1943,6 +1943,20 @@ typedef struct { float rect[4], w, h, style[12]; uint64_t us; } U2ProbeText;
 typedef struct { float x, y, w, h, s5; uint64_t us; } U2Row;
 #define U2_ROWS 256   /* the Commandes screen alone draws about 80 texts of row size (labels, values, icon cells) */
 static U2Row u2_rows[U2_ROWS];
+/* The rails of the sliders (Sensibilité, volumes): a text 100+ wide and under 12 tall laid out in a row's rectangle. The game keeps the
+ * position of the knob out of the texts, so the mouse drags a slider by steps (u2_menu_buttons), it does not set it. */
+static U2Row u2_sliders[8];
+static void u2_slider_note(const float *r, float rail_w) {
+    const uint64_t now=now_us();
+    pthread_mutex_lock(&menu_text_lock);
+    int slot=0;
+    for (int i=0;i<8;++i) {
+        if (fabsf(u2_sliders[i].x-r[0])<0.5f && fabsf(u2_sliders[i].y-r[1])<0.5f) { slot=i; break; }
+        if (u2_sliders[i].us<u2_sliders[slot].us) slot=i;
+    }
+    u2_sliders[slot]=(U2Row){r[0],r[1],rail_w,r[3],0.0f,now};
+    pthread_mutex_unlock(&menu_text_lock);
+}
 static void u2_row_note(const float *r, float s5) {
     const uint64_t now=now_us();
     pthread_mutex_lock(&menu_text_lock);
@@ -1956,10 +1970,14 @@ static void u2_row_note(const float *r, float s5) {
     u2_rows[slot]=(U2Row){r[0],r[1],r[2],r[3],s5,now};
     pthread_mutex_unlock(&menu_text_lock);
 }
+static volatile uint64_t u2_image;   /* U2 image base, seen by the text hook (F8 probe) */
 static void __attribute__((ms_abi)) u2_text_probe(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t r14) {
-    (void)unused0; (void)unused1; (void)image; (void)r14;
+    (void)unused0; (void)unused1; (void)r14;
+    u2_image=image;
     {
-        float r[4], st[6];
+        float r[4], st[6], sz[2];
+        if (safe_read(r,saved_register(5),16) && safe_read(sz,saved_register(3)+0x3c,8) && sz[0]>=100.0f && sz[1]>0.0f && sz[1]<=12.0f && r[3]>=24.0f && r[3]<=42.0f)
+            u2_slider_note(r,sz[0]);
         if (safe_read(r,saved_register(5),16) && safe_read(st,saved_register(4),24) && r[3]>=24.0f && r[3]<=42.0f && r[2]>=20.0f) u2_row_note(r,st[5]);   /* taller texts are paragraphs: the help text under a row is drawn "selected" too */
     }
     if (!mouse_debug()) return;
@@ -3355,10 +3373,119 @@ static int u2_menu_active(uint64_t now) {
     if (on!=u2_menu_on) { u2_menu_on=on; u2_menu_reset=on; bbgpu_game_menu_cursor(on); printf("Runtime: U2 menu mouse %s\n",on ? "on" : "off"); }
     return on;
 }
+/* ---- U2 sliders set by position ---------------------------------------------------------------
+ * The game keeps the value of a slider in its data segment but the port does not know where, and it differs from one slider to the
+ * next. The first time a slider is clicked it is found the way F8 does by hand: two snapshots with nothing changed tell the words that
+ * move by themselves, then a press of left and a press of right: the word that goes down by a round step and comes back is the value
+ * (a float, or an int for a percentage). The two ends are found by pressing left, then right, until the value stops, and the slider is
+ * put back where it was. After that the value is read at each frame and left / right is pressed until it is the one under the cursor. */
+#define U2_DATA_OFFSET 0x104c000u
+#define U2_DATA_SIZE 0x6f0000u
+typedef struct { float x, y; uint64_t addr; int is_int, ready; float step, vmin, vmax; } U2SliderMem;   /* ready: 0 unknown, 1 found, -1 not found */
+static U2SliderMem u2_smem[8];
+static struct { int phase, count, stuck, restore, dir_main, retried; uint64_t t, until, next; int dir; uint32_t *s[3]; uint8_t *noisy; U2SliderMem *m; float b0, last; } u2_sd;
+static float u2_sval(const U2SliderMem *m, int *ok) {
+    uint32_t w=0;
+    *ok=safe_read(&w,m->addr,4);
+    if (!*ok) return 0.0f;
+    if (m->is_int) return (float)(int32_t)w;
+    float f; memcpy(&f,&w,4);
+    return f;
+}
+static uint32_t *u2_snap_take(void) {
+    const uint64_t image=u2_image;
+    if (!image) return NULL;
+    uint32_t *b=malloc(U2_DATA_SIZE);
+    if (!b) return NULL;
+    for (size_t off=0;off<U2_DATA_SIZE;off+=4096) if (!safe_read((uint8_t *)b+off,image+U2_DATA_OFFSET+off,4096)) memset((uint8_t *)b+off,0,4096);
+    return b;
+}
+static void u2_sd_free(void) {
+    for (int i=0;i<3;++i) { free(u2_sd.s[i]); u2_sd.s[i]=NULL; }
+    free(u2_sd.noisy); u2_sd.noisy=NULL;
+}
+static int u2_nice_step(float s, int is_int) {
+    static const float f_steps[]={0.01f,0.02f,0.025f,0.05f,0.1f,0.125f,0.2f,0.25f,0.5f,1.0f,2.0f,5.0f,10.0f};
+    static const float i_steps[]={1.0f,2.0f,5.0f,10.0f,20.0f,25.0f};
+    const float *t=is_int ? i_steps : f_steps;
+    const int n=is_int ? 6 : 13;
+    for (int i=0;i<n;++i) if (fabsf(s-t[i])<=0.004f*t[i]+1e-5f) return 1;
+    return 0;
+}
+/* base: before; a, b: after a first and a second press in the same direction (the value moves by the same round step twice) */
+static int u2_sd_analyze(const uint32_t *base, const uint32_t *a, const uint32_t *b, const uint8_t *noisy, U2SliderMem *m) {
+    const size_t words=U2_DATA_SIZE/4;
+    int best_score=0;
+    for (size_t i=0;i<words;++i) {
+        if (noisy[i] || base[i]==a[i]) continue;
+        float f0, f1, f2; memcpy(&f0,&base[i],4); memcpy(&f1,&a[i],4); memcpy(&f2,&b[i],4);
+        int score=0, is_int=0; float step=0.0f;
+        if (isfinite(f0) && isfinite(f1) && isfinite(f2) && f0>=0.0f && f0<=1000.0f && f1>=0.0f && f1<=1000.0f && f2>=0.0f && f2<=1000.0f) {
+            const float s1=f1-f0, s2=f2-f1;
+            if (fabsf(s1)>1e-4f && fabsf(s1-s2)<1e-5f*(1.0f+fabsf(f1)) && u2_nice_step(fabsf(s1),0)) { step=fabsf(s1); score=f0<=1.0001f ? 3 : 2; }
+        }
+        if (!score) {
+            const int32_t i0=(int32_t)base[i], i1=(int32_t)a[i], i2=(int32_t)b[i];
+            if (i0>=0 && i0<=1000 && i1>=0 && i1<=1000 && i2>=0 && i2<=1000 && i1!=i0 && i1-i0==i2-i1 && u2_nice_step((float)abs(i1-i0),1)) { step=(float)abs(i1-i0); score=1; is_int=1; }
+        }
+        if (!score) continue;
+        if (mouse_debug()) printf("Mouse: U2 slider candidate image+%#zx %s base %08x a %08x b %08x step %g score %d\n",(size_t)U2_DATA_OFFSET+i*4,is_int ? "int" : "float",base[i],a[i],b[i],step,score);
+        if (score>best_score) { best_score=score; m->addr=u2_image+U2_DATA_OFFSET+i*4; m->is_int=is_int; m->step=step; }
+    }
+    return best_score;   /* 3 a float up to 1, 2 a float, 1 an int (often a counter of presses: only taken when no float shows up) */
+}
+static void u2_sd_start(U2SliderMem *m, uint64_t now, int dir) {
+    u2_sd_free();
+    memset(&u2_sd,0,sizeof(u2_sd));
+    u2_sd.m=m; u2_sd.phase=1; u2_sd.t=now; u2_sd.dir_main=dir;   /* the way the cursor is: the slider moves that way first, as it will anyway */
+}
+static void u2_sd_abort(int failed) {
+    if (u2_sd.m) u2_sd.m->ready=failed ? -1 : 0;
+    u2_sd_free();
+    u2_sd.phase=0; u2_sd.restore=0;
+}
+/* one step of the search (called at each frame while u2_sd.phase is not 0); dir: 2 left, 3 right, pulsed through u2_sd.until */
+static void u2_sd_step(uint64_t now, int row_ok) {
+    U2SliderMem *m=u2_sd.m;
+    if (!u2_sd.phase || !m) return;
+    if (!row_ok) { printf("Runtime: U2 slider search stopped (the row is no longer the selected one)\n"); u2_sd_abort(0); return; }
+    if (now<u2_sd.t) return;
+    switch (u2_sd.phase) {
+    case 1: u2_sd.s[0]=u2_snap_take(); if (!u2_sd.s[0]) { u2_sd_abort(1); return; } u2_sd.t=now+70000; u2_sd.phase=2; break;
+    case 2: {
+        u2_sd.s[1]=u2_snap_take();
+        const size_t words=U2_DATA_SIZE/4;
+        u2_sd.noisy=calloc(words,1);
+        if (!u2_sd.s[1] || !u2_sd.noisy) { u2_sd_abort(1); return; }
+        for (size_t i=0;i<words;++i) u2_sd.noisy[i]=u2_sd.s[0][i]!=u2_sd.s[1][i];
+        u2_sd.dir=u2_sd.dir_main; u2_sd.until=now+70000; u2_sd.t=now+170000; u2_sd.phase=3;
+        break; }
+    case 3: u2_sd.s[2]=u2_snap_take(); if (!u2_sd.s[2]) { u2_sd_abort(1); return; } u2_sd.dir=u2_sd.dir_main; u2_sd.until=now+70000; u2_sd.t=now+170000; u2_sd.phase=4; break;
+    case 4: {
+        uint32_t *up=u2_snap_take();
+        const int score=up ? u2_sd_analyze(u2_sd.s[1],u2_sd.s[2],up,u2_sd.noisy,m) : 0;
+        const int ok=score>=2 || (score==1 && u2_sd.retried);
+        free(up);
+        if (!ok && !u2_sd.retried) {   /* at the end of the slider that way (an int that moves is a counter): the other way */
+            u2_sd_free();
+            u2_sd.retried=1; u2_sd.dir_main=u2_sd.dir_main==3 ? 2 : 3; u2_sd.phase=1; u2_sd.t=now+150000;
+            printf("Runtime: U2 slider value not found, trying the other way\n");
+            return;
+        }
+        u2_sd_free();
+        if (!ok) { printf("Runtime: U2 slider value not found (the slider will be dragged by steps)\n"); u2_sd_abort(1); return; }
+        int vok; const float v=u2_sval(m,&vok);
+        /* the ends are guessed (0..1 for a float up to 1, else 0..1000) and corrected when a press does nothing (u2_menu_buttons) */
+        m->vmin=0.0f; m->vmax=(m->is_int || v>1.0001f) ? 1000.0f : 1.0f;
+        m->ready=1; u2_sd.b0=v; u2_sd.restore=1; u2_sd.phase=0;
+        printf("Runtime: U2 slider value found at %#llx (%s, step %g, now %g)\n",(unsigned long long)m->addr,m->is_int ? "int" : "float",m->step,v);
+        break; }
+    }
+}
 static uint32_t u2_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
     /* rows the game never selected when asked to (the text of a choice box, a title): the hover gives up on them for 30 s */
     static struct { float x, y; uint64_t until; } skips[16];
-    static struct { float last_x, last_y, press_sel_cy, press_sel_x; int last_left, active, presses, budget, click, dir, last_dir, stuck; uint64_t click_deadline, press_until, next_press, cross_until, same_since; } h;
+    static struct { float sl_last, sl_acc, sl_w, sl_cx, sl_cy, f_last, last_f; int drag, sl_dir, sl_dir0, sl_pending, deferred, give, f_pulses, f_stuck; U2SliderMem *sm; uint64_t sl_next, sl_until, f_next, f_deadline, deferred_until; float last_x, last_y, press_sel_cy, press_sel_x; int last_left, active, presses, budget, click, dir, last_dir, stuck; uint64_t click_deadline, press_until, next_press, cross_until, same_since; } h;
     u2_hover=0;
     SDL_Window *w=SDL_GetMouseFocus();
     float mx=0, my=0; int ww=0, wh=0;
@@ -3376,10 +3503,14 @@ static uint32_t u2_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
     if (now<wheel_until_us[0] || now<wheel_until_us[1] ||
         (k && (k[SDL_SCANCODE_W] || k[SDL_SCANCODE_S] || k[SDL_SCANCODE_UP] || k[SDL_SCANCODE_DOWN] || k[SDL_SCANCODE_A] || k[SDL_SCANCODE_D] ||
                k[SDL_SCANCODE_LEFT] || k[SDL_SCANCODE_RIGHT]))) h.active=0;
-    U2Row hov={0}, sel={0};
-    int have_hov=0, have_sel=0, hi_n=0;
+    U2Row hov={0}, sel={0}, slid={0};
+    int have_hov=0, have_sel=0, hi_n=0, have_slid=0;
     float hi_cy[16];
     pthread_mutex_lock(&menu_text_lock);
+    for (int i=0;i<8;++i) {
+        const U2Row *s=&u2_sliders[i];
+        if (s->us && now-s->us<100000 && ux>=s->x-10.0f && ux<=s->x+s->w+10.0f && uy>=s->y && uy<s->y+s->h) { slid=*s; have_slid=1; }
+    }
     for (int i=0;i<U2_ROWS;++i) {
         const U2Row *r=&u2_rows[i];
         if (!r->us || now-r->us>=100000) continue;
@@ -3395,7 +3526,22 @@ static uint32_t u2_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
     pthread_mutex_unlock(&menu_text_lock);
     u2_hover=have_hov;
     if (u2_menu_reset) { u2_menu_reset=0; memset(skips,0,sizeof(skips)); h.active=0; h.click=0; h.presses=0; h.press_until=h.cross_until=0; }   /* a rebuilt menu (a language was chosen): wait for the cursor to move */
-    if (clicked && have_hov) { h.click=1; h.click_deadline=now+1500000; h.active=1; h.presses=0; h.budget=0; h.stuck=0; h.last_dir=-1; }
+    if (!left) h.drag=0;
+    if (clicked && have_slid) {   /* on a slider's rail: no cross (it does nothing there), the row is selected and the mouse drags the value by steps */
+        h.drag=1; h.sl_last=ux; h.sl_acc=0.0f; h.sl_w=slid.w; h.sl_cx=slid.x; h.sl_cy=slid.y+slid.h*0.5f; h.sl_next=0;
+        h.sl_pending=1; h.give=0; h.f_pulses=0; h.f_stuck=0;
+        h.sl_dir0=(ux-slid.x)/slid.w>0.5f ? 3 : 2;
+        h.deferred=1; h.deferred_until=now+3000000;
+        {   /* the memory of this rail (found once, see above) */
+            U2SliderMem *m=NULL;
+            for (int i=0;i<8 && !m;++i) if (u2_smem[i].x!=0.0f && fabsf(u2_smem[i].x-slid.x)<1.0f && fabsf(u2_smem[i].y-slid.y)<1.0f) m=&u2_smem[i];
+            for (int i=0;i<8 && !m;++i) if (u2_smem[i].x==0.0f) m=&u2_smem[i];
+            if (!m) m=&u2_smem[0];
+            if (m->x==0.0f || fabsf(m->x-slid.x)>=1.0f || fabsf(m->y-slid.y)>=1.0f) { memset(m,0,sizeof(*m)); m->x=slid.x; m->y=slid.y; }
+            h.sm=m;
+        }
+        h.active=1; h.presses=0; h.budget=0; h.stuck=0; h.last_dir=-1;
+    } else if (clicked && have_hov) { h.click=1; h.click_deadline=now+1500000; h.active=1; h.presses=0; h.budget=0; h.stuck=0; h.last_dir=-1; }
     if (h.click && (!have_hov || now>h.click_deadline)) h.click=0;
     /* the same line (a row can have several texts side by side, labels and values): only whole lines count, and only up / down are pressed */
     const float hov_cy=hov.y+hov.h*0.5f, sel_cy=sel.y+sel.h*0.5f;
@@ -3408,7 +3554,7 @@ static uint32_t u2_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
     const int same=line && !grid;
     if (!same) h.same_since=0; else if (!h.same_since) h.same_since=now;
     if (same && !h.click) h.active=0;   /* arrived: nothing more until the cursor moves again */
-    if (have_hov && have_sel && (h.active || h.click)) {
+    if (have_hov && have_sel && (h.active || h.click) && !u2_sd.phase) {
         if (!same) {
             if ((h.presses==0 || h.presses<h.budget) && now>=h.next_press) {
                 const int dir=grid ? (hov.x>sel.x ? 3 : 2) : hov_cy>sel_cy ? 1 : 0;   /* 0 up, 1 down, 2 left, 3 right */
@@ -3434,11 +3580,101 @@ static uint32_t u2_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
             printf("Runtime: U2 menu click on the row at %.0f,%.0f\n",hov.x,hov.y);
         }
     }
+    /* dragging a slider: one left / right press per tenth of the rail the cursor has moved (the steps of the game are tenths, measured
+     * on the sensitivity), once the row is the selected one */
+    const int sl_row_ok=have_sel && fabsf(sel_cy-h.sl_cy)<8.0f;
+    if (moved) { h.give=0; h.f_stuck=0; }
+    if (h.drag && left && h.sl_w>0.0f) { float f=(ux-h.sl_cx)/h.sl_w; h.last_f=f<0.0f ? 0.0f : f>1.0f ? 1.0f : f; }
+    if (h.sl_pending && h.sm && sl_row_ok && !u2_sd.phase) {
+        h.sl_pending=0;
+        if (h.sm->ready==0) u2_sd_start(h.sm,now,h.sl_dir0);
+    }
+    if (u2_sd.phase) u2_sd_step(now,sl_row_ok);
+    if (h.sm && h.sm->ready==1 && !u2_sd.phase && sl_row_ok) {   /* the value is known: the slider goes where the cursor is */
+        const U2SliderMem *m=h.sm;
+        float tgt=0.0f; int have_tgt=0;
+        /* where the cursor is (held) or was when the button went up (a quick click: the row had to be selected and the value found first) */
+        float f=-1.0f;
+        if (h.drag && left) f=h.last_f; else if (h.deferred && now<h.deferred_until) f=h.last_f;
+        if (f>=0.0f) {
+            tgt=m->vmin+f*(m->vmax-m->vmin);
+            const float n=floorf((tgt-m->vmin)/m->step+0.5f);
+            tgt=m->vmin+n*m->step; have_tgt=1;
+        }
+        if (have_tgt) {
+            int vok; const float v=u2_sval(m,&vok);
+            if (!vok || v<m->vmin-m->step || v>m->vmax+m->step) { h.sm->ready=0; h.sm->x=0.0f; h.deferred=0; printf("Runtime: U2 slider memory dropped (value out of its range)\n"); }
+            else if (fabsf(v-tgt)<m->step*0.5f) { h.f_stuck=0; if (!(h.drag && left)) h.deferred=0; }
+            else if (now>=h.f_next && !h.give) {
+                /* one press at a time: the next one only once the value has moved (the game may be slow to apply a press, two in flight
+                 * run the slider past the cursor) or 350 ms have passed */
+                const int changed=h.f_pulses>0 && fabsf(v-h.f_last)>=1e-6f;
+                if (h.f_pulses>0 && !changed && now<h.f_deadline) { /* waiting */ }
+                else {
+                    if (h.f_pulses>0 && !changed) ++h.f_stuck; else h.f_stuck=0;
+                    if (h.f_stuck>=2 && h.f_pulses>0) {   /* a press did nothing: that is an end of the slider, the real one */
+                        if (h.sl_dir==3) h.sm->vmax=v; else h.sm->vmin=v;
+                        printf("Runtime: U2 slider end found: %g .. %g\n",h.sm->vmin,h.sm->vmax);
+                        h.f_stuck=0; h.f_pulses=0;
+                    }
+                    else if (h.f_stuck>=3) { h.give=1; h.deferred=0; }
+                    else { h.sl_dir=v<tgt ? 3 : 2; h.sl_until=now+60000; h.f_next=now+80000; h.f_deadline=now+350000; h.f_last=v; ++h.f_pulses; }
+                }
+            }
+        }
+    } else if (h.drag && (!h.sm || h.sm->ready==-1)) {   /* value not found: the mouse drags by steps */
+        h.sl_acc+=ux-h.sl_last; h.sl_last=ux;
+        const float step_px=h.sl_w/10.0f;
+        if (h.sl_acc>2.0f*step_px) h.sl_acc=2.0f*step_px; else if (h.sl_acc<-2.0f*step_px) h.sl_acc=-2.0f*step_px;   /* no backlog: the knob must not run on after the mouse stops */
+        if (have_sel && fabsf(sel_cy-h.sl_cy)<8.0f && fabsf(h.sl_acc)>=step_px && now>=h.sl_next) {
+            h.sl_dir=h.sl_acc>0.0f ? 3 : 2;
+            h.sl_acc-=h.sl_acc>0.0f ? step_px : -step_px;
+            h.sl_until=now+60000; h.sl_next=now+100000;
+            if (mouse_debug()) {   /* the sensitivity's value (image+0x104f5a4), to count the steps of a rail */
+                float v=-1.0f;
+                if (u2_image) safe_read(&v,u2_image+0x104f5a4u,4);
+                printf("Mouse: U2 slider press %s cursor %.1f rail %.1f..%.1f value %g\n",h.sl_dir==3 ? "right" : "left",ux,h.sl_cx,h.sl_cx+h.sl_w,v);
+            }
+        }
+    }
+    if (!left && !h.deferred) h.sl_until=0;   /* the button is up: no press left over (a slider still going to where the cursor was keeps its own) */
     uint32_t out=0;
+    if (now<h.sl_until) out|=h.sl_dir==3 ? BTN_RIGHT : BTN_LEFT;
+    if (now<u2_sd.until) out|=u2_sd.dir==3 ? BTN_RIGHT : BTN_LEFT;
     if (now<h.press_until) out|=h.dir==0 ? BTN_UP : h.dir==1 ? BTN_DOWN : h.dir==2 ? BTN_LEFT : BTN_RIGHT;
     if (now<h.cross_until) out|=BTN_CROSS;
+    if (now<wheel_until_us[0]) out|=BTN_UP;     /* the wheel: one row up / down per notch */
+    if (now<wheel_until_us[1]) out|=BTN_DOWN;
     if (mouse & 8u) out|=BTN_CIRCLE;
     return out;
+}
+/* F8 in a U2 menu (BB_MOUSE_DEBUG): a snapshot of the data segment (image + 0x104c000, 0x6f0000 bytes) to find where a slider keeps its
+ * value, as for U1 (menu_data_snapshot): two snapshots with nothing changed tell which words move by themselves, each later one reports
+ * the other words that changed since the one before. */
+static void u2_data_snapshot(void) {
+    static uint32_t *prev; static int count; static uint8_t *noisy;
+    const uint64_t image=u2_image;
+    if (!image) return;
+    const size_t words=U2_DATA_SIZE/4;
+    uint32_t *now=malloc(U2_DATA_SIZE);
+    if (!now) return;
+    for (size_t off=0;off<U2_DATA_SIZE;off+=4096) if (!safe_read((uint8_t *)now+off,image+U2_DATA_OFFSET+off,4096)) memset((uint8_t *)now+off,0,4096);
+    if (!noisy) noisy=calloc(words,1);
+    if (count==1 && prev && noisy) {
+        size_t moving=0;
+        for (size_t i=0;i<words;++i) if (prev[i]!=now[i]) { noisy[i]=1; ++moving; }
+        printf("Runtime: U2 data: noise snapshot, %zu words move by themselves\n",moving);
+    } else if (count>=2 && prev && noisy) {
+        int shown=0;
+        for (size_t i=0;i<words;++i) if (prev[i]!=now[i] && !noisy[i]) {
+            if (shown++<80) {
+                float fo, fn; memcpy(&fo,&prev[i],4); memcpy(&fn,&now[i],4);
+                printf("Runtime: U2 data: image+%#zx %08x -> %08x (%d -> %d, %g -> %g)\n",(size_t)U2_DATA_OFFSET+i*4,prev[i],now[i],(int)prev[i],(int)now[i],fo,fn);
+            }
+        }
+        printf("Runtime: U2 data: %d words changed (snapshot %d)\n",shown,count);
+    } else printf("Runtime: U2 data: first snapshot taken (image %#llx)\n",(unsigned long long)image);
+    free(prev); prev=now; ++count;
 }
 static void sample_host(PadData *d) {
     host_rotate=host_sideways=0;
@@ -3524,6 +3760,9 @@ static void sample_host(PadData *d) {
     if (menu_mode && !menu_guard && !pad_only) d->buttons|=menu_mouse_buttons(k,mouse,now);
     else menu_hover=0;
     const int u2_menu=u2_menu_active(now) && !pad_only;
+    if (mouse_debug()) { static int f8_was_down; const int f8=k && k[SDL_SCANCODE_F8]; if (f8 && !f8_was_down && u2_menu) u2_data_snapshot(); f8_was_down=f8; }
+    /* the wheel is the d-pad left / right of the play (weapon change): in a menu it moves up / down instead, not both at once */
+    if (u2_menu && (now<wheel_until_us[0] || now<wheel_until_us[1])) d->buttons&=~(BTN_UP|BTN_DOWN|BTN_LEFT|BTN_RIGHT);
     if (u2_menu) { d->buttons|=u2_menu_buttons(k,mouse,now); if (!(mouse & 1u)) { mdx=mdy=0; captured=0; } } else u2_hover=0;   /* the mouse turns the models of the menus only with the left button held */
     bbgpu_set_cursor((menu_mode || u2_menu) && !pad_only ? ((mouse & 1u) ? 2 : (menu_hover || u2_hover) ? 1 : 0) : 0);
     if (menu_mode && now-u1_compare_us<250000) d->buttons&=~BTN_CROSS;   /* statistics: no "compare with friends" */
