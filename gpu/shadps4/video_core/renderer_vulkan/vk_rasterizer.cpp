@@ -12,6 +12,7 @@
 #include "core/libraries/videoout/driver.h"
 #include <xxhash.h>
 #include "video_core/renderer_vulkan/ui_composition.h"
+#include "bbport_keyicons.h"
 #include "bbport_toggles.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
 #include "common/debug.h"
@@ -5147,6 +5148,117 @@ void Rasterizer::UpdateViewportScissorState() const {
         };
         viewports.push_back(empty_viewport);
         scissors.push_back(empty_scissor);
+    }
+
+    // bbport diagnosis (BB_KEY_ICONS_DRAWS=1): which HUD button texture each draw samples, printed when
+    // it changes (the textures of the "E" press animation, to tell the frames apart in game).
+    if (BbKeyIcons::Enabled()) {
+        static const bool log_draws = std::getenv("BB_KEY_ICONS_DRAWS") != nullptr;
+        static std::map<u64, u32> counts;
+        static auto window = std::chrono::steady_clock::now();
+        static u32 printed = 0;
+        if (log_draws && printed < 120) {
+            for (const auto id : bound_images) {
+                if (const u64 key_hash = texture_cache.KeyHash(id)) {
+                    ++counts[key_hash];
+                }
+            }
+            const auto now = std::chrono::steady_clock::now();
+            if (now - window > std::chrono::seconds(2)) {
+                window = now;
+                if (!counts.empty()) {
+                    ++printed;
+                    std::string line = "KeyIcons: draws sampling HUD button textures in 2 s:";
+                    for (const auto& [hash, n] : counts) {
+                        line += fmt::format(" {:016x}={}", hash, n);
+                    }
+                    std::printf("%s\n", line.c_str());
+                    counts.clear();
+                }
+            }
+        }
+    }
+
+    // bbport: the halo of the pressed "E" blinks: its mask is uploaded again with the phase of the blink.
+    if (BbKeyIcons::Enabled()) {
+        const auto now = std::chrono::steady_clock::now();
+        for (const auto id : bound_images) {
+            const_cast<VideoCore::TextureCache&>(texture_cache).RefreshPulseMask(id, now);
+            if (texture_cache.IsAtlas(id)) {
+                BbKeyIcons::NoteAtlasDraw(); // (a hint with a button icon is on screen: see bbgpu_atlas_recent)
+            }
+        }
+    }
+
+    // bbport: diagnosis of the menu pastilles: what the draws that sample the icon atlas are while a menu is open
+    // (BB_MENU_ATLAS_LOG=1): one line per distinct (indices, instances, viewport) seen.
+    if (BbKeyIcons::Enabled() && BbKeyIcons::MenuMode() && !viewports.empty()) {
+        static const bool log_atlas = std::getenv("BB_MENU_ATLAS_LOG") != nullptr;
+        bool atlas = false;
+        for (const auto id : bound_images) {
+            atlas = atlas || texture_cache.IsAtlas(id);
+        }
+        if (log_atlas && atlas) {
+            static std::set<std::string> seen;
+            const auto& vp0 = viewports[0];
+            const std::string key = fmt::format("{} {} {:.0f} {:.0f} {:.0f} {:.0f}", u32(regs.num_indices), u32(regs.num_instances.NumInstances()), vp0.x, vp0.y, vp0.width, vp0.height);
+            if (seen.size() < 60 && seen.insert(key).second) {
+                std::printf("KeyIcons: menu atlas draw: indices %u instances %u viewport (%.0f %.0f %.0fx%.0f) scissor count %zu\n",
+                            u32(regs.num_indices), u32(regs.num_instances.NumInstances()), vp0.x, vp0.y, vp0.width, vp0.height, scissors.size());
+            }
+        }
+    }
+
+    // bbport: the "rotate the stick" prompt (BbKeyIcons) is drawn about 3 times smaller than the
+    // other prompts: a draw sampling one of its textures is zoomed about a fixed point of the target
+    // (fractions of it: any resolution), by widening its viewport the same way.
+    if (BbKeyIcons::Enabled() && BbKeyIcons::InputMode() != 0) {
+        // a controller: the prompts keep the game's size and place
+    } else if (BbKeyIcons::Enabled() && !viewports.empty() && !regs.IsClipDisabled()) {
+        int kind = 0;
+        for (const auto id : bound_images) {
+            if ((kind = texture_cache.PromptKind(id)) != 0) {
+                break;
+            }
+        }
+        if (kind != 0) {
+            float zoom, ax, ay, down, right;
+            BbKeyIcons::PromptTransform(kind, &zoom, &ax, &ay, &down, &right);
+            auto& vp = viewports[0];
+            // The viewport may be flipped (negative height): the anchor is a fraction from the top
+            // of the target either way, the zoom is the same linear map about it.
+            const float top = std::min(vp.y, vp.y + vp.height);
+            const float cx = vp.x + ax * vp.width, cy = top + ay * std::fabs(vp.height);
+            vk::Viewport z = vp;
+            z.x = cx - zoom * (cx - vp.x) + right * std::fabs(vp.width);
+            z.y = cy - zoom * (cy - vp.y) + down * std::fabs(vp.height);
+            z.width = vp.width * zoom;
+            z.height = vp.height * zoom;
+            const float max_w = float(instance.GetMaxViewportWidth()), max_h = float(instance.GetMaxViewportHeight());
+            const float y_low = std::min(z.y, z.y + z.height), y_high = std::max(z.y, z.y + z.height);
+            static bool reported = false;
+            if ((zoom != 1.0f || down != 0.0f || right != 0.0f) && z.width <= max_w && std::fabs(z.height) <= max_h &&
+                z.x >= -max_w && y_low >= -max_h && z.x + z.width < max_w && y_high < max_h) {
+                if (!reported) {
+                    reported = true;
+                    std::printf("KeyIcons: prompt kind %d zoomed x%.2f about (%.3f, %.3f), down %.3f, of a %.0fx%.0f target\n",
+                                kind, zoom, ax, ay, down, vp.width, vp.height);
+                }
+                vp = z;
+            } else if (!reported) {
+                reported = true;
+                std::printf("KeyIcons: stick prompt zoom skipped (viewport %.0fx%.0f, limit %.0fx%.0f)\n", z.width,
+                            z.height, max_w, max_h);
+            }
+        }
+    } else if (BbKeyIcons::Enabled() && regs.IsClipDisabled()) {
+        static bool reported = false;
+        for (const auto id : bound_images) {
+            if (!reported && texture_cache.PromptKind(id)) {
+                reported = true;
+                std::printf("KeyIcons: stick prompt zoom not applied: its draw has clipping disabled\n");
+            }
+        }
     }
 
     auto& dynamic_state = scheduler.GetDynamicState();

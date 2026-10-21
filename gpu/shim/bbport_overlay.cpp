@@ -11,11 +11,16 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <cstdio>
+#include <cstring>
+#include <fstream>
 #include <mutex>
+#include <sstream>
+#include <string>
 #include <vector>
-#include <thread>
 
 #include <SDL3/SDL.h>
+#include "bbport_keyicons.h"
 #include "bbport_settings.h"
 #include "../bbgpu.h"
 #include "common/path_util.h"
@@ -144,9 +149,289 @@ float base_scale = 1.0f;
 std::chrono::steady_clock::time_point last_present{};
 float frame_ms_avg = 0.0f, last_present_ms = 0.0f;
 
+// ---- the keyboard and mouse bindings window ("Touches clavier / souris", opened from the game's Commandes menu) ----
+// It edits input.ini (BB_INPUT_CONFIG) line by line, keeps every other line, and tells the pad code to read it again.
+std::atomic<bool> controls_open{false};
+std::atomic<bool> controls_changed{false};
+std::vector<std::string> ini_lines;
+int capture_index = -1, capture_slot = 0; // the binding being captured: index into ControlActions, slot 0 or 1
+
+// The window speaks the game's language (the four of the dump): 0 English, 1 French, 2 Spanish (Latin America), 3 Brazilian
+// Portuguese. src/runtime_pad.c finds it from the text of the "Keyboard/Mouse" row and tells it through bbgpu_set_language.
+std::atomic<int> ui_language{1};
+const char* T(const char* en, const char* fr, const char* es, const char* pt) {
+    switch (ui_language.load()) {
+    case 0: return en;
+    case 2: return es;
+    case 3: return pt;
+    default: return fr;
+    }
+}
+
+struct ControlAction {
+    const char* name;     // input.ini: key.<name>
+    const char* label[4]; // what the key does in the game (as on the controller diagram), in the four languages: en, fr, es, pt
+    const char* fallback; // default keys when the file has none
+};
+constexpr ControlAction ControlActions[] = {
+    {"ls_up", {"Move forward", "Avancer", "Avanzar", "Avançar"}, "W"},
+    {"ls_down", {"Move back", "Reculer", "Retroceder", "Recuar"}, "S"},
+    {"ls_left", {"Move left", "Aller à gauche", "Ir a la izquierda", "Ir para a esquerda"}, "A"},
+    {"ls_right", {"Move right", "Aller à droite", "Ir a la derecha", "Ir para a direita"}, "D"},
+    {"rs_up", {"Camera up (without the mouse)", "Caméra vers le haut (sans souris)", "Cámara hacia arriba (sin mouse)",
+               "Câmera para cima (sem mouse)"}, "I"},
+    {"rs_down", {"Camera down (without the mouse)", "Caméra vers le bas (sans souris)", "Cámara hacia abajo (sin mouse)",
+                 "Câmera para baixo (sem mouse)"}, "K"},
+    {"rs_left", {"Camera left (without the mouse)", "Caméra vers la gauche (sans souris)", "Cámara hacia la izquierda (sin mouse)",
+                 "Câmera para a esquerda (sem mouse)"}, "J"},
+    {"rs_right", {"Camera right (without the mouse)", "Caméra vers la droite (sans souris)", "Cámara hacia la derecha (sin mouse)",
+                  "Câmera para a direita (sem mouse)"}, "L"},
+    {"cross", {"Jump / Climb", "Sauter / Escalader", "Saltar / Escalar", "Pular / Escalar"}, "Space"},
+    {"circle", {"Take cover / Roll / Drop down", "À couvert / Rouler / Descendre", "Cubrirse / Rodar / Descender",
+                "Abrigar-se / Rolar / Descer"}, "C"},
+    {"square", {"Melee", "Combat rapproché", "Combate cuerpo a cuerpo", "Combate corpo a corpo"}, "F"},
+    {"triangle", {"Interact / Pick up", "Interagir / Ramasser", "Interactuar / Recoger", "Interagir / Pegar"}, "E"},
+    {"l1", {"Grenade / Hold to aim", "Grenade / Maintenir pour viser", "Granada / Mantener para apuntar",
+            "Granada / Segurar para mirar"}, "G"},
+    {"r1", {"Reload", "Recharger", "Recargar", "Recarregar"}, "R"},
+    {"l2", {"Aim weapon", "Viser avec l'arme", "Apuntar con el arma", "Mirar com a arma"}, "Mouse Right"},
+    {"r2", {"Fire weapon", "Tirer avec l'arme", "Disparar el arma", "Atirar com a arma"}, "Mouse Left"},
+    {"l3", {"Switch shoulder while aiming", "Changer d'épaule en visant", "Cambiar de hombro al apuntar",
+            "Trocar de ombro ao mirar"}, "Left Shift"},
+    {"r3", {"Reset camera", "Réinitialiser la caméra", "Reiniciar la cámara", "Redefinir a câmera"}, "V"},
+    {"walk", {"Walk (hold with the movement keys)", "Marcher (à tenir avec les touches de déplacement)",
+              "Caminar (mantener con las teclas de movimiento)", "Andar (segurar com as teclas de movimento)"}, ""},
+    {"options", {"Pause", "Pause", "Pausa", "Pausa"}, "Escape|Return"},
+    {"touchpad", {"Journal", "Journal", "Diario", "Diário"}, "Tab"},
+    {"up", {"Look", "Regarder", "Mirar", "Olhar"}, "Up"},
+    {"down", {"D-pad down (photo mode removed)", "Croix du bas (mode photo retiré)", "Cruceta abajo (modo foto retirado)",
+              "Direcional para baixo (modo foto removido)"}, "Down"},
+    {"left", {"Weapon 1 (sidearm)", "Arme 1 (arme de poing)", "Arma 1 (arma corta)", "Arma 1 (arma secundária)"}, "1|Wheel Up"},
+    {"right", {"Weapon 2 (main weapon)", "Arme 2 (arme principale)", "Arma 2 (arma principal)", "Arma 2 (arma principal)"}, "2|Wheel Down"},
+};
+const char* ActionLabel(const ControlAction& action) {
+    return action.label[ui_language.load()];
+}
+constexpr int ControlActionCount = int(sizeof(ControlActions) / sizeof(ControlActions[0]));
+
+std::string IniPath() {
+    const char* env = std::getenv("BB_INPUT_CONFIG");
+    return env && env[0] ? env : "";
+}
+
+void IniLoad() {
+    ini_lines.clear();
+    const std::string path = IniPath();
+    if (path.empty()) {
+        return;
+    }
+    std::ifstream in(path);
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        ini_lines.push_back(line);
+    }
+}
+
+std::string IniGet(const std::string& key, const std::string& fallback) {
+    const std::string prefix = key + "=";
+    for (const std::string& line : ini_lines) {
+        if (line.compare(0, prefix.size(), prefix) == 0) {
+            return line.substr(prefix.size());
+        }
+    }
+    return fallback;
+}
+
+void IniSet(const std::string& key, const std::string& value) {
+    const std::string prefix = key + "=";
+    for (std::string& line : ini_lines) {
+        if (line.compare(0, prefix.size(), prefix) == 0) {
+            line = prefix + value;
+            return;
+        }
+    }
+    ini_lines.push_back(prefix + value);
+}
+
+/// Writes the file (a temporary one, then renamed over it) and tells the others.
+void IniSave() {
+    const std::string path = IniPath();
+    if (path.empty()) {
+        std::printf("Overlay: BB_INPUT_CONFIG is not set, the bindings cannot be saved\n");
+        return;
+    }
+    const std::string temporary = path + ".tmp";
+    {
+        std::ofstream out(temporary, std::ios::trunc);
+        for (const std::string& line : ini_lines) {
+            out << line << "\n";
+        }
+    }
+    std::remove(path.c_str());
+    if (std::rename(temporary.c_str(), path.c_str()) != 0) {
+        std::printf("Overlay: could not write %s\n", path.c_str());
+        return;
+    }
+    controls_changed = true;
+    BbKeyIcons::ForceRepaint();
+}
+
+std::string BindingSlot(const std::string& value, int slot) {
+    const auto bar = value.find('|');
+    if (slot == 0) {
+        return value.substr(0, bar);
+    }
+    return bar == std::string::npos ? std::string{} : value.substr(bar + 1);
+}
+
+void SetBinding(int index, int slot, const std::string& name) {
+    const ControlAction& action = ControlActions[index];
+    const std::string current = IniGet(std::string("key.") + action.name, action.fallback);
+    std::string first = BindingSlot(current, 0), second = BindingSlot(current, 1);
+    (slot == 0 ? first : second) = name;
+    if (first.empty()) {
+        first = second;
+        second.clear();
+    }
+    IniSet(std::string("key.") + action.name, second.empty() ? first : first + "|" + second);
+    IniSave();
+}
+
+/// The binding name for an SDL mouse button, "" for the ones the game cannot use.
+std::string MouseButtonName(int button) {
+    switch (button) {
+    case SDL_BUTTON_LEFT: return "Mouse Left";
+    case SDL_BUTTON_RIGHT: return "Mouse Right";
+    case SDL_BUTTON_MIDDLE: return "Mouse Middle";
+    case SDL_BUTTON_X1: return "Mouse 4";
+    case SDL_BUTTON_X2: return "Mouse 5";
+    default: return {};
+    }
+}
+
+void SetOpen(bool value);
+
+void CloseControls() {
+    controls_open = false;
+    capture_index = -1;
+    SetOpen(false);
+}
+
+void ControlsWindow() {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f,
+                                   viewport->WorkPos.y + viewport->WorkSize.y * 0.5f),
+                            ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(780.0f * base_scale, std::min(720.0f * base_scale, viewport->WorkSize.y * 0.92f)),
+                             ImGuiCond_Appearing);
+    bool keep_open = true;
+    const std::string window_title = std::string(T("Keyboard / Mouse", "Touches clavier / souris", "Teclado / Mouse", "Teclado / Mouse")) + "###keysmouse";
+    if (!ImGui::Begin(window_title.c_str(), &keep_open, ImGuiWindowFlags_NoCollapse)) {
+        ImGui::End();
+        if (!keep_open) {
+            CloseControls();
+        }
+        return;
+    }
+    ImGui::TextWrapped("%s", T("Click a key, then press the new key, a mouse button or the wheel. Esc cancels. The × button clears a key. Changes are saved at once.",
+                               "Cliquez sur une touche, puis appuyez sur la nouvelle touche, un bouton de la souris ou la molette. Échap annule. Le bouton × efface une touche. Les changements sont enregistrés tout de suite.",
+                               "Haz clic en una tecla y luego pulsa la nueva tecla, un botón del mouse o la rueda. Esc cancela. El botón × borra una tecla. Los cambios se guardan al instante.",
+                               "Clique em uma tecla e depois pressione a nova tecla, um botão do mouse ou a roda. Esc cancela. O botão × apaga uma tecla. As alterações são salvas na hora."));
+    if (IniPath().empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "%s", T("The keys file was not found: nothing will be saved.", "Le fichier des touches est introuvable : rien ne sera enregistré.", "No se encuentra el archivo de teclas: no se guardará nada.", "O arquivo das teclas não foi encontrado: nada será salvo."));
+    }
+    ImGui::Separator();
+    if (ImGui::BeginTable("##bindings", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_BordersInnerH,
+                          ImVec2(0.0f, ImGui::GetContentRegionAvail().y - 150.0f * base_scale))) {
+        ImGui::TableSetupColumn(T("Action", "Action", "Acción", "Ação"), ImGuiTableColumnFlags_WidthStretch, 2.2f);
+        ImGui::TableSetupColumn(T("Key 1", "Touche 1", "Tecla 1", "Tecla 1"), ImGuiTableColumnFlags_WidthStretch, 1.4f);
+        ImGui::TableSetupColumn(T("Key 2", "Touche 2", "Tecla 2", "Tecla 2"), ImGuiTableColumnFlags_WidthStretch, 1.4f);
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableHeadersRow();
+        for (int i = 0; i < ControlActionCount; ++i) {
+            const ControlAction& action = ControlActions[i];
+            const std::string value = IniGet(std::string("key.") + action.name, action.fallback);
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextUnformatted(ActionLabel(action));
+            for (int slot = 0; slot < 2; ++slot) {
+                ImGui::TableSetColumnIndex(1 + slot);
+                ImGui::PushID(i * 2 + slot);
+                const bool capturing = capture_index == i && capture_slot == slot;
+                const std::string name = BindingSlot(value, slot);
+                const std::string text = capturing ? std::string(T("Press a key…", "Appuyez sur une touche…", "Pulsa una tecla…", "Pressione uma tecla…"))
+                                                   : name.empty() ? std::string(T("(none)", "(aucune)", "(ninguna)", "(nenhuma)")) : name;
+                const float clear_width = ImGui::GetFrameHeight();
+                if (ImGui::Button((text + "###bind").c_str(), ImVec2(ImGui::GetContentRegionAvail().x - clear_width - 4.0f, 0.0f))) {
+                    capture_index = i;
+                    capture_slot = slot;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("×", ImVec2(clear_width, 0.0f)) && !name.empty()) {
+                    SetBinding(i, slot, "");
+                    capture_index = -1;
+                }
+                ImGui::PopID();
+            }
+        }
+        ImGui::EndTable();
+    }
+    ImGui::SeparatorText(T("Mouse", "Souris", "Mouse", "Mouse"));
+    float sensitivity = float(std::atof(IniGet("mouse_sensitivity", "1.0").c_str()));
+    float aim_sensitivity = float(std::atof(IniGet("mouse_aim_sensitivity", "1.0").c_str()));
+    bool invert_y = std::atoi(IniGet("mouse_invert_y", "0").c_str()) != 0;
+    bool mouse_look = std::atoi(IniGet("mouse_look", "1").c_str()) != 0;
+    bool changed = false;
+    if (ImGui::SliderFloat(T("Sensitivity", "Sensibilité", "Sensibilidad", "Sensibilidade"), &sensitivity, 0.1f, 5.0f, "%.2f")) {
+        char text[32];
+        std::snprintf(text, sizeof(text), "%.2f", sensitivity);
+        IniSet("mouse_sensitivity", text);
+        changed = true;
+    }
+    if (ImGui::SliderFloat(T("Sensitivity while aiming", "Sensibilité en visant", "Sensibilidad al apuntar", "Sensibilidade ao mirar"), &aim_sensitivity, 0.1f, 5.0f, "%.2f")) {
+        char text[32];
+        std::snprintf(text, sizeof(text), "%.2f", aim_sensitivity);
+        IniSet("mouse_aim_sensitivity", text);
+        changed = true;
+    }
+    if (ImGui::Checkbox(T("Invert the mouse vertical axis", "Inverser l'axe vertical de la souris", "Invertir el eje vertical del mouse", "Inverter o eixo vertical do mouse"), &invert_y)) {
+        IniSet("mouse_invert_y", invert_y ? "1" : "0");
+        changed = true;
+    }
+    if (ImGui::Checkbox(T("Look with the mouse", "Regarder avec la souris", "Mirar con el mouse", "Olhar com o mouse"), &mouse_look)) {
+        IniSet("mouse_look", mouse_look ? "1" : "0");
+        changed = true;
+    }
+    if (changed) {
+        IniSave();
+    }
+    ImGui::Separator();
+    if (ImGui::Button(T("Defaults", "Valeurs par défaut", "Valores predeterminados", "Padrões"))) {
+        for (const ControlAction& action : ControlActions) {
+            IniSet(std::string("key.") + action.name, action.fallback);
+        }
+        IniSave();
+        capture_index = -1;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(T("Close", "Fermer", "Cerrar", "Fechar")) || !keep_open) {
+        ImGui::End();
+        CloseControls();
+        return;
+    }
+    ImGui::End();
+}
+
 void SetOpen(bool value) {
     if (menu_open.exchange(value) == value) {
         return;
+    }
+    if (!value) {
+        controls_open = false;
+        capture_index = -1;
     }
     ImGui::GetIO().MouseDrawCursor = value;
     if (!value && dirty) {
@@ -272,6 +557,10 @@ void Hint(const char* text) {
 }
 
 void Menu() {
+    if (controls_open) {
+        ControlsWindow();
+        return;
+    }
     auto& s = BbSettings::Get();
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     // The menu fits whatever window the game has: 620 px wide when there is room, never wider or
@@ -973,6 +1262,34 @@ bool HandleEvent(const SDL_Event& event) {
     }
     ImGuiIO& io = ImGui::GetIO();
     const bool is_open = menu_open;
+    // The bindings window waiting for a key: the next key, mouse button or wheel step is the new binding.
+    if (controls_open && capture_index >= 0) {
+        std::string name;
+        bool cancel = false;
+        if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat) {
+            if (event.key.key == SDLK_ESCAPE) {
+                cancel = true;
+            } else if (event.key.key != SDLK_INSERT && event.key.key != SDLK_LALT) { // Insert: the port's menu; left Alt: frees the cursor
+                name = SDL_GetScancodeName(event.key.scancode);
+            }
+        } else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+            name = MouseButtonName(event.button.button);
+        } else if (event.type == SDL_EVENT_MOUSE_WHEEL && event.wheel.y != 0.0f) {
+            name = event.wheel.y > 0.0f ? "Wheel Up" : "Wheel Down";
+        }
+        if (cancel) {
+            capture_index = -1;
+            return true;
+        }
+        if (!name.empty()) { // (the click that started the capture was taken before: this one is the choice)
+            SetBinding(capture_index, capture_slot, name);
+            capture_index = -1;
+            return true;
+        }
+        if (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP) {
+            return true; // Insert, left Alt and the releases: nothing
+        }
+    }
     switch (event.type) {
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP: {
@@ -1066,6 +1383,27 @@ bool HandleEvent(const SDL_Event& event) {
     default:
         return false;
     }
+}
+
+/// The game's Commandes menu asks for the keyboard and mouse bindings window.
+void SetLanguage(int language) {
+    ui_language = language >= 0 && language <= 3 ? language : 1;
+}
+
+void OpenControls() {
+    std::scoped_lock lock{imgui_mutex};
+    if (!initialized) {
+        return;
+    }
+    IniLoad();
+    capture_index = -1;
+    controls_open = true;
+    SetOpen(true);
+}
+
+/// True once after the bindings file was written: the pad code reads it again.
+bool ControlsChanged() {
+    return controls_changed.exchange(false);
 }
 
 bool Visible() {

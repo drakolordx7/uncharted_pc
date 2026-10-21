@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include "bbport_toggles.h"
+#include "bbport_keyicons.h"
 
 #include <condition_variable>
 #include <mutex>
@@ -218,6 +219,41 @@ public:
         TouchImage(image);
         return image;
     }
+    /// bbport: a blinking-halo mask (BbKeyIcons::IsPulseMask) bound by a draw is uploaded again, with the
+    /// phase of the blink of the moment, when `interval` has passed since its last upload.
+    void RefreshPulseMask(ImageId id, std::chrono::steady_clock::time_point now) {
+        if (!id || !slot_images.is_allocated(id)) {
+            return;
+        }
+        BbKeyIcons::TickMenuPhase();
+        auto& image = slot_images[id];
+        if (image.bb_atlas && image.bb_atlas_generation != BbKeyIcons::MenuGeneration()) {
+            image.bb_atlas_generation = BbKeyIcons::MenuGeneration(); // a menu opened or closed: paint it again
+            image.flags |= ImageFlagBits::CpuDirty;
+        }
+        if (image.bb_key_hash && image.bb_mode_generation != BbKeyIcons::ModeGeneration()) {
+            image.bb_mode_generation = BbKeyIcons::ModeGeneration(); // keyboard / controller switch: the game's button or ours
+            image.flags |= ImageFlagBits::CpuDirty;
+        }
+        if (image.bb_pulse && BbKeyIcons::InputMode() == 0 && now - pulse_refreshed > std::chrono::milliseconds(90)) {
+            pulse_refreshed = now;
+            image.flags |= ImageFlagBits::CpuDirty;
+        }
+    }
+    std::chrono::steady_clock::time_point pulse_refreshed{};
+
+    /// bbport: whether the image is the U1 icon atlas.
+    [[nodiscard]] bool IsAtlas(ImageId id) const {
+        return id && slot_images.is_allocated(id) && slot_images[id].bb_atlas;
+    }
+    /// bbport: hash of the HUD button texture the image is (0 when it is none); no LRU touch.
+    [[nodiscard]] u64 KeyHash(ImageId id) const {
+        return id && slot_images.is_allocated(id) ? slot_images[id].bb_key_hash : 0;
+    }
+    /// bbport: the kind of key prompt the image is (BbKeyIcons::PromptKind; no LRU touch, usable from const code).
+    [[nodiscard]] int PromptKind(ImageId id) const {
+        return id && slot_images.is_allocated(id) ? int(slot_images[id].bb_prompt) : 0;
+    }
 
     /// Retrieves the image view with the specified id.
     [[nodiscard]] ImageView& GetImageView(ImageId id) {
@@ -364,6 +400,12 @@ private:
 
     /// Copies image memory back to CPU.
     void DownloadImageMemory(ImageId image_id, bool sync = false);
+
+    /// bbport: BB_TEX_DUMP debug export of an uploaded texture (mip 0) as a DDS file.
+    void DumpImage(Image& image);
+
+    /// bbport: BB_KEY_ICONS, redraws the controller button icons of U1's atlas with keyboard keys.
+    void PatchKeyIcons(Image& image);
 
     /// Thread function for copying downloaded images out to CPU memory.
     void DownloadedImagesThread(const std::stop_token& token);

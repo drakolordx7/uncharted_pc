@@ -43,6 +43,25 @@ void bbgpu_prompts_controller(int device);
  * mode). sample returns the motion (pixels) and wheel steps since the last call and the held
  * buttons (1 left, 2 right, 4 middle, 8 X1, 16 X2); 1 while the cursor is captured. */
 void bbgpu_mouse_configure(int look);
+/* 1 while a game menu is open (pause, options...): the cursor is given back to the player. */
+void bbgpu_menu_state(int open);
+void bbgpu_menu_cursor_hidden(int hidden);
+void bbgpu_menu_alt(int shown);
+/* 1 while Elena rides the jetski (U1): the cross and square icons show the keys of forward and back. */
+void bbgpu_jetski_state(int on);
+/* 1 when a draw sampled the icon atlas (a button icon in a hint, a bar...) in the last ms milliseconds. */
+int bbgpu_atlas_recent(int ms);
+/* The device the player used last: 0 keyboard and mouse, 1 PlayStation controller, 2 Xbox (or other) controller. The window tracks
+ * it from the SDL events; the pad code gives the game a plain pad, and the icon atlas paints the buttons, accordingly. */
+int bbgpu_input_mode(void);
+/* The SDL id of the controller used last (0 if none): with several plugged in, the pad code reads this one. */
+uint32_t bbgpu_active_gamepad(void);
+void bbgpu_set_language(int language);
+void bbgpu_set_cursor(int state); /* 0 normal, 1 over a clickable thing, 2 pressed */
+/* The game's Commandes menu asks for the keyboard and mouse bindings window (the port's overlay); controls_changed is 1 once after
+ * the bindings file (BB_INPUT_CONFIG) was written: the pad code reads it again. */
+void bbgpu_open_controls(void);
+int bbgpu_controls_changed(void);
 /* Heading (degrees, about the vertical axis) of the camera the game last rendered with and how old
  * it is; 0 before the first frame with a known camera. */
 int bbgpu_camera_yaw(float *yaw_degrees, double *age_seconds);

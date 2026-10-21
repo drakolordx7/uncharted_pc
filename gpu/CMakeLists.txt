@@ -241,9 +241,15 @@ target_sources(bbgpu PRIVATE third_party/imgui/imgui.cpp third_party/imgui/imgui
     third_party/imgui/backends/imgui_impl_vulkan.cpp)
 target_include_directories(bbgpu PRIVATE third_party/imgui third_party/imgui/backends)
 target_compile_definitions(bbgpu PRIVATE IMGUI_IMPL_VULKAN_NO_PROTOTYPES
-    BB_FONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans.ttf")
+    BB_FONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans.ttf"
+    BB_KEYASSETS_PATH="${CMAKE_CURRENT_SOURCE_DIR}/shim/assets/bbport_key_assets.bin"
+    BB_XBOXASSETS_PATH="${CMAKE_CURRENT_SOURCE_DIR}/shim/assets/bbport_xbox_assets.bin")
 set_source_files_properties(shim/bbport_overlay.cpp PROPERTIES
     OBJECT_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans.ttf)
+# The templates of the keys and mice, embedded.
+# The Xbox pictures, embedded too.
+set_source_files_properties(shim/bbport_keyicons.cpp PROPERTIES
+    OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shim/assets/bbport_key_assets.bin;${CMAKE_CURRENT_SOURCE_DIR}/shim/assets/bbport_xbox_assets.bin")
 target_include_directories(bbgpu PRIVATE shim shadps4 ${SHADER_INCLUDE} third_party/gcn/include third_party/half/include)
 target_compile_definitions(bbgpu PRIVATE BOOST_ASIO_STANDALONE NDEBUG)
 target_compile_options(bbgpu PRIVATE -Wno-deprecated-declarations -Wno-missing-field-initializers)

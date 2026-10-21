@@ -7,16 +7,13 @@ static int capture;
 static int rumble_calls;
 static uint16_t rumble_low, rumble_high;
 int bbgpu_overlay_captures_input(void) { return capture; }
-void bbgpu_mouse_configure(int look) { (void)look; }
-void bbgpu_overlay_key_configure(int slot, int kind, int code) { (void)slot; (void)kind; (void)code; }
-void bbgpu_share_key_configure(int slot, int kind, int code) { (void)slot; (void)kind; (void)code; }
-int bbgpu_mouse_sample(float *dx, float *dy, uint32_t *buttons, int *wheel) {
-    *dx=*dy=0; *buttons=0; *wheel=0;
-    return 0;
-}
-int bbgpu_camera_yaw(float *yaw_degrees, double *age_seconds) { (void)yaw_degrees; (void)age_seconds; return 0; }
-int bbgpu_gyro_aim(void) { return 0; }
-void bbgpu_prompts_controller(int device) { (void)device; }
+void bbgpu_menu_state(int open) { (void)open; }
+void bbgpu_jetski_state(int on) { (void)on; }
+int bbgpu_atlas_recent(int ms) { (void)ms; return 0; }
+void bbgpu_open_controls(void) {}
+int bbgpu_controls_changed(void) { return 0; }
+int bbgpu_input_mode(void) { return 0; }
+uint32_t bbgpu_active_gamepad(void) { return 0; }
 uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *name) {
     (void)table; (void)count; (void)name;
     return 0;

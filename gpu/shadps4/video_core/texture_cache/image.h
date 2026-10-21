@@ -175,9 +175,12 @@ public:
         u32 vo_surface : 1;
     } usage{};
     bool scene_proxy = false; ///< bbport: SceneTargets holds a reduced-size proxy of it
-    /// bbport: remade by format (TextureCache::ResolveDepthOverlap): its Vulkan image is recycled
-    /// when it is deleted.
-    bool recycle_on_delete = false;
+    u8 bb_prompt = 0;            ///< bbport: a key prompt drawn moved or zoomed (BbKeyIcons::PromptKind)
+    u64 bb_key_hash = 0;         ///< bbport: hash of a HUD button texture BbKeyIcons repaints (draw diagnosis)
+    bool bb_pulse = false;       ///< bbport: a mask repainted with a blinking halo (BbKeyIcons::IsPulseMask)
+    bool bb_atlas = false;       ///< bbport: the U1 icon atlas, painted for the menu keys or the play keys
+    u32 bb_atlas_generation = 0; ///< bbport: BbKeyIcons::MenuGeneration() when it was painted
+    u32 bb_mode_generation = 0;  ///< bbport: BbKeyIcons::ModeGeneration() when a HUD button was painted (the input device changed since: upload it again)
     VAddr track_addr = 0;
     VAddr track_addr_end = 0;
     VAddr guest_begin = 0; ///< info.guest_address
