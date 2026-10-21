@@ -57,10 +57,30 @@ static void RegisterSrtWalkerFaultHandler() {
     });
 }
 
+// bbport: a draw-preparation worker translates with a recovery point armed, and a GPU assertion
+// (common/assert.cpp) jumps back to it. A jump out of code holding g_srt_mutex would skip the
+// lock's release and freeze every later walker generation, so the recovery point is suspended
+// while the mutex is held: an assertion there stops the port (exit 23) instead.
+class SuspendFaultRecovery {
+public:
+    SuspendFaultRecovery() : saved{runtime_fault_recover} {
+        runtime_fault_recover = nullptr;
+    }
+    ~SuspendFaultRecovery() {
+        runtime_fault_recover = saved;
+    }
+    SuspendFaultRecovery(const SuspendFaultRecovery&) = delete;
+    SuspendFaultRecovery& operator=(const SuspendFaultRecovery&) = delete;
+
+private:
+    sigjmp_buf* saved;
+};
+
 namespace Shader {
 
 PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size) {
     RegisterSrtWalkerFaultHandler();
+    SuspendFaultRecovery no_recovery;
     std::scoped_lock lock{g_srt_mutex};
     const auto func_addr = (PFN_SrtWalker)g_srt_codegen.getCurr();
     g_srt_codegen.db(ptr, size);
@@ -755,6 +775,7 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
 
 static void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
     Xbyak::CodeGenerator& c = g_srt_codegen;
+    SuspendFaultRecovery no_recovery;
     std::scoped_lock srt_lock{g_srt_mutex};
 
     if (pass_info.srt_roots.empty()) {
