@@ -102,7 +102,7 @@ static SDL_Gamepad *current_gamepad(void) {
         if (active && (!gamepad || SDL_GetGamepadID(gamepad)!=active)) {
             SDL_Gamepad *next=SDL_OpenGamepad(active);
             if (next) {
-                if (gamepad) SDL_CloseGamepad(gamepad);
+                if (gamepad) { SDL_RumbleGamepad(gamepad,0,0,0); SDL_CloseGamepad(gamepad); } /* the pad put down stops shaking */
                 gamepad=next;
                 printf("Runtime: gamepad in use: %s\n",SDL_GetGamepadName(gamepad));
             }
@@ -3201,6 +3201,7 @@ static void read_inject(void) {
         if (!strcmp(token,"touchpad_left") || !strcmp(token,"touchpad_right")) {
             injected.buttons|=BTN_TOUCHPAD;
             injected.touch_side=!strcmp(token,"touchpad_right");
+    { static int was_pad_only; if (was_pad_only && !pad_only && g) SDL_RumbleGamepad(g,0,0,0); was_pad_only=pad_only; } /* back to keyboard / mouse: stop shaking */
         }
         /* touch=X,Y (0..1919, 0..942) / touch_ul / touch_ur: a click with the finger there (the games read the pad's zones: upper left / right) */
         if (!strcmp(token,"touch_ul") || !strcmp(token,"touch_ur")) { injected.touch_x=!strcmp(token,"touch_ur") ? 1440 : 480; injected.touch_y=100; }
@@ -3397,13 +3398,10 @@ static ABI int32_t pad_vibration(int32_t handle, const uint8_t *param) {
     if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
     if (!param) return ERR_INVALID_ARG;
     pthread_mutex_lock(&lock);
-    SDL_Gamepad *g=input.pad_vibration ? current_gamepad() : NULL;
-    if (g) {
-        const unsigned strength=(unsigned)input.pad_vibration_strength;
-        const uint16_t low=(uint16_t)((param[0]*257u*strength+50u)/100u);
-        const uint16_t high=(uint16_t)((param[1]*257u*strength+50u)/100u);
-        SDL_RumbleGamepad(g,low,high,1000);
-    }
+    SDL_Gamepad *g=current_gamepad();
+    /* Only the controller in use shakes: with the keyboard and mouse as the last device, the pads lying around stay still. */
+    if (g && bbgpu_input_mode()!=0) SDL_RumbleGamepad(g,(uint16_t)(param[0]*257),(uint16_t)(param[1]*257),1000);
+    else if (g) SDL_RumbleGamepad(g,0,0,0);
     pthread_mutex_unlock(&lock);
     return 0;
 }
