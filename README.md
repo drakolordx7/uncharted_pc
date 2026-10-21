@@ -1,5 +1,9 @@
 # Uncharted: The Nathan Drake Collection for Windows
 
+> **Community build (drakolordx7/uncharted_pc, branch `community`):** the official port plus our fixes that are
+> waiting in pull requests upstream (mouse look on 1.02, crash fixes, stutter, low VRAM, resolution/ultrawide,
+> surround). Its launcher updates from this fork's releases.
+
 **Uncharted 1, 2 and 3 from the PS4 collection running natively on Windows 10 and 11, by [SuperMedo](https://github.com/Supermedo).** Mohammed Albarghouthi
 
 Same idea as my [Bloodborne port](https://github.com/Supermedo/bloodborne_pc): the original PS4 game
