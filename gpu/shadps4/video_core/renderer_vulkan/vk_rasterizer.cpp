@@ -1831,12 +1831,20 @@ void Rasterizer::ReadBackSmallWrittenBuffers() {
         const char* env = std::getenv("BB_READBACK_SMALL_DEFER");
         return !(env && env[0] == '0');
     }();
+    // Gated: the end-of-pipe label waits for the landing, i.e. for the GPU to finish that work
+    // (the guest then never reads it early, but loses the overlap with the GPU: U3 pub 46 of 60
+    // FPS). Default: the bytes land when the GPU is done and the label does not wait.
+    // BB_READBACK_SMALL_GATE=1: gated.
+    static const bool gated = [] {
+        const char* env = std::getenv("BB_READBACK_SMALL_GATE");
+        return env && env[0] == '1';
+    }();
     for (const auto& [address, size] : ranges) {
         if (defer) {
             if (!buffer_cache.IsRangeGpuWritten(address, size)) {
                 continue; // none of these bytes is GPU data, the guest copy is current
             }
-            if (buffer_cache.DeferGuestCopy(address, address, size, false)) {
+            if (buffer_cache.DeferGuestCopy(address, address, size, false, gated)) {
                 continue;
             }
         }

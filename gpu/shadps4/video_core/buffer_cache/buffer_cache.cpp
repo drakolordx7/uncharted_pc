@@ -369,7 +369,7 @@ void LandStatsNote() {
 }
 } // namespace
 
-bool BufferCache::DeferGuestCopy(VAddr src, VAddr dst, u64 size, bool guest_part) {
+bool BufferCache::DeferGuestCopy(VAddr src, VAddr dst, u64 size, bool guest_part, bool gated) {
     static const bool enabled = [] {
         const char* env = std::getenv("BB_SCALAR_COPY64_DEFER");
         return !(env && env[0] == '0');
@@ -421,8 +421,12 @@ bool BufferCache::DeferGuestCopy(VAddr src, VAddr dst, u64 size, bool guest_part
     }
     {
         std::scoped_lock lk{landing_mutex};
-        landing->seq = ++landing_registered_seq;
-        landing_registered.store(landing->seq, std::memory_order_release);
+        if (gated) {
+            landing->seq = ++landing_registered_seq;
+            landing_registered.store(landing->seq, std::memory_order_release);
+        } else {
+            landing->seq = landing_registered_seq; // no label waits for it
+        }
         landing_queue.push_back(std::move(landing));
         if (!landing_thread.joinable()) {
             landing_thread = std::thread([this] { LandingWorker(); });
