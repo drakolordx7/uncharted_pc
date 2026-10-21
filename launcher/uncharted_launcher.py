@@ -237,6 +237,7 @@ APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_
                 'anti_aliasing': 'off', 'aa_sharpness': '0.2', 'frame_generation': 'off',
                 'frame_gen_multiplier': '2', 'extra_env': '', 'close_on_play': False,
                 'mouse_look': True, 'mouse_sensitivity': '1.0', 'mouse_aim_sensitivity': '1.0', 'mouse_invert_y': False,
+                'free_view_smoothing': False, 'aim_raw': False,
                 'pad_invert_y': False, 'key_icons': True, 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True}
 
 
@@ -507,10 +508,9 @@ def write_input_ini(s):
              f"mouse_sensitivity={mouse_sensitivity(s)}",
              f"mouse_aim_sensitivity={mouse_sensitivity(s, 'mouse_aim_sensitivity')}",
              f"mouse_invert_y={1 if s.get('mouse_invert_y') else 0}",
-             f"pad_invert_y={1 if s.get('pad_invert_y') else 0}",
-             f"pad_vibration={1 if s.get('pad_vibration', True) else 0}",
-             f"pad_vibration_strength={vibration_strength(s)}",
-             f"walk_speed={walk_speed(s)}"]
+             f"free_view_smoothing={1 if s.get('free_view_smoothing') else 0}",
+             f"aim_raw={1 if s.get('aim_raw') else 0}",
+             f"pad_invert_y={1 if s.get('pad_invert_y') else 0}"]
     lines += [f'key.{action}={keys.get(action, "")}' for action in DEFAULT_KEYS]
     lines += [f'pad.{action}={pad.get(action, "none")}' for action in DEFAULT_PAD]
     path = input_ini_path()
@@ -1599,6 +1599,12 @@ class Launcher:
                         COLORS, self.px, self.font_ui_md, width=300, log=True, entry=True),
                  _('Multiplies the mouse sensitivity while aiming (right button held); 1.00 turns as fast as free look.'))
         self.check(f, 'mouse_invert_y', _('Invert the mouse vertically'))
+        self.check(f, 'free_view_smoothing', _('Smooth the free camera (game smoothing)'),
+                   _('Uncharted 1: off by default, the walking camera follows the mouse at once. Turn it on for the '
+                     "game's own slow, smoothed camera."))
+        self.check(f, 'aim_raw', _('Raw aiming (no smoothing)'),
+                   _('Uncharted 1: removes the dynamic smoothing of the mouse while aiming. Slow mouse movements '
+                     'will show stepping.'))
         self.check(f, 'key_icons', _('Show keyboard and mouse keys in the prompts'),
                    _('Uncharted 1: the buttons of the prompts (Press ✕, ▲, L1...) become the keys and mouse buttons '
                      'set below. Turn it off to see the controller buttons.'))

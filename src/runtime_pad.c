@@ -15,7 +15,7 @@
  *       lefttrigger righttrigger leftstick rightstick back start dpup dpdown dpleft dpright
  *       touchpad misc1 paddle1..paddle4) or "none", for the button actions above.
  *   mouse_look=1  mouse_sensitivity=1.0  mouse_invert_y=0  pad_invert_y=0
- *   pad_vibration=1  pad_vibration_strength=100  walk_speed=45 (walk key deflection, percent)
+ *   free_view_smoothing=0 (U1: 1 keeps the game's smoothing of the walking camera)  aim_raw=0 (U1: 1 = no smoothing while aiming)
  *
  * Defaults (no file): WASD move, mouse look, left button R2 (fire), right button L2 (aim),
  * Space Cross, C Circle, F Square, E Triangle, G L1 (grenade), R R1, Left Shift L3, V R3, Escape/Enter
@@ -149,6 +149,8 @@ static struct {
     Bind keys[ACTIONS][2];
     int pad[16];               /* SDL_GamepadButton, PAD_TRIGGER_*, or -1 */
     int mouse_look, mouse_invert_y, pad_invert_y;
+    int free_view_smoothing;   /* 1: keep the game's own smoothing of the walking camera (U1) */
+    int aim_raw;               /* 1: no smoothing of the mouse while aiming / looking around (U1) */
     float mouse_sensitivity, mouse_aim_sensitivity;
 } input;
 
@@ -229,6 +231,7 @@ static void load_input(void) {
         if (a<16) input.pad[a]=parse_pad(actions[a].pad);
     }
     input.mouse_look=1; input.mouse_sensitivity=1.0f; input.mouse_aim_sensitivity=1.0f;
+    input.free_view_smoothing=0; input.aim_raw=0;
     const char *path=getenv("BB_INPUT_CONFIG");
     FILE *f=path && *path ? fopen(path,"r") : NULL;
     if (f) {
@@ -244,12 +247,8 @@ static void load_input(void) {
             else if (!strcmp(key,"mouse_aim_sensitivity")) input.mouse_aim_sensitivity=(float)atof(value);
             else if (!strcmp(key,"mouse_invert_y")) input.mouse_invert_y=atoi(value)!=0;
             else if (!strcmp(key,"pad_invert_y")) input.pad_invert_y=atoi(value)!=0;
-            else if (!strcmp(key,"pad_vibration")) input.pad_vibration=atoi(value)!=0;
-            else if (!strcmp(key,"pad_vibration_strength")) input.pad_vibration_strength=atoi(value);
-            else if (!strcmp(key,"walk_speed")) {
-                const int v=atoi(value);
-                input.walk_speed=v<10 ? 10 : v>100 ? 100 : v;
-            }
+            else if (!strcmp(key,"free_view_smoothing")) input.free_view_smoothing=atoi(value)!=0;
+            else if (!strcmp(key,"aim_raw")) input.aim_raw=atoi(value)!=0;
             else for (int a=0;a<ACTIONS;++a) {
                 if (!strncmp(key,"key.",4) && !strcmp(key+4,actions[a].name)) set_keys(a,value);
                 else if (a<16 && !strncmp(key,"pad.",4) && !strcmp(key+4,actions[a].name)) input.pad[a]=parse_pad(value);
@@ -483,8 +482,60 @@ static uint64_t u1_image;             /* U1 image base, seen by the pad update c
 static void __attribute__((ms_abi)) u1_follow_camera(uint64_t camera, uint64_t unused, uint64_t image, uint64_t r14) {
     (void)unused; (void)r14;
     follow_camera(camera,0x1310,0x12bc,61.0f,camera_stopped(image,u1_camera_dt_offset));
+static int safe_read(void *dst, uint64_t src, size_t size);
+static int safe_write(uint64_t dst, const void *src, size_t size);
+/* U1 1.02: the walking camera (update image+0xaff80) aims at a point that follows the player's through a damped spring (the game's
+ * smoothing of the free view). The spring is quick (speed 35 to 50 per second, constants image+0x7900a8 / +0x7900ac) while the point
+ * is within 2.5 m of where it was, and slows down to the speed in the camera's shape (float at *(camera+0x1e0)+0x74) as the gap
+ * grows to 3.75 m. A quick mouse turn opens a big gap, so the picture trailed the mouse by about 0.3 s and started slowly
+ * (measured in user\last_run.log: the camera's direction against the shown yaw). So, unless free_view_smoothing is set, that speed
+ * is raised to the quick one while the mouse is in use, and put back afterwards. The shape is also used by the spring of the camera's
+ * height (image+0xaff80 near the start), which gets quicker too. BB_FREE_SPRING=<speed> tunes the value. */
+/* First try (raising only the shape's speed, 20 and 25 in the dump, to 35) left a slight spring: the quick regime's own speeds
+ * (the two constants, 50 and 35) rule every turn that opens a gap under 2.5 m. They are raised too, to the same value. */
+#define U1B_FREE_SPRING_SPEED 200.0f
+static void u1b_free_view_constants(uint64_t image, int want, float speed) {
+    static const uint32_t where[2]={0x7900a8,0x7900ac};
+    static float original[2]; static int raised;
+    if (want && !raised) {
+        float now[2];
+        for (int i=0;i<2;++i) if (!safe_read(&now[i],image+where[i],4) || !(now[i]>0.0f && now[i]<1000.0f)) return;
+        for (int i=0;i<2;++i) { original[i]=now[i]; if (now[i]<speed) safe_write(image+where[i],&speed,4); }
+        raised=1;
+        if (mouse_debug()) printf("Mouse: free view constants %.2f %.2f -> %.2f\n",original[0],original[1],speed);
+    } else if (!want && raised) {
+        for (int i=0;i<2;++i) safe_write(image+where[i],&original[i],4);
+        raised=0;
+        if (mouse_debug()) printf("Mouse: free view constants back to %.2f %.2f\n",original[0],original[1]);
+    }
+}
+static void u1b_free_view_spring(uint64_t camera, uint64_t image) {
+    static uint64_t shape; static float original; static int raised;
+    static float speed=-1.0f;
+    if (speed<0.0f) { const char *e=getenv("BB_FREE_SPRING"); speed=e && atof(e)>0.0 ? (float)atof(e) : U1B_FREE_SPRING_SPEED; }
+    u1b_free_view_constants(image,!input.free_view_smoothing && input.mouse_look && !pad_only_mode,speed);
+    uint64_t now_shape=0;
+    if (!safe_read(&now_shape,camera+0x1e0,8) || now_shape<0x10000) return;
+    if (now_shape!=shape) {   /* another camera object or shape: the old one gets its value back */
+        if (raised && shape) safe_write(shape+0x74,&original,4);
+        shape=now_shape; raised=0;
+    }
+    float current=0.0f;
+    if (!safe_read(&current,shape+0x74,4)) return;
+    const int want=!input.free_view_smoothing && input.mouse_look && !pad_only_mode;
+    if (want && !raised && current>0.0f && current<speed) {
+        original=current;
+        if (safe_write(shape+0x74,&speed,4)) raised=1;
+        if (mouse_debug()) printf("Mouse: free view spring %.2f -> %.2f (shape %#llx)\n",original,speed,(unsigned long long)shape);
+    } else if (!want && raised) {
+        safe_write(shape+0x74,&original,4);
+        raised=0;
+        if (mouse_debug()) printf("Mouse: free view spring back to %.2f\n",original);
+    }
+}
 }
 static void __attribute__((ms_abi)) u1b_follow_camera(uint64_t camera, uint64_t unused, uint64_t image, uint64_t r14) {
+    u1b_free_view_spring(camera,image);
     (void)unused; (void)r14;
     u1_camera_dt_offset=U1B_CAMERA_DT;
     follow_camera(camera,0x1310,0x12bc,61.0f,camera_stopped(image,U1B_CAMERA_DT));
@@ -1096,7 +1147,7 @@ static void __attribute__((ms_abi)) u1b_aim_camera(uint64_t unused0, uint64_t un
         aim_pending_pitch+=(input.mouse_invert_y ? -dy : dy)*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity*input.mouse_aim_sensitivity;
         float dt=*(const volatile float *)(uintptr_t)(image+U1B_CAMERA_DT);
         if (!(dt>0.0005f && dt<0.05f)) dt=1.0f/60.0f;
-        const float follow=1.0f-SDL_expf(-dt/0.02f); /* about 20 ms behind the mouse */
+        const float follow=aim_follow(dt,aim_pending_degrees,aim_pending_pitch);
         const float step=aim_pending_degrees*follow, step_pitch=aim_pending_pitch*follow;
         aim_pending_degrees-=step;
         aim_pending_pitch-=step_pitch;
@@ -1219,6 +1270,20 @@ static void __attribute__((ms_abi)) u1b_look_camera(uint64_t unused0, uint64_t u
         if (camera_stopped(image,U1B_CAMERA_DT)) { look_pending_yaw=look_pending_pitch=0.0f; return; } /* paused */
         look_pending_yaw+=dx*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity*input.mouse_aim_sensitivity;
         look_pending_pitch+=(input.mouse_invert_y ? -dy : dy)*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity*input.mouse_aim_sensitivity;
+/* The share of the mouse's pending turn given to the aiming / look-around camera this frame. A slow mouse reports a pixel or
+ * two now and then, which would turn the camera in steps, so a small pending turn is spread over about 20 ms; the time constant
+ * falls smoothly towards 0 as the pending turn grows (no threshold, or the camera would seem to accelerate), so quick
+ * movements are followed at once. aim_raw gives it all at once (the steps of a slow mouse are then visible). The angle turned
+ * in total is the same in every case. */
+#define AIM_SMOOTH_SECONDS 0.02f
+#define AIM_SMOOTH_PIXELS 6.0f
+static float aim_follow(float dt, float pending_yaw, float pending_pitch) {
+    if (input.aim_raw) return 1.0f;
+    const float pixels=SDL_sqrtf(pending_yaw*pending_yaw+pending_pitch*pending_pitch)/
+                       (MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity*input.mouse_aim_sensitivity);
+    const float k=pixels/AIM_SMOOTH_PIXELS;
+    return 1.0f-SDL_expf(-dt*(1.0f+k*k)/AIM_SMOOTH_SECONDS);
+}
         float dt=*(const volatile float *)(uintptr_t)(image+U1B_CAMERA_DT);
         if (!(dt>0.0005f && dt<0.05f)) dt=1.0f/60.0f;
         const float follow=1.0f-SDL_expf(-dt/0.02f);
@@ -1315,7 +1380,7 @@ static void __attribute__((ms_abi)) u1b_turret_camera(uint64_t camera, uint64_t 
         turret_pending_pitch+=(input.mouse_invert_y ? -dy : dy)*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity;
         float dt=*(const volatile float *)(uintptr_t)(image+U1B_CAMERA_DT);
         if (!(dt>0.0005f && dt<0.05f)) dt=1.0f/60.0f;
-        const float follow=1.0f-SDL_expf(-dt/0.02f);
+        const float follow=aim_follow(dt,look_pending_yaw,look_pending_pitch);
         step=turret_pending_yaw*follow; step_pitch=turret_pending_pitch*follow;
         turret_pending_yaw-=step; turret_pending_pitch-=step_pitch;
         frame_us=now; frame_camera=camera; frame_yaw=step; frame_pitch=step_pitch;
@@ -1419,7 +1484,7 @@ static void __attribute__((ms_abi)) u1_joypad_sticks(uint64_t unused0, uint64_t 
             /* the mouse reports a pixel or two now and then: at low speeds that is one-frame pulses and
              * the aim moved in steps. The turn rate is smoothed over about 30 ms (the angle turned stays
              * the same). */
-            const float alpha=1.0f-SDL_expf(-dt/0.03f);
+            const float alpha=input.aim_raw ? 1.0f : 1.0f-SDL_expf(-dt/0.03f);
             aim_rate[0]+=alpha*(rate_x-aim_rate[0]);
             aim_rate[1]+=alpha*(rate_y-aim_rate[1]);
             if (aim_rate[0]>-0.3f && aim_rate[0]<0.3f && rate_x==0.0f) aim_rate[0]=0.0f;
