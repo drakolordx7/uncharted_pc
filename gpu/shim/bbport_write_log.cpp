@@ -18,6 +18,7 @@
 namespace VideoCore {
 void PrintFaultHistory(unsigned long long address, unsigned long long size);
 }
+extern "C" int runtime_memory_is_mapped(std::uintptr_t address, std::uint64_t size); // runtime_memory.c
 
 namespace BbWriteLog {
 namespace {
@@ -96,20 +97,22 @@ extern "C" void bbgpu_dump_guest_writes(void* ucontext) {
 #ifdef _WIN32
     // The loader passes EXCEPTION_POINTERS (see signal_context.cpp).
     const CONTEXT* c = static_cast<const EXCEPTION_POINTERS*>(ucontext)->ContextRecord;
-    const std::uint64_t regs[] = {c->Rax, c->Rbx, c->Rcx, c->Rdx, c->Rsi, c->Rdi, c->R14, c->R15};
-    std::fprintf(stderr, "Write log: r8=%#llx r9=%#llx r10=%#llx r11=%#llx r12=%#llx r13=%#llx\n",
-                 (unsigned long long)c->R8, (unsigned long long)c->R9, (unsigned long long)c->R10,
-                 (unsigned long long)c->R11, (unsigned long long)c->R12, (unsigned long long)c->R13);
+    const std::uint64_t regs[] = {c->Rax, c->Rbx, c->Rcx, c->Rdx, c->Rsi, c->Rdi,
+                                  c->R8,  c->R9,  c->R10, c->R11, c->R12, c->R13,
+                                  c->R14, c->R15};
 #else
     const auto* uc = static_cast<const ucontext_t*>(ucontext);
     const auto* g = uc->uc_mcontext.gregs;
-    const std::uint64_t regs[] = {std::uint64_t(g[REG_RAX]), std::uint64_t(g[REG_RBX]),
-                                  std::uint64_t(g[REG_RCX]), std::uint64_t(g[REG_RDX]),
-                                  std::uint64_t(g[REG_RSI]), std::uint64_t(g[REG_RDI]),
-                                  std::uint64_t(g[REG_R14]), std::uint64_t(g[REG_R15])};
+    const std::uint64_t regs[] = {
+        std::uint64_t(g[REG_RAX]), std::uint64_t(g[REG_RBX]), std::uint64_t(g[REG_RCX]),
+        std::uint64_t(g[REG_RDX]), std::uint64_t(g[REG_RSI]), std::uint64_t(g[REG_RDI]),
+        std::uint64_t(g[REG_R8]),  std::uint64_t(g[REG_R9]),  std::uint64_t(g[REG_R10]),
+        std::uint64_t(g[REG_R11]), std::uint64_t(g[REG_R12]), std::uint64_t(g[REG_R13]),
+        std::uint64_t(g[REG_R14]), std::uint64_t(g[REG_R15])};
 #endif
-    const char* names[] = {"rax", "rbx", "rcx", "rdx", "rsi", "rdi", "r14", "r15"};
-    for (int i = 0; i < 8; ++i) {
+    const char* names[] = {"rax", "rbx", "rcx", "rdx", "rsi", "rdi", "r8",
+                           "r9",  "r10", "r11", "r12", "r13", "r14", "r15"};
+    for (int i = 0; i < 14; ++i) {
         std::fprintf(stderr, "Write log: %s=%#llx\n", names[i], (unsigned long long)regs[i]);
     }
     const char* sources[] = {"backing",      "WriteData",           "fence",
@@ -127,7 +130,7 @@ extern "C" void bbgpu_dump_guest_writes(void* ucontext) {
         print(hits[i % hits.size()], "pattern");
     }
     // BB_WRITE_LOG_HEAP=1: the guest faulted walking a free list of the game's heap allocator
-    // (heap object in r15, head at +0x10, next pointer at node+0x10, magic at node+4). Walk it,
+    // (heap object in r15 = regs[13], head at +0x10, next pointer at node+0x10, magic at node+4). Walk it,
     // and take the last node with a readable pointer as the block of interest.
     std::uint64_t block = regs[0];
     if (std::getenv("BB_WRITE_LOG_HEAP")) {
@@ -139,8 +142,8 @@ extern "C" void bbgpu_dump_guest_writes(void* ucontext) {
 #endif
         };
         std::uint64_t node = 0, prev = 0;
-        if (readable(regs[7] + 0x10, 8)) {
-            std::memcpy(&node, reinterpret_cast<const void*>(regs[7] + 0x10), 8);
+        if (readable(regs[13] + 0x10, 8)) {
+            std::memcpy(&node, reinterpret_cast<const void*>(regs[13] + 0x10), 8);
         }
         for (int i = 0; i < 100000 && readable(node, 0x18); ++i) {
             std::uint32_t size_or_magic;
@@ -161,7 +164,9 @@ extern "C" void bbgpu_dump_guest_writes(void* ucontext) {
     if (std::getenv("BB_WRITE_LOG_HEAP")) {
         VideoCore::PrintFaultHistory((block & ~0xfffull) - 0x1000, 0x3000);
     }
-    for (std::uint64_t at = block - 0x30; at < block + 0x80; at += 8) {
+    // Only when the block points into guest memory (U1's fault at 0x63f5d0 has rax=9).
+    const bool block_mapped = runtime_memory_is_mapped(block - 0x30, 0xb0) != 0;
+    for (std::uint64_t at = block - 0x30; block_mapped && at < block + 0x80; at += 8) {
         std::uint64_t value = 0;
         std::memcpy(&value, reinterpret_cast<const void*>(at), 8);
         std::fprintf(stderr, "Write log: [%#llx] = %#llx\n", (unsigned long long)at,
