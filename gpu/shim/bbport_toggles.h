@@ -74,6 +74,7 @@ enum : std::uint64_t {
     SceneMipBias = 1ull << 57, ///< negative LOD bias of G-buffer samplers at reduced scene sizes
     /// One upscaler frame start per frame (Uncharted draws twice into its display buffer).
     OneFrameStart = 1ull << 59,
+    SleepingWaits = 1ull << 62, ///< waits on atomics sleep (WaitOnAddress, bbport_wait.h)
     // Bits 20-29 are used as raw debug toggles by the camera/object motion and the upscaler.
 };
 inline bool Disabled(std::uint64_t bit) {
