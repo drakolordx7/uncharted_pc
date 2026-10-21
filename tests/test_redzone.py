@@ -115,13 +115,41 @@ class SiteTables(unittest.TestCase):
             self.assertIn(store, self.stores(u1), hex(store))
 
     def test_sites_do_not_overlap_runtime_guest_patches(self):
+        """A site rewrites its bytes at link time, before the runtime finds the guest callbacks by pattern
+        (runtime_pad.c guest_callbacks): neither a callback's pattern bytes nor its hook may touch a site, or the
+        callback silently stops installing. Needs the game files (BB_TEST_GAME_DIR, default D:/Games/Uncharted/CUSA02320)."""
+        from prepare import parse_self
+        game = Path(os.environ.get('BB_TEST_GAME_DIR', 'D:/Games/Uncharted/CUSA02320'))
         source = (ROOT / 'src' / 'runtime_pad.c').read_text(encoding='utf-8')
-        patched = [int(m, 16) for m in re.findall(r'\{"[^"]+",(0x[0-9a-f]+),', source)]
-        self.assertTrue(patched)
+        body = source[source.index('guest_callbacks[]={'):]
+        callbacks = []
+        for m in re.finditer(r'\{"([^"]+)",\s*((?:"[^"]*"\s*)+),\s*(0x[0-9a-fA-F]+|\d+),\s*(\d+),', body):
+            callbacks.append((m.group(1), ''.join(re.findall(r'"([^"]*)"', m.group(2))).split(), int(m.group(3), 0), int(m.group(4))))
+        self.assertGreater(len(callbacks), 10)
+        checked = 0
         for table in self.tables:
-            for offset, original, _ in table['sites']:
-                end = offset + len(original) // 2
-                self.assertFalse(any(offset - 64 < p < end for p in patched), (table['executable'], hex(offset)))
+            exe = game / table['executable'].split()[0]
+            if not exe.is_file():
+                continue
+            elf, _, ph, _, _ = parse_self(exe.read_bytes())
+            loads = [p for p in ph if p['type'] in (1, 0x61000010)]
+            image = bytearray(max(p['vaddr'] + p['memsz'] for p in loads))
+            for p in loads:
+                image[p['vaddr']:p['vaddr'] + p['filesz']] = elf[p['offset']:p['offset'] + p['filesz']]
+            rx = {name: re.compile(b''.join(b'.' if t == '??' else re.escape(bytes([int(t, 16)])) for t in pat), re.S)
+                  for name, pat, _, _ in callbacks}
+            sites = [(o, o + len(h) // 2) for o, h, _ in table['sites']]
+            for name, pat, skip, moved in callbacks:
+                for m in rx[name].finditer(bytes(image)):
+                    # finditer skips overlapping matches; a pattern is meant to be unique anyway
+                    # a masked ("??") pattern byte does not care what the link step wrote there
+                    fixed = [m.start() + i for i, t in enumerate(pat) if t != '??']
+                    for what, where in (('pattern', fixed), ('hook', range(m.start() + skip, m.start() + skip + moved))):
+                        clash = [hex(o) for o, e in sites if any(o <= a < e for a in where)]
+                        self.assertFalse(clash, (table['executable'], name, what, hex(m.start()), clash))
+                        checked += 1
+        if not checked:
+            self.skipTest('no game executables found')
 
 
 @unittest.skipUnless(os.name == 'nt', 'Windows exception dispatch')
