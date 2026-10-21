@@ -482,6 +482,7 @@ static uint64_t u1_image;             /* U1 image base, seen by the pad update c
 static void __attribute__((ms_abi)) u1_follow_camera(uint64_t camera, uint64_t unused, uint64_t image, uint64_t r14) {
     (void)unused; (void)r14;
     follow_camera(camera,0x1310,0x12bc,61.0f,camera_stopped(image,u1_camera_dt_offset));
+}
 static int safe_read(void *dst, uint64_t src, size_t size);
 static int safe_write(uint64_t dst, const void *src, size_t size);
 /* U1 1.02: the walking camera (update image+0xaff80) aims at a point that follows the player's through a damped spring (the game's
@@ -533,10 +534,9 @@ static void u1b_free_view_spring(uint64_t camera, uint64_t image) {
         if (mouse_debug()) printf("Mouse: free view spring back to %.2f\n",original);
     }
 }
-}
 static void __attribute__((ms_abi)) u1b_follow_camera(uint64_t camera, uint64_t unused, uint64_t image, uint64_t r14) {
-    u1b_free_view_spring(camera,image);
     (void)unused; (void)r14;
+    u1b_free_view_spring(camera,image);
     u1_camera_dt_offset=U1B_CAMERA_DT;
     follow_camera(camera,0x1310,0x12bc,61.0f,camera_stopped(image,U1B_CAMERA_DT));
 }
@@ -1086,6 +1086,20 @@ static uint64_t aim_native_us;        /* last frame the zoom camera was turned b
 static volatile int aim_session_reset = 1; /* set while not aiming: the next aim starts from a zero turn */
 static float aim_pending_degrees;     /* the mouse's yaw not given to the zoom camera yet */
 static float aim_pending_pitch;       /* its pitch (degrees, positive looks down) */
+/* The share of the mouse's pending turn given to the aiming / look-around camera this frame. A slow mouse reports a pixel or
+ * two now and then, which would turn the camera in steps, so a small pending turn is spread over about 20 ms; the time constant
+ * falls smoothly towards 0 as the pending turn grows (no threshold, or the camera would seem to accelerate), so quick
+ * movements are followed at once. aim_raw gives it all at once (the steps of a slow mouse are then visible). The angle turned
+ * in total is the same in every case. */
+#define AIM_SMOOTH_SECONDS 0.02f
+#define AIM_SMOOTH_PIXELS 6.0f
+static float aim_follow(float dt, float pending_yaw, float pending_pitch) {
+    if (input.aim_raw) return 1.0f;
+    const float pixels=SDL_sqrtf(pending_yaw*pending_yaw+pending_pitch*pending_pitch)/
+                       (MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity*input.mouse_aim_sensitivity);
+    const float k=pixels/AIM_SMOOTH_PIXELS;
+    return 1.0f-SDL_expf(-dt*(1.0f+k*k)/AIM_SMOOTH_SECONDS);
+}
 static void __attribute__((ms_abi)) u1b_aim_camera(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t camera) {
     (void)unused0; (void)unused1;
     if (mouse_debug() && camera>=0x10000) { /* which cameras the manager updates, per input state (V, cover, aim) */
@@ -1270,23 +1284,9 @@ static void __attribute__((ms_abi)) u1b_look_camera(uint64_t unused0, uint64_t u
         if (camera_stopped(image,U1B_CAMERA_DT)) { look_pending_yaw=look_pending_pitch=0.0f; return; } /* paused */
         look_pending_yaw+=dx*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity*input.mouse_aim_sensitivity;
         look_pending_pitch+=(input.mouse_invert_y ? -dy : dy)*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity*input.mouse_aim_sensitivity;
-/* The share of the mouse's pending turn given to the aiming / look-around camera this frame. A slow mouse reports a pixel or
- * two now and then, which would turn the camera in steps, so a small pending turn is spread over about 20 ms; the time constant
- * falls smoothly towards 0 as the pending turn grows (no threshold, or the camera would seem to accelerate), so quick
- * movements are followed at once. aim_raw gives it all at once (the steps of a slow mouse are then visible). The angle turned
- * in total is the same in every case. */
-#define AIM_SMOOTH_SECONDS 0.02f
-#define AIM_SMOOTH_PIXELS 6.0f
-static float aim_follow(float dt, float pending_yaw, float pending_pitch) {
-    if (input.aim_raw) return 1.0f;
-    const float pixels=SDL_sqrtf(pending_yaw*pending_yaw+pending_pitch*pending_pitch)/
-                       (MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity*input.mouse_aim_sensitivity);
-    const float k=pixels/AIM_SMOOTH_PIXELS;
-    return 1.0f-SDL_expf(-dt*(1.0f+k*k)/AIM_SMOOTH_SECONDS);
-}
         float dt=*(const volatile float *)(uintptr_t)(image+U1B_CAMERA_DT);
         if (!(dt>0.0005f && dt<0.05f)) dt=1.0f/60.0f;
-        const float follow=1.0f-SDL_expf(-dt/0.02f);
+        const float follow=aim_follow(dt,look_pending_yaw,look_pending_pitch);
         step=look_pending_yaw*follow; step_pitch=look_pending_pitch*follow;
         look_pending_yaw-=step; look_pending_pitch-=step_pitch;
         frame_us=now; frame_yaw=step; frame_pitch=step_pitch;
@@ -1380,7 +1380,7 @@ static void __attribute__((ms_abi)) u1b_turret_camera(uint64_t camera, uint64_t 
         turret_pending_pitch+=(input.mouse_invert_y ? -dy : dy)*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity;
         float dt=*(const volatile float *)(uintptr_t)(image+U1B_CAMERA_DT);
         if (!(dt>0.0005f && dt<0.05f)) dt=1.0f/60.0f;
-        const float follow=aim_follow(dt,look_pending_yaw,look_pending_pitch);
+        const float follow=1.0f-SDL_expf(-dt/0.02f);
         step=turret_pending_yaw*follow; step_pitch=turret_pending_pitch*follow;
         turret_pending_yaw-=step; turret_pending_pitch-=step_pitch;
         frame_us=now; frame_camera=camera; frame_yaw=step; frame_pitch=step_pitch;
@@ -2989,6 +2989,7 @@ static void sample_host(PadData *d) {
     /* The window tells which device was used last (keyboard / mouse, PlayStation pad, Xbox pad). With a controller, everything made for
      * the PC (keys, mouse look, menu mouse, walk key, the keyboard row) is out: the game gets what a PS4 pad gives. */
     const int pad_only=g && bbgpu_input_mode()!=0;
+    { static int was_pad_only; if (was_pad_only && !pad_only && g) SDL_RumbleGamepad(g,0,0,0); was_pad_only=pad_only; } /* back to keyboard / mouse: stop shaking */
     pad_only_mode=pad_only;
     if (pad_only) { mdx=mdy=0; mouse=0; wheel=0; captured=0; }
     if (bbgpu_overlay_captures_input()) return; /* settings menu open: neutral input */
@@ -3201,7 +3202,6 @@ static void read_inject(void) {
         if (!strcmp(token,"touchpad_left") || !strcmp(token,"touchpad_right")) {
             injected.buttons|=BTN_TOUCHPAD;
             injected.touch_side=!strcmp(token,"touchpad_right");
-    { static int was_pad_only; if (was_pad_only && !pad_only && g) SDL_RumbleGamepad(g,0,0,0); was_pad_only=pad_only; } /* back to keyboard / mouse: stop shaking */
         }
         /* touch=X,Y (0..1919, 0..942) / touch_ul / touch_ur: a click with the finger there (the games read the pad's zones: upper left / right) */
         if (!strcmp(token,"touch_ul") || !strcmp(token,"touch_ur")) { injected.touch_x=!strcmp(token,"touch_ur") ? 1440 : 480; injected.touch_y=100; }
