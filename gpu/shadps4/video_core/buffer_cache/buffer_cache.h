@@ -112,7 +112,9 @@ public:
     /// once the GPU work that wrote them has completed; the labels the guest learns of the GPU's
     /// progress from wait for it (landing_gate.h). False when not deferred (no side queue,
     /// BB_SCALAR_COPY64_DEFER=0): the caller reads back as before.
-    bool DeferGuestCopy(VAddr src, VAddr dst, u64 size);
+    /// guest_part false: only the GPU-written bytes of [src, src + size) land (dst == src, no
+    /// guest copy): a GPU result the guest reads in place (Rasterizer::ReadBackSmallWrittenBuffers).
+    bool DeferGuestCopy(VAddr src, VAddr dst, u64 size, bool guest_part = true);
     u64 PendingLanding() const;
     bool LandingGateActive() const;
     void WaitLanding(u64 seq);
