@@ -1822,7 +1822,24 @@ void Rasterizer::ReadBackSmallWrittenBuffers() {
         std::scoped_lock lk{small_written_mutex};
         ranges.swap(small_written_buffers);
     }
+    // The read back waits for the whole GPU queue (U3 pub: 27 instead of 46 FPS with the other
+    // run of the pair at the same time). The bytes land on the landing thread instead, once the
+    // work that wrote them is done, and the end-of-pipe label waits for them (landing_gate.h):
+    // the guest sees the same data in the same order without a thread waiting for the GPU.
+    // BB_READBACK_SMALL_DEFER=0: wait here as before.
+    static const bool defer = [] {
+        const char* env = std::getenv("BB_READBACK_SMALL_DEFER");
+        return !(env && env[0] == '0');
+    }();
     for (const auto& [address, size] : ranges) {
+        if (defer) {
+            if (!buffer_cache.IsRangeGpuWritten(address, size)) {
+                continue; // none of these bytes is GPU data, the guest copy is current
+            }
+            if (buffer_cache.DeferGuestCopy(address, address, size, false)) {
+                continue;
+            }
+        }
         buffer_cache.ReadMemory(address, size, false, true);
     }
 }
