@@ -416,6 +416,7 @@ private:
     Common::SlotVector<ImageView> slot_image_views;
     tsl::robin_map<u64, Sampler> samplers;
     std::unordered_set<ImageId> download_images;
+    std::unordered_set<ImageId> small_download_images; ///< bbport: ReadbackSmallTargets
     u64 total_used_memory = 0;
     bool tight_budget = false;                  ///< bbport: card under ~5 GB
     std::atomic<u64> pending_free_bytes{0};     ///< bbport: deleted, not yet destroyed
