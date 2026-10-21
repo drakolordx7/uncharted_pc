@@ -369,7 +369,7 @@ void LandStatsNote() {
 }
 } // namespace
 
-bool BufferCache::DeferGuestCopy(VAddr src, VAddr dst, u64 size) {
+bool BufferCache::DeferGuestCopy(VAddr src, VAddr dst, u64 size, bool guest_part) {
     static const bool enabled = [] {
         const char* env = std::getenv("BB_SCALAR_COPY64_DEFER");
         return !(env && env[0] == '0');
@@ -416,7 +416,9 @@ bool BufferCache::DeferGuestCopy(VAddr src, VAddr dst, u64 size) {
     }
     landing->tick = tick;
     // The guest part of the copy now; the GPU-written bytes follow when they have landed.
-    memory->TryWriteBacking(reinterpret_cast<void*>(dst), reinterpret_cast<const void*>(src), size);
+    if (guest_part) {
+        memory->TryWriteBacking(reinterpret_cast<void*>(dst), reinterpret_cast<const void*>(src), size);
+    }
     {
         std::scoped_lock lk{landing_mutex};
         landing->seq = ++landing_registered_seq;
