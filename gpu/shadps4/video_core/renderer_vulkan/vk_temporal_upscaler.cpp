@@ -2255,9 +2255,6 @@ bool TemporalUpscaler::RecordXess(vk::CommandBuffer cmdbuf, const Xess::Resource
         const auto compute = vk::PipelineStageFlagBits2::eComputeShader;
         const auto write = vk::AccessFlagBits2::eMemoryWrite;
         const auto rw = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite;
-        if (auto* profiler = GpuProfiler::Get()) {
-            profiler->Mark(0xF5A2'0000ull, [] { return std::string{"XeSS (layouts, execute)"}; });
-        }
         transition(vk::ImageLayout::eGeneral, vk::ImageLayout::eShaderReadOnlyOptimal, all, write,
                    compute, vk::AccessFlagBits2::eShaderRead);
         // The jitter and motion vectors FSR 3 gets: render pixels, current to previous.
@@ -2275,9 +2272,6 @@ bool TemporalUpscaler::RecordXess(vk::CommandBuffer cmdbuf, const Xess::Resource
         });
         transition(vk::ImageLayout::eShaderReadOnlyOptimal, vk::ImageLayout::eGeneral, compute,
                    vk::AccessFlagBits2::eNone, all, rw);
-        if (auto* profiler = GpuProfiler::Get()) {
-            profiler->Mark(0xF5A2'0001ull, [] { return std::string{"after XeSS"}; });
-        }
     }
     if (!ok) {
         std::printf("Upscaler: XeSS failed; falling back to FSR 3.1\n");
