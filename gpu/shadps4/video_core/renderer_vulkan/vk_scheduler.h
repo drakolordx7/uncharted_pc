@@ -843,7 +843,9 @@ public:
     /// bbport: runs `signal` once the guest memory copies issued so far are done, without
     /// waiting here: the recording thread reaches it after the copies queued before it and hands
     /// it to the copy threads' completion (BbCopy::AfterCopies).
-    void SignalAfterHostCopies(std::function<void()> signal);
+    /// `landing_seq`: the deferred raycaster copies up to it (landing_gate.h) land before the
+    /// signal runs.
+    void SignalAfterHostCopies(std::function<void()> signal, u64 landing_seq = 0);
 
     /// bbport: before a guest-visible write that is not deferred (WriteData, end-of-shader
     /// fences, flip): waits until every signal handed to SignalAfterHostCopies ran, so that
