@@ -23,6 +23,7 @@ code runs directly on your PC and the graphics are translated to Vulkan. Unpack 
 - Button prompts show your keyboard and mouse keys while you play with them, Xbox buttons after
   input from an Xbox (or other) controller, and the PlayStation buttons after a PlayStation
   controller. Keys follow your keyboard layout (AZERTY...).
+- Trophies: the games' own trophy lists, a notice in the game when one is earned, and a Trophies page in the launcher.
 - Add to Steam and desktop shortcuts from the launcher, automatic updates.
 
 ## Requirements
