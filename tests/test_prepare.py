@@ -18,6 +18,16 @@ def fixture():
     return data
 
 
+def elf_fixture():
+    # The same executable as fixture(), as Itemzflow leaves it: a plain ELF, no SELF wrapper.
+    data = bytearray(0x210)
+    struct.pack_into('<16sHHIQQQIHHHHHH', data, 0,
+                     b'\x7fELF\x02\x01\x01\x09', 0xfe10, 62, 1, 0, 64, 0, 0, 64, 56, 1, 0, 0, 0)
+    struct.pack_into('<IIQQQQQQ', data, 64, 1, 5, 0x200, 0, 0, 16, 32, 0x1000)
+    data[0x200:0x210] = bytes(range(16))
+    return data
+
+
 class SelfTests(unittest.TestCase):
     def test_libc_ret_contract_is_verified_from_symbol_and_code(self):
         def libc(instruction):
@@ -74,6 +84,30 @@ class SelfTests(unittest.TestCase):
         data = fixture()
         struct.pack_into('<Q', data, 32, 0x100800)
         with self.assertRaisesRegex(ValueError, 'segment index'):
+            parse_self(data)
+
+
+class PlainElfTests(unittest.TestCase):
+    def test_plain_elf_is_read_like_the_self_it_was_in(self):
+        elf, header, ph, segments, missing = parse_self(elf_fixture())
+        self.assertEqual(elf[0x200:0x210], bytes(range(16)))
+        self.assertEqual((header[4], header[5], header[10]), (0, 64, 1))
+        self.assertEqual((ph[0]['type'], ph[0]['offset'], ph[0]['filesz']), (1, 0x200, 16))
+        self.assertEqual(missing, [])
+        self.assertEqual(len(segments), 1)
+
+    def test_neither_self_nor_elf_is_named(self):
+        with self.assertRaisesRegex(ValueError, 'SELF or a decrypted ELF'):
+            parse_self(b'MZ\x90\x00')
+
+    def test_bad_elf_class_or_machine_rejected(self):
+        data = elf_fixture()
+        data[4] = 1  # ELF32
+        with self.assertRaisesRegex(ValueError, 'little-endian x86-64 ELF'):
+            parse_self(data)
+        data = elf_fixture()
+        struct.pack_into('<H', data, 18, 0x28)  # AArch64
+        with self.assertRaisesRegex(ValueError, 'little-endian x86-64 ELF'):
             parse_self(data)
 
 
