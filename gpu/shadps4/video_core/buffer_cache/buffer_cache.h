@@ -5,8 +5,13 @@
 
 #include "bbport_copy.h"
 
+#include <atomic>
+#include <condition_variable>
 #include <deque>
+#include <functional>
+#include <memory>
 #include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 #include <boost/container/small_vector.hpp>
@@ -100,6 +105,18 @@ public:
     [[nodiscard]] std::pair<const Buffer*, u64> ObtainBuffer(VAddr device_addr, u32 size,
                                                              bool is_written,
                                                              bool is_texel_buffer = false);
+
+    /// bbport: the 64-dword copy of the game's mesh raycasters moves GPU results into a record
+    /// array the guest CPU reads. Instead of waiting for the GPU at the dispatch, the guest part
+    /// of the copy is made now and the GPU-written bytes of the source land on a worker thread
+    /// once the GPU work that wrote them has completed; the labels the guest learns of the GPU's
+    /// progress from wait for it (landing_gate.h). False when not deferred (no side queue,
+    /// BB_SCALAR_COPY64_DEFER=0): the caller reads back as before.
+    bool DeferGuestCopy(VAddr src, VAddr dst, u64 size);
+    u64 PendingLanding() const;
+    bool LandingGateActive() const;
+    void WaitLanding(u64 seq);
+    void RunAfterLanding(u64 seq, std::function<void()> fn);
 
     /// bbport diagnosis (BB_STABLE_CHECK=1): at an end-of-pipe fence, reports read-only
     /// bindings since the last one whose guest data changed meanwhile.
@@ -207,6 +224,24 @@ private:
     struct SideQueue;
     std::unique_ptr<SideQueue> side_queue;
     bool DownloadOnSideQueue(VAddr page, u64 length);
+
+    /// bbport: deferred raycaster copies (DeferGuestCopy).
+    struct Landing;
+    struct GatedLabel {
+        u64 seq;
+        std::function<void()> fn;
+    };
+    std::mutex landing_mutex;
+    std::condition_variable landing_cv, landing_done_cv;
+    std::deque<std::shared_ptr<Landing>> landing_queue; ///< registered, not yet landed
+    std::deque<GatedLabel> gated_labels;                 ///< labels waiting for a landing
+    u64 landing_registered_seq{0}, landing_done_seq{0};
+    std::atomic<u64> landing_registered{0}, landing_done{0};
+    bool landing_stop{false}, gate_running{false};
+    std::atomic<u32> gate_outstanding{0}; ///< labels queued or running on the landing thread
+    std::thread landing_thread;
+    void LandingWorker();
+    void ExecuteLanding(Landing& landing);
 
     std::unique_ptr<FaultManager> fault_manager;
     std::unique_ptr<Buffer> bda_pagetable_buffer;
