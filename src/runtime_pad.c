@@ -764,8 +764,10 @@ static const RuntimeGuestCallback guest_callbacks[]={
       "41 b8 4d 04 00 00 45 31 c9 ff d0 cd 41 c5 f8 28 45 d0",
       0x0, 58, NULL, u2_focus_reset_102},
 
+    /* The 7 bytes after the mov r9 are `mov qword [rdi], 0`: link_modules.py (patches/redzone.json, PR #403) replaces that
+     * store with a jump to a red-zone-safe copy on Windows, so they are masked and the hook is found either way. */
     {"CUE table fill",
-      "55 41 57 41 56 41 55 41 54 53 49 b9 00 24 00 0d 10 00 00 00 48 c7 07 00 00 00 00 45 31 f6",
+      "55 41 57 41 56 41 55 41 54 53 49 b9 00 24 00 0d 10 00 00 00 ?? ?? ?? ?? ?? ?? ?? 45 31 f6",
       0, 5, cue_table_pretouch, NULL},
 };
 const RuntimeGuestCallback *runtime_guest_callbacks(size_t *count) {
