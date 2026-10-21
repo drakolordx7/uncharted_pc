@@ -25,6 +25,7 @@
 #include "video_core/amdgpu/liverpool.h"
 #include "bbport_write_log.h"
 #include "video_core/amdgpu/pm4_cmds.h"
+#include "video_core/landing_gate.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
@@ -285,6 +286,8 @@ void SignalEop(const PM4CmdEventWriteEop& eop) {
 // the draw recording thread when the draw pipeline is in use).
 void RunEventWriteEop(Vulkan::Rasterizer& rasterizer, const u8* data) {
     const auto eop = *reinterpret_cast<const PM4CmdEventWriteEop*>(data);
+    // Raycaster copies deferred before this packet land before its label shows (landing_gate.h).
+    const u64 landing_seq = VideoCore::LandingGate::Pending();
     rasterizer.ProcessDownloadImages();
     rasterizer.GetBufferCache().CheckStableBindings();
     rasterizer.CheckConstants();
@@ -316,15 +319,17 @@ void RunEventWriteEop(Vulkan::Rasterizer& rasterizer, const u8* data) {
         return env && env[0] == '1';
     }();
     if (async_fences && !BbToggle::Disabled(BbToggle::AsyncFences)) {
+        VideoCore::LandingGate::Wait(landing_seq);
         BbCopy::AfterCopies([eop] { SignalEop(eop); });
     } else if (Vulkan::DrawPipe::OnStageB() && !BbToggle::Disabled(BbToggle::RecorderFences)) {
         // The draw recording thread does not wait: the Vulkan recording thread signals the
         // fence after the copies queued before it.
-        rasterizer.SignalAfterHostCopies([eop] { SignalEop(eop); });
+        rasterizer.SignalAfterHostCopies([eop] { SignalEop(eop); }, landing_seq);
     } else {
         // Labels are written in order: not before the ones deferred to the recording thread.
         rasterizer.WaitHostCopies();
         rasterizer.WaitDeferredSignals();
+        VideoCore::LandingGate::Wait(landing_seq);
         SignalEop(eop);
     }
 }
@@ -364,7 +369,21 @@ void RunDmaData(Vulkan::Rasterizer& rasterizer, const u8* data) {
 }
 
 void SignalFlip(Vulkan::Rasterizer& rasterizer, const u8*) {
+    // Raycaster copies deferred before the flip land before the guest hears of it (the labels
+    // before it wait for them as well, landing_gate.h).
+    const u64 landing_seq = VideoCore::LandingGate::Pending();
+    if (VideoCore::LandingGate::Active() && Vulkan::DrawPipe::OnStageB() &&
+        !BbToggle::Disabled(BbToggle::RecorderFences)) {
+        // Behind the deferred fences, which the interrupt must not overtake, without waiting.
+        rasterizer.OnGuestFlip();
+        rasterizer.GetBufferCache().CheckStableBindings();
+        rasterizer.CheckConstants();
+        rasterizer.SignalAfterHostCopies(
+            [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxFlip); }, landing_seq);
+        return;
+    }
     rasterizer.WaitDeferredSignals();
+    VideoCore::LandingGate::Wait(landing_seq);
     rasterizer.OnGuestFlip();
     rasterizer.GetBufferCache().CheckStableBindings();
     rasterizer.CheckConstants();
@@ -378,6 +397,7 @@ void RunWriteData(Vulkan::Rasterizer& rasterizer, const u8* data) {
     // precede writes the guest sees.
     rasterizer.WaitHostCopies();
     rasterizer.WaitDeferredSignals();
+    VideoCore::LandingGate::Wait(VideoCore::LandingGate::Pending());
     rasterizer.GetBufferCache().CheckStableBindings();
     rasterizer.CheckConstants();
     BbWriteLog::Note(write_data->Address<u64>(), write_data->data,
@@ -387,20 +407,37 @@ void RunWriteData(Vulkan::Rasterizer& rasterizer, const u8* data) {
 }
 
 void RunEventWriteEos(Vulkan::Rasterizer& rasterizer, const u8* data) {
-    const auto& event_eos = *reinterpret_cast<const PM4CmdEventWriteEos*>(data);
+    const auto event_eos = *reinterpret_cast<const PM4CmdEventWriteEos*>(data);
+    // Raycaster copies deferred before this packet land before its label shows (landing_gate.h).
+    const u64 landing_seq = VideoCore::LandingGate::Pending();
     // Copies deferred to the recording thread precede writes the guest sees.
+    const bool chained = VideoCore::LandingGate::Active() &&
+                         event_eos.command != PM4CmdEventWriteEos::Command::GdsStore &&
+                         Vulkan::DrawPipe::OnStageB() &&
+                         !BbToggle::Disabled(BbToggle::RecorderFences);
     rasterizer.WaitHostCopies();
-    rasterizer.WaitDeferredSignals();
+    if (!chained) {
+        rasterizer.WaitDeferredSignals();
+    }
     rasterizer.ProcessDownloadImages();
     rasterizer.GetBufferCache().CheckStableBindings();
     rasterizer.CheckConstants();
-    event_eos.SignalFence([](void* address, u64 value, u32 num_bytes) {
+    const auto write = [](void* address, u64 value, u32 num_bytes) {
         auto* memory = Core::Memory::Instance();
         BbWriteLog::Note(reinterpret_cast<u64>(address), &value, num_bytes, BbWriteLog::Fence);
         if (!memory->TryWriteBacking(address, &value, num_bytes)) {
             memcpy(address, &value, num_bytes);
         }
-    });
+    };
+    if (chained) {
+        // The label is written once the copies have landed, in order with the other deferred
+        // fences (later guest-visible writes wait for it): this thread does not block.
+        rasterizer.SignalAfterHostCopies([event_eos, write] { event_eos.SignalFence(write); },
+                                         landing_seq);
+        return;
+    }
+    VideoCore::LandingGate::Wait(landing_seq);
+    event_eos.SignalFence(write);
     if (event_eos.command == PM4CmdEventWriteEos::Command::GdsStore) {
         ASSERT(event_eos.size == 1);
         rasterizer.Finish();
@@ -1624,6 +1661,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             if (rasterizer) {
                 rasterizer->WaitHostCopies();
                 rasterizer->WaitDeferredSignals();
+                VideoCore::LandingGate::Wait(VideoCore::LandingGate::Pending());
             }
             const auto* write_data = reinterpret_cast<const PM4CmdWriteData*>(header);
             ASSERT(write_data->dst_sel.Value() == 2 || write_data->dst_sel.Value() == 5);
@@ -1661,6 +1699,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             if (rasterizer) {
                 rasterizer->WaitHostCopies();
                 rasterizer->WaitDeferredSignals();
+                VideoCore::LandingGate::Wait(VideoCore::LandingGate::Pending());
                 rasterizer->GetBufferCache().CheckStableBindings();
                 rasterizer->CheckConstants();
             }
