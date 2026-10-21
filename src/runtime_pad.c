@@ -1940,7 +1940,7 @@ static const unsigned char u1_text_draw_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x
 typedef struct { float rect[4], w, h, style[12]; uint64_t us; } U2ProbeText;
 /* The rows of a U2 menu, for the mouse (U2 has no menu objects to ask): every text drawn keeps its rectangle and style[5], which the
  * game takes from 0 to 3 on the selected row. Read by u2_menu_buttons (menu_text_lock). */
-typedef struct { float x, y, w, h, s5; uint64_t us; } U2Row;
+typedef struct { float x, y, w, h, s5; uint64_t us; float a; } U2Row;   /* a: style[7], 1 on the chosen one of the Oui / Non of a confirmation, 0 on the other */
 #define U2_ROWS 256   /* the Commandes screen alone draws about 80 texts of row size (labels, values, icon cells) */
 static U2Row u2_rows[U2_ROWS];
 /* The rails of the sliders (Sensibilité, volumes): a text 100+ wide and under 12 tall laid out in a row's rectangle. The game keeps the
@@ -1954,10 +1954,10 @@ static void u2_slider_note(const float *r, float rail_w) {
         if (fabsf(u2_sliders[i].x-r[0])<0.5f && fabsf(u2_sliders[i].y-r[1])<0.5f) { slot=i; break; }
         if (u2_sliders[i].us<u2_sliders[slot].us) slot=i;
     }
-    u2_sliders[slot]=(U2Row){r[0],r[1],rail_w,r[3],0.0f,now};
+    u2_sliders[slot]=(U2Row){r[0],r[1],rail_w,r[3],0.0f,now,0.0f};
     pthread_mutex_unlock(&menu_text_lock);
 }
-static void u2_row_note(const float *r, float s5) {
+static void u2_row_note(const float *r, float s5, float a) {
     const uint64_t now=now_us();
     pthread_mutex_lock(&menu_text_lock);
     int slot=-1, oldest=0;
@@ -1967,7 +1967,7 @@ static void u2_row_note(const float *r, float s5) {
         if (u2_rows[i].us<u2_rows[oldest].us) oldest=i;
     }
     if (slot<0) slot=oldest;
-    u2_rows[slot]=(U2Row){r[0],r[1],r[2],r[3],s5,now};
+    u2_rows[slot]=(U2Row){r[0],r[1],r[2],r[3],s5,now,a};
     pthread_mutex_unlock(&menu_text_lock);
 }
 static volatile uint64_t u2_image;   /* U2 image base, seen by the text hook (F8 probe) */
@@ -1975,10 +1975,10 @@ static void __attribute__((ms_abi)) u2_text_probe(uint64_t unused0, uint64_t unu
     (void)unused0; (void)unused1; (void)r14;
     u2_image=image;
     {
-        float r[4], st[6], sz[2];
+        float r[4], st[8], sz[2];
         if (safe_read(r,saved_register(5),16) && safe_read(sz,saved_register(3)+0x3c,8) && sz[0]>=100.0f && sz[1]>0.0f && sz[1]<=12.0f && r[3]>=24.0f && r[3]<=42.0f)
             u2_slider_note(r,sz[0]);
-        if (safe_read(r,saved_register(5),16) && safe_read(st,saved_register(4),24) && r[3]>=24.0f && r[3]<=42.0f && r[2]>=20.0f) u2_row_note(r,st[5]);   /* taller texts are paragraphs: the help text under a row is drawn "selected" too */
+        if (safe_read(r,saved_register(5),16) && safe_read(st,saved_register(4),32) && r[3]>=24.0f && r[3]<=42.0f && r[2]>=20.0f) u2_row_note(r,st[5],st[7]);   /* taller texts are paragraphs: the help text under a row is drawn "selected" too */
     }
     if (!mouse_debug()) return;
     static U2ProbeText seen[96];
@@ -3485,7 +3485,7 @@ static void u2_sd_step(uint64_t now, int row_ok) {
 static uint32_t u2_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
     /* rows the game never selected when asked to (the text of a choice box, a title): the hover gives up on them for 30 s */
     static struct { float x, y; uint64_t until; } skips[16];
-    static struct { float sl_last, sl_acc, sl_w, sl_cx, sl_cy, f_last, last_f; int drag, sl_dir, sl_dir0, sl_pending, deferred, give, f_pulses, f_stuck; U2SliderMem *sm; uint64_t sl_next, sl_until, f_next, f_deadline, deferred_until; float last_x, last_y, press_sel_cy, press_sel_x; int last_left, active, presses, budget, click, dir, last_dir, stuck; uint64_t click_deadline, press_until, next_press, cross_until, same_since; } h;
+    static struct { float sl_last, sl_acc, sl_w, sl_cx, sl_cy, f_last, last_f; int drag, sl_dir, sl_dir0, sl_pending, deferred, choice, ch_dir, give, f_pulses, f_stuck; U2SliderMem *sm; uint64_t sl_next, sl_until, f_next, f_deadline, deferred_until, choice_until, choice_seen, ch_until; float choice_cy; float last_x, last_y, press_sel_cy, press_sel_x; int last_left, active, presses, budget, click, dir, last_dir, stuck; uint64_t click_deadline, press_until, next_press, cross_until, same_since; } h;
     u2_hover=0;
     SDL_Window *w=SDL_GetMouseFocus();
     float mx=0, my=0; int ww=0, wh=0;
@@ -3520,10 +3520,31 @@ static uint32_t u2_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
         if (ux>=r->x-4.0f && ux<=r->x+r->w+4.0f && uy>=r->y && uy<r->y+r->h) {
             int skipped=0;
             for (int s=0;s<16;++s) if (now<skips[s].until && fabsf(skips[s].x-r->x)<0.5f && fabsf(skips[s].y-r->y)<0.5f) skipped=1;
-            if (!skipped && (!have_hov || r->s5>hov.s5)) { hov=*r; have_hov=1; }
+            /* the most selected one under the cursor, and the narrowest of equals (the choice, not the box that holds both) */
+            if (!skipped && (!have_hov || r->s5>hov.s5+0.01f || (fabsf(r->s5-hov.s5)<=0.01f && r->w<hov.w))) { hov=*r; have_hov=1; }
+        }
+    }
+    /* A confirmation (Oui / Non): two rows of the same size side by side (210 x 40, at x 380 and 690: a gap of 100 between them). The menu behind it keeps its own selected row, so only the pair counts while it is there: the chosen one has style[7] at 1. */
+    U2Row da={0}, db={0};
+    int dlg=0;
+    for (int i=0;i<U2_ROWS && !dlg;++i) {
+        const U2Row *a=&u2_rows[i];
+        if (!a->us || now-a->us>=100000 || a->h<30.0f || a->h>44.0f) continue;
+        for (int j=0;j<U2_ROWS;++j) {
+            const U2Row *b=&u2_rows[j];
+            if (i==j || !b->us || now-b->us>=100000) continue;
+            if (fabsf(a->y-b->y)<1.0f && fabsf(a->w-b->w)<1.0f && fabsf(a->h-b->h)<1.0f && b->x>=a->x+a->w-1.0f && b->x-(a->x+a->w)<=150.0f && a->w<=260.0f) { da=*a; db=*b; dlg=1; break; }
         }
     }
     pthread_mutex_unlock(&menu_text_lock);
+    if (dlg) {
+        sel=da.a>db.a+0.05f ? da : db; have_sel=1;   /* (no sign yet: the right one, "Non", is the one the game starts on) */
+        have_hov=0;
+        if (uy>=da.y && uy<da.y+da.h) { if (ux>=da.x && ux<da.x+da.w) { hov=da; have_hov=1; } else if (ux>=db.x && ux<db.x+db.w) { hov=db; have_hov=1; } }
+        if (have_hov) { int skipped=0; for (int s=0;s<16;++s) if (now<skips[s].until && fabsf(skips[s].x-hov.x)<0.5f && fabsf(skips[s].y-hov.y)<0.5f) skipped=1; if (skipped) have_hov=0; }
+        if (fabsf(da.a-db.a)<0.5f) have_hov=0;   /* the chosen one is not clear (the box is opening, or a change is under way): never validate on a guess */
+        have_slid=0; hi_n=0;
+    }
     u2_hover=have_hov;
     if (u2_menu_reset) { u2_menu_reset=0; memset(skips,0,sizeof(skips)); h.active=0; h.click=0; h.presses=0; h.press_until=h.cross_until=0; }   /* a rebuilt menu (a language was chosen): wait for the cursor to move */
     if (!left) h.drag=0;
@@ -3541,7 +3562,26 @@ static uint32_t u2_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
             h.sm=m;
         }
         h.active=1; h.presses=0; h.budget=0; h.stuck=0; h.last_dir=-1;
-    } else if (clicked && have_hov) { h.click=1; h.click_deadline=now+1500000; h.active=1; h.presses=0; h.budget=0; h.stuck=0; h.last_dir=-1; }
+    } else if (clicked && have_hov) {
+        /* a click on one of the choices written in a row (Oui / Non, Normale / Inversée): the row is selected, then left (the first
+         * choice) or right (the last one) is pressed once. Cross does not choose anything there. */
+        int choice=0;
+        if (hov.h<30.0f && hov.w<=130.0f && hov.x>=600.0f) {
+            const float cy=hov.y+hov.h*0.5f;
+            float minx=1e9f, maxx=-1e9f; int n=0;
+            pthread_mutex_lock(&menu_text_lock);
+            for (int i=0;i<U2_ROWS;++i) {
+                const U2Row *r=&u2_rows[i];
+                if (!r->us || now-r->us>=100000 || r->h>=30.0f || r->w>130.0f || r->x<600.0f || fabsf(r->y+r->h*0.5f-cy)>=4.0f) continue;
+                ++n; if (r->x<minx) minx=r->x; if (r->x>maxx) maxx=r->x;
+            }
+            pthread_mutex_unlock(&menu_text_lock);
+            if (n>=2) choice=hov.x<=minx+1.0f ? 2 : hov.x>=maxx-1.0f ? 3 : 0;
+            if (choice) { h.choice=choice; h.choice_cy=cy; h.choice_until=now+1500000; h.choice_seen=0; }
+        }
+        if (!choice) { h.click=1; h.click_deadline=now+1500000; }
+        h.active=1; h.presses=0; h.budget=0; h.stuck=0; h.last_dir=-1;
+    }
     if (h.click && (!have_hov || now>h.click_deadline)) h.click=0;
     /* the same line (a row can have several texts side by side, labels and values): only whole lines count, and only up / down are pressed */
     const float hov_cy=hov.y+hov.h*0.5f, sel_cy=sel.y+sel.h*0.5f;
@@ -3550,8 +3590,10 @@ static uint32_t u2_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
     int line_hi=0;
     for (int i=0;i<hi_n;++i) if (fabsf(hi_cy[i]-sel_cy)<4.0f) ++line_hi;
     const int line=have_hov && have_sel && fabsf(hov_cy-sel_cy)<8.0f;
-    const int grid=line && fabsf(hov_cy-sel_cy)<1.5f && line_hi==1 && hov.h>=33.0f && hov.h<=34.5f && sel.h>=33.0f && sel.h<=34.5f && fabsf(hov.x-sel.x)>=1.0f;
-    const int same=line && !grid;
+    /* (also the Oui / Non of a confirmation: two 210 x 40 halves of one box, the one on the left aligned to its end) */
+    const int grid=dlg ? have_hov && fabsf(hov.x-sel.x)>=1.0f
+                       : line && fabsf(hov_cy-sel_cy)<1.5f && line_hi==1 && hov.h>=33.0f && hov.h<=34.5f && sel.h>=33.0f && sel.h<=34.5f && fabsf(hov.x-sel.x)>=1.0f;
+    const int same=dlg ? have_hov && !grid : line && !grid;
     if (!same) h.same_since=0; else if (!h.same_since) h.same_since=now;
     if (same && !h.click) h.active=0;   /* arrived: nothing more until the cursor moves again */
     if (have_hov && have_sel && (h.active || h.click) && !u2_sd.phase) {
@@ -3579,6 +3621,16 @@ static uint32_t u2_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
             h.cross_until=now+120000; h.click=0;
             printf("Runtime: U2 menu click on the row at %.0f,%.0f\n",hov.x,hov.y);
         }
+    }
+    if (h.choice && now>=h.choice_until) h.choice=0;
+    if (h.choice) {   /* the row of the clicked choice is the selected one for a moment: press */
+        if (have_sel && fabsf(sel_cy-h.choice_cy)<8.0f) {
+            if (!h.choice_seen) h.choice_seen=now;
+            if (now-h.choice_seen>=100000 && !u2_sd.phase) {
+                h.ch_dir=h.choice; h.ch_until=now+70000; h.choice=0;
+                printf("Runtime: U2 menu choice click: %s\n",h.ch_dir==2 ? "left" : "right");
+            }
+        } else h.choice_seen=0;
     }
     /* dragging a slider: one left / right press per tenth of the rail the cursor has moved (the steps of the game are tenths, measured
      * on the sensitivity), once the row is the selected one */
@@ -3641,10 +3693,11 @@ static uint32_t u2_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
     uint32_t out=0;
     if (now<h.sl_until) out|=h.sl_dir==3 ? BTN_RIGHT : BTN_LEFT;
     if (now<u2_sd.until) out|=u2_sd.dir==3 ? BTN_RIGHT : BTN_LEFT;
+    if (now<h.ch_until) out|=h.ch_dir==3 ? BTN_RIGHT : BTN_LEFT;
     if (now<h.press_until) out|=h.dir==0 ? BTN_UP : h.dir==1 ? BTN_DOWN : h.dir==2 ? BTN_LEFT : BTN_RIGHT;
     if (now<h.cross_until) out|=BTN_CROSS;
-    if (now<wheel_until_us[0]) out|=BTN_UP;     /* the wheel: one row up / down per notch */
-    if (now<wheel_until_us[1]) out|=BTN_DOWN;
+    if (now<wheel_until_us[0]) out|=dlg ? BTN_LEFT : BTN_UP;     /* the wheel: one row up / down per notch (left / right in a confirmation) */
+    if (now<wheel_until_us[1]) out|=dlg ? BTN_RIGHT : BTN_DOWN;
     if (mouse & 8u) out|=BTN_CIRCLE;
     return out;
 }
