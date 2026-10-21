@@ -375,7 +375,18 @@ static bool ExecuteScalarCopyHLE(const Shader::Info& info, const AmdGpu::Compute
             const bool d_cpu = buffer_cache.IsRegionCpuModified(dst.base_address, size);
             const bool d_gpuw = buffer_cache.IsRangeGpuWritten(dst.base_address, size);
             const bool sync = sync_all || (group_size == 64 && (sync_64 == 1 || (sync_64 == 2 && d_cpu)));
-            if (src_written && sync) {
+            bool deferred = false;
+            if (src_written && sync && group_size == 64 && !sync_all && sync_64 == 2) {
+                // The wait for the GPU moves to whoever reads the result (BufferCache::DeferGuestCopy).
+                deferred = buffer_cache.DeferGuestCopy(src.base_address, dst.base_address, size);
+                if (deferred) {
+                    sc_note(group_size, src.base_address, dst.base_address, size, src_written, false,
+                            0.0, d_cpu, d_gpuw);
+                }
+            }
+            if (deferred) {
+                // nothing to wait for
+            } else if (src_written && sync) {
                 const auto t0 = std::chrono::steady_clock::now();
                 buffer_cache.ReadMemory(src.base_address, size, false, true);
                 sc_note(group_size, src.base_address, dst.base_address, size, src_written, true,
@@ -384,7 +395,7 @@ static bool ExecuteScalarCopyHLE(const Shader::Info& info, const AmdGpu::Compute
             } else {
                 sc_note(group_size, src.base_address, dst.base_address, size, src_written, false, 0.0, d_cpu, d_gpuw);
             }
-            if ((!src_written || sync) && memory->IsValidGpuMapping(src.base_address, size) &&
+            if (!deferred && (!src_written || sync) && memory->IsValidGpuMapping(src.base_address, size) &&
                 memory->IsValidGpuMapping(dst.base_address, size)) {
                 memory->TryWriteBacking(reinterpret_cast<void*>(dst.base_address),
                                         reinterpret_cast<const void*>(src.base_address), size);
