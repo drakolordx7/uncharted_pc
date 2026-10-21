@@ -46,6 +46,7 @@ void bbgpu_mouse_configure(int look);
 /* 1 while a game menu is open (pause, options...): the cursor is given back to the player. */
 void bbgpu_menu_state(int open);
 void bbgpu_menu_cursor_hidden(int hidden);
+void bbgpu_game_menu_cursor(int open); /* U2: a menu is on screen, the cursor is free (the pictograms stay as they are) */
 void bbgpu_menu_alt(int shown);
 /* 1 while Elena rides the jetski (U1): the cross and square icons show the keys of forward and back. */
 void bbgpu_jetski_state(int on);

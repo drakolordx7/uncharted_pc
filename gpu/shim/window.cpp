@@ -186,6 +186,10 @@ extern "C" void bbgpu_menu_state(int open) {
     BbKeyIcons::SetMenuMode(open != 0);
 }
 
+extern "C" void bbgpu_game_menu_cursor(int open) {
+    game_menu = open != 0;
+}
+
 extern "C" void bbgpu_menu_cursor_hidden(int hidden) {
     menu_cursor_hidden = hidden != 0;
 }
