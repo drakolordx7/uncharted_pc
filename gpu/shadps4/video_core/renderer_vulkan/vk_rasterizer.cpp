@@ -614,7 +614,24 @@ void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
     // Draws write the same buffers over and over: an entry for the range only moves on.
     const u64 position = draw_pipe->Head();
     const VAddr end = address + size;
-    for (auto& write : pending_writes) {
+    // Entries the recording thread has done go once the list has doubled: PendingWriteOverlaps
+    // drops them only when a lookup falls inside the bounds, and the list (scanned for every
+    // written binding) grew long between.
+    if (pending_writes.size() >= pending_prune_at) {
+        std::erase_if(pending_writes, [&](const PendingWrite& write) {
+            return draw_pipe->Reached(write.position);
+        });
+        pending_min = ~VAddr{0};
+        pending_max = 0;
+        for (const auto& write : pending_writes) {
+            pending_min = std::min(pending_min, write.begin);
+            pending_max = std::max(pending_max, write.end);
+        }
+        pending_prune_at = std::max<size_t>(32, pending_writes.size() * 2);
+    }
+    // Newest first: the recent ranges are the ones written again.
+    for (auto it = pending_writes.rbegin(); it != pending_writes.rend(); ++it) {
+        auto& write = *it;
         if (address <= write.end && write.begin <= end) {
             write.begin = std::min(write.begin, address);
             write.end = std::max(write.end, end);
@@ -726,20 +743,7 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
     }
     std::array<u16, AmdGpu::RegDirty::NumBlocks> blocks;
     u32 num_blocks = 0;
-#ifdef __GLIBCXX__
-    for (size_t block = dirty.blocks._Find_first(); block < dirty.blocks.size();
-         block = dirty.blocks._Find_next(block)) {
-        blocks[num_blocks++] = static_cast<u16>(block);
-    }
-#else
-    if (dirty.blocks.any()) {
-        for (size_t block = 0; block < dirty.blocks.size(); ++block) {
-            if (dirty.blocks.test(block)) {
-                blocks[num_blocks++] = static_cast<u16>(block);
-            }
-        }
-    }
-#endif
+    dirty.blocks.ForEachSet([&](u32 block) { blocks[num_blocks++] = static_cast<u16>(block); });
     const auto stages =
         pipeline ? pipeline->GetStages() : std::span<const Shader::Info* const>{};
     // Constants: copied here into the ring, the recording thread only binds them.
