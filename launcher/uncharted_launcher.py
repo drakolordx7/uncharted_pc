@@ -63,7 +63,7 @@ PRESENT_MODES = [('Mailbox', 'Mailbox (low latency, no tearing)'), ('Fifo', 'FIF
                  ('FifoRelaxed', 'FIFO Relaxed'), ('Immediate', 'Immediate (tearing)')]
 # The display rate the games run at (BB_VBLANK_HZ): they time gameplay with the real clock, and
 # the prerecorded cutscenes keep 60 frames per second at every setting.
-FRAME_RATES = [('60', '60 FPS (as on PS4)'), ('120', '120 FPS'), ('144', '144 FPS (experimental)'),
+FRAME_RATES = [('30', '30 FPS'), ('60', '60 FPS (as on PS4)'), ('120', '120 FPS'), ('144', '144 FPS (experimental)'),
                ('165', '165 FPS (experimental)'), ('240', '240 FPS (experimental)')]
 # The window (or the screen in fullscreen) shows the game's picture at its size: FSR 1 (EASU) or
 # bilinear when the picture is smaller, then RCAS sharpening (BB_RCAS_ATTENUATION, lower is sharper).
