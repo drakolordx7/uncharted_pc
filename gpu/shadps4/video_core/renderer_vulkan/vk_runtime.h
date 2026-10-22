@@ -130,6 +130,7 @@ private:
     };
     std::array<AccessMemo, 512> access_memo{};
     u32 access_epoch = 1;
+    u32 tracked_inserts = 0; // ranges inserted since the last Clear()
 };
 
 } // namespace Vulkan
