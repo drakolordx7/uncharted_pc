@@ -37,6 +37,7 @@ CONFIG_DIR = Path(os.environ.get('APPDATA', Path.home())) / 'uncharted-launcher'
 CONFIG_FILE = CONFIG_DIR / 'settings.json'
 NAME = 'Uncharted'
 AUTHOR = 'SuperMedo'
+COMMUNITY_AUTHOR = 'drakolord'
 # This build; GitHub release tags are v<VERSION> (their digits are compared).
 VERSION = '0.3.6'
 RELEASES_API = 'https://api.github.com/repos/drakolordx7/uncharted_pc/releases/latest'
@@ -529,7 +530,7 @@ class Launcher:
         self.card_hot = None
         self.info, self.available = None, {}
         self.update_box = None
-        root.title(f'{NAME} — The Nathan Drake Collection for Windows · by {AUTHOR} · Community Edition')
+        root.title(f'{NAME} — The Nathan Drake Collection for Windows · by {AUTHOR} · Community Edition by {COMMUNITY_AUTHOR}')
         root.configure(bg=BG)
         self.dpi = root.winfo_fpixels('1i') / 96.0
         root.geometry(f'{self.px(1180)}x{self.px(860)}')
@@ -831,8 +832,9 @@ class Launcher:
             anchor='w', padx=18, pady=(1, 0))
         tk.Label(side, text=_('by {}').format(AUTHOR), bg=BG, fg=TEXT, font=self.font_ui_md,
                  anchor='w', wraplength=brand_wrap, justify='left').pack(anchor='w', padx=18, pady=(10, 0))
-        tk.Label(side, text=_('Community Edition'), bg=BG, fg=MUTED, font=self.font_ui_sm,
-                 anchor='w').pack(anchor='w', padx=18, pady=(1, 0))
+        tk.Label(side, text=_('Community Edition by {}').format(COMMUNITY_AUTHOR), bg=BG, fg=TEXT,
+                 font=self.font_ui_md, anchor='w', wraplength=brand_wrap, justify='left').pack(
+            anchor='w', padx=18, pady=(2, 0))
         tk.Label(side, text=_('version {}').format(VERSION), bg=BG, fg='#5c564c', font=self.font_ui_sm,
                  anchor='w').pack(anchor='w', padx=18, pady=(1, 16))
         tk.Frame(side, bg=LINE, height=1).pack(fill='x', padx=18, pady=(0, 14))
