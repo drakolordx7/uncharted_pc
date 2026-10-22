@@ -1,18 +1,18 @@
 # Uncharted: The Nathan Drake Collection for Windows (community build)
 
-**Uncharted 1, 2 and 3 from the PS4 collection running natively on Windows, built on
-[SuperMedo's port](https://github.com/Supermedo/uncharted_pc), with fixes from across the community.**
+Uncharted 1, 2 and 3 from the PS4 collection running natively on Windows, built on
+[SuperMedo's port](https://github.com/Supermedo/uncharted_pc), with fixes from across the community.
 
 The port is SuperMedo's work: the original PS4 game code runs directly on your PC and the
 graphics go through Vulkan. This fork collects the fixes people have written since then, ours and
 other contributors', in one build that you can download and play. Everything we write here is also
 sent upstream as a pull request, so SuperMedo can take any of it at any time.
 
-**[Download the latest community build](https://github.com/drakolordx7/uncharted_pc/releases/latest)** ·
+[Download the latest community build](https://github.com/drakolordx7/uncharted_pc/releases/latest) ·
 [What's in it](#whats-in-this-build) · [Report a problem](https://github.com/drakolordx7/uncharted_pc/issues/new/choose) ·
 [Credits](CREDITS.md)
 
-> **No game files are included.** You need your own decrypted dump of the collection
+> No game files are included. You need your own decrypted dump of the collection
 > (CUSA02343, CUSA02320, ...: the folder with eboot.bin, big2-ps4_Shipping.elf,
 > big3-ps4_Shipping.elf, sce_sys, u1data, u2data and u3data).
 > This project is not affiliated with Sony Interactive Entertainment or Naughty Dog.
@@ -74,7 +74,7 @@ Open an issue [here](https://github.com/drakolordx7/uncharted_pc/issues/new/choo
 `user\last_run.log` from the run where it went wrong. Copy the log before you start the game again,
 because the next run overwrites it.
 
-**Never run a command or a download from an issue or a comment.** Issues titled "All Crashes Fix
+Never run a command or a download from an issue or a comment. Issues titled "All Crashes Fix
 Command" and similar are malware. Fixes only ever come as a release on this page.
 
 ## Contributing
@@ -101,34 +101,34 @@ If you'd rather your change didn't come in, open an issue and we'll take it out.
 
 - Windows 10 (1903 or later) or Windows 11, 64-bit.
 - An Intel Core 4th generation (Haswell) or newer, an AMD Ryzen, or an AMD FX.
-- A graphics card with Vulkan 1.3 and a current driver, with **6 GB of video memory or more**.
+- A graphics card with Vulkan 1.3 and a current driver, with 6 GB of video memory or more.
   4 GB cards (GTX 1650, RX 570) run out of video memory and crash after a while; on those, keep
   Anti-aliasing and Frame generation off.
 - About 8 GB of free memory (RAM + page file).
 
 ## Known problems
 
-- **Uncharted 3, Cartagena square (chapter 2):** at high frame rates (240 Hz setting, ~80 FPS)
+- Uncharted 3, Cartagena square (chapter 2): at high frame rates (240 Hz setting, ~80 FPS)
   the game could freeze and close with "GPU crash: the graphics device was lost". It came from
   the speed fix for that area and is fixed in 0.3. If it still happens to you, set Frame rate to
   60 on the Display page and open an issue with your `user\last_run.log`.
-- **Uncharted 3:** green or black shapes flash for a single frame on some characters (Sully's
+- Uncharted 3: green or black shapes flash for a single frame on some characters (Sully's
   shirt in Cartagena). It happens in shadPS4 too, so it's a shader translation problem. Not fixed yet.
-- **Crash with "ASSERTION: GetRenderFrameParams(frameToFreeInstancesFor)->m_gfxEopTick"**
+- Crash with "ASSERTION: GetRenderFrameParams(frameToFreeInstancesFor)->m_gfxEopTick"
   (mostly U1 after the first cutscene): the game expected the GPU side to be done with a frame it
   wanted to reuse, and stopped when it wasn't yet (shaders building on a first run). Fixed in
   0.3.2 (0.3.4 for the 1.02 versions): the game now waits for it. If you still see it, open an
   issue with your log.
-- **Intel HD / UHD graphics:** a black screen on the HD 630 is fixed in 0.3.3. Older Intel chips
+- Intel HD / UHD graphics: a black screen on the HD 630 is fixed in 0.3.3. Older Intel chips
   (HD 520) can still crash inside Intel's own driver.
-- **Uncharted 3 London bar crash** (fault at `0xd9c59b`, or device lost in the bar fight): fixed in
+- Uncharted 3 London bar crash (fault at `0xd9c59b`, or device lost in the bar fight): fixed in
   0.3.4.
-- **Uncharted 2 loading crashes** (`ReadSync file (req/read: ...)`, white textures then
+- Uncharted 2 loading crashes (`ReadSync file (req/read: ...)`, white textures then
   `iSubMesh < m_numSubMeshInstances`): file reads could come back cut short. Fixed in 0.3.5.
-- **Older CPUs:** the games use instructions of the PS4's processor (AVX, BMI1, MOVBE, LZCNT).
+- Older CPUs: the games use instructions of the PS4's processor (AVX, BMI1, MOVBE, LZCNT).
   AMD FX runs since 0.3.6 (its missing MOVBE is emulated, a bit slower). Intel Core 3rd generation
   and older can't run the games yet; the game says so instead of crashing with 0xc000001d.
-- **Uncharted 2, train wreck:** `IsFinite(deltaTransform)` in character-leg-ik.cpp, fixed in 0.3.6
+- Uncharted 2, train wreck: `IsFinite(deltaTransform)` in character-leg-ik.cpp, fixed in 0.3.6
   for the EU 1.00 version.
 - Frame rates above 120 are experimental.
 
