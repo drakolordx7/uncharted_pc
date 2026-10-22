@@ -108,10 +108,44 @@ public:
 
     /// Checks whether any resources are dirty
     bool Empty() const {
-        return !root_mask_valid;
+        return block_mode ? items.size() <= 1 : !root_mask_valid;
     }
 
 private:
+    // bbport: the ranges filed by 64 KiB block of their resource instead of one tree per hash
+    // slot. The buffers live in one or two arenas, so nearly every range went into the same
+    // tree: with up to 4096 ranges between barriers each binding walked 12-13 levels, two or
+    // three times (U3's square: ~21% of the draw recording thread). A range is listed in each
+    // block it touches (very long ones in `large`), a lookup checks the blocks of its own range,
+    // and a clear is an epoch increment. BB_BARRIER_TRACKER=tree: DXVK's trees; =check: both.
+    struct BlockItem {
+        u64 resource;
+        u64 start;
+        u64 end;
+        u32 next;   ///< next item of the same block, 0: none
+        u32 access; ///< for `large` (block lists hold one resource and access)
+    };
+    struct BlockHead {
+        u64 resource;
+        u64 block;
+        u32 epoch; ///< != the tracker's: unused
+        u32 first;
+        u32 access;
+    };
+    static constexpr u32 BlockShift = 16;
+    static constexpr u64 MaxBlocksPerRange = 64;
+    static constexpr u32 HeadCount = 1u << 14;
+    BlockHead* FindHead(u64 resource, u64 block, u32 access, bool create);
+    bool BlockFind(const AddressRange& range, Access access) const;
+    void BlockInsert(const AddressRange& range, Access access);
+    bool block_mode;
+    bool check_mode; ///< BB_BARRIER_TRACKER=check: the trees too, lookups compared
+    std::vector<BlockHead> heads;
+    std::vector<BlockItem> items;
+    std::vector<u32> large;
+    u32 epoch = 1;
+    u32 heads_used = 0;
+
     u32 AllocateNode();
     void FreeNode(u32 node);
     u32 FindNode(const AddressRange& range, u32 root_index) const;

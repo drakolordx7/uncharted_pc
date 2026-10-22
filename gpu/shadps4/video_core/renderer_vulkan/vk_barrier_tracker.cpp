@@ -2,11 +2,28 @@
 // SPDX-License-Identifier: Zlib
 
 #include <bit>
+#include <cstdio>
+#include <cstdlib>
+#include <string_view>
 #include "video_core/renderer_vulkan/vk_barrier_tracker.h"
 
 namespace Vulkan {
 
+namespace {
+bool Overlap(u64 a_start, u64 a_end, const AddressRange& b) {
+    return a_end >= b.range_start && a_start <= b.range_end;
+}
+} // namespace
+
 BarrierTracker::BarrierTracker() {
+    const char* env = std::getenv("BB_BARRIER_TRACKER");
+    block_mode = !(env && std::string_view{env} == "tree");
+    check_mode = env && std::string_view{env} == "check";
+    if (block_mode) {
+        heads.resize(HeadCount);
+        items.reserve(8192);
+        items.push_back({}); // index 0: end of a list
+    }
     // Having an accessible 0 node makes certain things easier to
     // implement and allows us to use 0 as an invalid node index.
     nodes.emplace_back();
@@ -17,13 +34,129 @@ BarrierTracker::BarrierTracker() {
     }
 }
 
+BarrierTracker::BlockHead* BarrierTracker::FindHead(u64 resource, u64 block, u32 access,
+                                                    bool create) {
+    u64 hash = resource * 0x9E3779B97F4A7C15ull ^ block * 0xC2B2AE3D27D4EB4Full ^ access;
+    hash ^= hash >> 29;
+    hash *= 0xBF58476D1CE4E5B9ull;
+    hash ^= hash >> 32;
+    for (u32 probe = 0; probe < HeadCount; ++probe) {
+        auto& head = heads[(hash + probe) & (HeadCount - 1)];
+        if (head.epoch != epoch) {
+            // Free slot: the key is not in the table. Kept under three quarters full so that
+            // misses stay short; past that the caller lists the range in `large`.
+            if (!create || heads_used >= HeadCount / 4 * 3) {
+                return nullptr;
+            }
+            ++heads_used;
+            head = {resource, block, epoch, 0, access};
+            return &head;
+        }
+        if (head.resource == resource && head.block == block && head.access == access) {
+            return &head;
+        }
+    }
+    return nullptr;
+}
+
+bool BarrierTracker::BlockFind(const AddressRange& range, Access access) const {
+    for (const u32 index : large) {
+        const auto& item = items[index];
+        if (item.resource == range.resource && item.access == u32(access) &&
+            Overlap(item.start, item.end, range)) {
+            return true;
+        }
+    }
+    const u64 first = range.range_start >> BlockShift;
+    const u64 last = range.range_end >> BlockShift;
+    if (last - first >= MaxBlocksPerRange) {
+        for (size_t index = 1; index < items.size(); ++index) {
+            const auto& item = items[index];
+            if (item.resource == range.resource && item.access == u32(access) &&
+                Overlap(item.start, item.end, range)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    auto& self = const_cast<BarrierTracker&>(*this);
+    for (u64 block = first; block <= last; ++block) {
+        const BlockHead* head = self.FindHead(range.resource, block, u32(access), false);
+        for (u32 index = head ? head->first : 0; index; index = items[index].next) {
+            if (Overlap(items[index].start, items[index].end, range)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void BarrierTracker::BlockInsert(const AddressRange& range, Access access) {
+    const u64 first = range.range_start >> BlockShift;
+    const u64 last = range.range_end >> BlockShift;
+    const auto add_large = [&] {
+        large.push_back(static_cast<u32>(items.size()));
+        items.push_back({range.resource, range.range_start, range.range_end, 0, u32(access)});
+    };
+    if (last - first >= MaxBlocksPerRange) {
+        add_large();
+        return;
+    }
+    for (u64 block = first; block <= last; ++block) {
+        BlockHead* head = FindHead(range.resource, block, u32(access), true);
+        if (!head) {
+            add_large();
+            return;
+        }
+        bool contained = false;
+        for (u32 index = head->first; index && !contained; index = items[index].next) {
+            contained = items[index].start <= range.range_start &&
+                        items[index].end >= range.range_end;
+        }
+        if (contained) {
+            continue;
+        }
+        const u32 index = static_cast<u32>(items.size());
+        items.push_back({range.resource, range.range_start, range.range_end, head->first,
+                         u32(access)});
+        head->first = index;
+    }
+}
+
 bool BarrierTracker::FindRange(const AddressRange& range, Access access_type) const {
+    if (block_mode) {
+        const bool found = BlockFind(range, access_type);
+        if (check_mode) {
+            const u32 root_index = ComputeRootIndex(range, access_type);
+            const bool tree = FindNode(range, root_index) != 0;
+            static u32 prints = 0;
+            if (found != tree && prints++ < 50) {
+                std::printf("Barrier tracker check: %s range %#llx %#llx-%#llx: blocks %d, tree %d\n",
+                            access_type == Access::Write ? "write" : "read",
+                            (unsigned long long)range.resource,
+                            (unsigned long long)range.range_start,
+                            (unsigned long long)range.range_end, int(found), int(tree));
+            }
+            static u64 checks = 0;
+            if ((++checks & ((1u << 22) - 1)) == 0) {
+                std::printf("Barrier tracker check: %llu lookups compared, %u differed\n",
+                            (unsigned long long)checks, prints);
+            }
+        }
+        return found;
+    }
     u32 root_index = ComputeRootIndex(range, access_type);
     u32 node_index = FindNode(range, root_index);
     return node_index;
 }
 
 void BarrierTracker::InsertRange(const AddressRange& range, Access access_type) {
+    if (block_mode) {
+        BlockInsert(range, access_type);
+        if (!check_mode) {
+            return;
+        }
+    }
     // If we can just insert the node with no conflicts, we don't have to do anything.
     u32 root_index = ComputeRootIndex(range, access_type);
     u32 node_index = InsertNode(range, root_index);
@@ -82,6 +215,21 @@ void BarrierTracker::InsertRange(const AddressRange& range, Access access_type) 
 }
 
 void BarrierTracker::Clear() {
+    if (block_mode) {
+        if (++epoch == 0) {
+            // Wrapped: no slot may still carry the new epoch.
+            for (auto& head : heads) {
+                head.epoch = 0;
+            }
+            epoch = 1;
+        }
+        heads_used = 0;
+        items.resize(1);
+        large.clear();
+        if (!check_mode) {
+            return;
+        }
+    }
     root_mask_valid = 0;
     while (root_mask_subtree) {
         // Free subtrees if any, but keep the root node intact
