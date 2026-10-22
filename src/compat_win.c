@@ -82,7 +82,7 @@ static ssize_t positioned(int fd, void *buffer, size_t size, int64_t offset, int
             return -1;
         }
         done += n;
-        if (!n) break; /* end of file; a shorter count is not, the next call continues */
+        if (n < chunk) break;
     }
     SetFilePointerEx(h, saved, NULL, FILE_BEGIN);
     return (ssize_t)done;
