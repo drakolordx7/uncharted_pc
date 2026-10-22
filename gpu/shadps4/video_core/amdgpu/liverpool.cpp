@@ -603,14 +603,18 @@ void SignalComputeFence(const ComputeFence& fence) {
 
 void RunComputeReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
     const auto fence = *reinterpret_cast<const ComputeFence*>(data);
+    // Raycaster copies deferred before this packet land before its label shows (landing_gate.h),
+    // as for the graphics end-of-pipe fence.
+    const u64 landing_seq = VideoCore::LandingGate::Pending();
     rasterizer.ProcessDownloadImages();
     rasterizer.GetBufferCache().CheckStableBindings();
     rasterizer.CheckConstants();
     if (Vulkan::DrawPipe::OnStageB() && !BbToggle::Disabled(BbToggle::RecorderFences)) {
-        rasterizer.SignalAfterHostCopies([fence] { SignalComputeFence(fence); });
+        rasterizer.SignalAfterHostCopies([fence] { SignalComputeFence(fence); }, landing_seq);
     } else {
         rasterizer.WaitHostCopies();
         rasterizer.WaitDeferredSignals();
+        VideoCore::LandingGate::Wait(landing_seq);
         SignalComputeFence(fence);
     }
 }
@@ -778,6 +782,25 @@ bool Liverpool::PendingFenceValue(VAddr address, u32& value) {
         }
     }
     return false;
+}
+
+// The label of a compute fence handed to the recording thread (RunInOrder) is pending until it
+// runs: guest reads of it wait, and WAIT_REG_MEM sees the value it will have (as for the
+// graphics fences, NotePendingFences). Based on Mevlock's RELEASE_MEM task (ebb83d4).
+void Liverpool::NotePendingComputeFence(const PM4CmdReleaseMem& release) {
+    const auto data_sel = release.data_sel.Value();
+    const u32 bytes = data_sel == DataSelect::Data32Low ? 4u : 8u;
+    const VAddr address = release.Address<VAddr>();
+    while (!pending_fences.empty() && rasterizer->DrawPipeReached(pending_fences.front().position)) {
+        pending_fences.pop_front();
+    }
+    if (data_sel == DataSelect::Data32Low || data_sel == DataSelect::Data64) {
+        const u64 value = bytes == 4 ? release.DataDWord() : release.DataQWord();
+        pending_fences.push_back({address, value, bytes, rasterizer->DrawPipeHead()});
+    }
+    if (data_sel != DataSelect::None) {
+        rasterizer->NotePendingGpuWrite(address, bytes);
+    }
 }
 
 Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
@@ -2058,7 +2081,9 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 const auto* fence_packet = reinterpret_cast<const PM4CmdReleaseMem*>(header);
                 if (fence_packet->data_sel.Value() != DataSelect::GdsMemStore) {
                     const ComputeFence fence{*fence_packet, queue.pipe_id};
-                    rasterizer->RunInOrder(&RunComputeReleaseMem, &fence, sizeof(fence));
+                    if (rasterizer->RunInOrder(&RunComputeReleaseMem, &fence, sizeof(fence))) {
+                        NotePendingComputeFence(*fence_packet);
+                    }
                     break;
                 }
                 rasterizer->DrainDrawPipe(static_cast<u32>(opcode));
