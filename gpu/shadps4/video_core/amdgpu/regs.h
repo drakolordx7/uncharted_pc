@@ -4,6 +4,8 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <bitset>
 #include <cstring>
 #include <vector>
@@ -199,7 +201,42 @@ union Regs {
 struct RegDirty {
     static constexpr u32 BlockWords = 32;
     static constexpr u32 NumBlocks = Regs::NumRegs / BlockWords;
-    std::bitset<NumBlocks> blocks;
+    /// bbport: the dirty blocks in 64-bit words. The draw packet lists them for every draw
+    /// (~600k a second in U3's square); std::bitset has no portable way to find the set bits,
+    /// and libc++ tested all 1664 one by one.
+    struct Bits {
+        static constexpr u32 NumWords = (NumBlocks + 63) / 64;
+        std::array<u64, NumWords> words{};
+        void set(u32 block) {
+            words[block / 64] |= u64{1} << (block % 64);
+        }
+        bool test(u32 block) const {
+            return (words[block / 64] >> (block % 64)) & 1;
+        }
+        bool any() const {
+            for (const u64 word : words) {
+                if (word) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        void reset() {
+            words.fill(0);
+        }
+        static constexpr size_t size() {
+            return NumBlocks;
+        }
+        template <typename Func>
+        void ForEachSet(Func&& func) const {
+            for (u32 w = 0; w < NumWords; ++w) {
+                for (u64 word = words[w]; word; word &= word - 1) {
+                    func(w * 64 + u32(std::countr_zero(word)));
+                }
+            }
+        }
+    };
+    Bits blocks;
     bool reset = false; ///< ClearState: defaults, then only the blocks marked after it
 
     void Mark(u32 word, u32 count) {
@@ -232,13 +269,11 @@ struct RegDelta {
         reset = dirty.reset;
         blocks.clear();
         words.clear();
-        for (u32 block = 0; block < RegDirty::NumBlocks; ++block) {
-            if (dirty.blocks.test(block)) {
-                blocks.push_back(u16(block));
-                const u32* src = regs.reg_array.data() + block * RegDirty::BlockWords;
-                words.insert(words.end(), src, src + RegDirty::BlockWords);
-            }
-        }
+        dirty.blocks.ForEachSet([&](u32 block) {
+            blocks.push_back(u16(block));
+            const u32* src = regs.reg_array.data() + block * RegDirty::BlockWords;
+            words.insert(words.end(), src, src + RegDirty::BlockWords);
+        });
     }
     void Apply(Regs& regs) const {
         if (reset) {
