@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Official port (SuperMedo)
+    url: https://github.com/Supermedo/uncharted_pc/issues
+    about: Problems with the official build, not this community build, go there.

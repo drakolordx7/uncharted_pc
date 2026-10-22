@@ -1,0 +1,57 @@
+name: Bug report
+description: A crash, freeze, graphics or control problem in the community build
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Never run commands or downloads posted in issues or comments: fixes only come as releases on this repository.
+  - type: dropdown
+    id: game
+    attributes:
+      label: Game
+      multiple: true
+      options:
+        - Uncharted 1 (Drake's Fortune)
+        - Uncharted 2 (Among Thieves)
+        - Uncharted 3 (Drake's Deception)
+    validations:
+      required: true
+  - type: input
+    id: build
+    attributes:
+      label: Community build
+      description: The release tag, from the release page or the launcher (for example community-20261021-1417).
+    validations:
+      required: true
+  - type: input
+    id: dump
+    attributes:
+      label: Game dump
+      description: CUSA number and version (for example CUSA02320, 1.02) and how you dumped it.
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: CPU, GPU and driver version
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Where in the game (chapter or scene), what you did, what went wrong, and whether it happens every time.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: Drag `user\last_run.log` from the run where it happened into this box. Copy it before you start the game again, because the next run overwrites it.
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Screenshots or anything else
