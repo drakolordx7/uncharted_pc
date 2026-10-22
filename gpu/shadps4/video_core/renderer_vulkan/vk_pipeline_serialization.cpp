@@ -18,6 +18,7 @@
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
+#include "shader_recompiler/ir/passes/ir_passes.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
@@ -25,9 +26,15 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 12u; // bbport: LDS bounds checks, scalar EXEC scopes and GCN NaN semantics (shadPS4 PR #5257); 10: motion shaders hold address stand-ins
+static constexpr u32 ShaderBinaryVersion = 13u; // bbport: LDS barriers for workgroups larger than one wave; 12: LDS bounds checks, scalar EXEC scopes and GCN NaN semantics (shadPS4 PR #5257); 10: motion shaders hold address stand-ins
 static constexpr u32 ShaderMetaVersion = 9u; // bbport: checksum of the shader binary; 8: RuntimeInfo::Properties::dx10_clamp; 7: ImageResource::needs_native
 static constexpr u32 PipelineKeyVersion = 6u; // bbport: Info layout (ImageResource::needs_native)
+// bbport: translator options that change the shaders it produces are part of the stored version,
+// so switching one retranslates the shaders instead of reusing the cached ones.
+static u32 TranslatedBinaryVersion() {
+    // BB_WAVE_LDS_BARRIERS=0 changes the compute shaders of workgroups larger than one wave.
+    return ShaderBinaryVersion | (Shader::WaveLdsBarriers() ? 0u : 0x40000u);
+}
 } // namespace Serialization
 
 namespace Vulkan {
@@ -98,7 +105,7 @@ void RegisterShaderMeta(const Shader::Info& info,
     Serialization::Writer meta{ar};
 
     meta.Write(Serialization::ShaderMetaVersion);
-    meta.Write(Serialization::ShaderBinaryVersion);
+    meta.Write(Serialization::TranslatedBinaryVersion());
 
     meta.Write(perm_hash);
     meta.Write(perm_idx);
@@ -137,7 +144,7 @@ bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
 
     u32 binary_version{};
     meta.Read(binary_version);
-    if (binary_version != Serialization::ShaderBinaryVersion) {
+    if (binary_version != Serialization::TranslatedBinaryVersion()) {
         return false;
     }
 
