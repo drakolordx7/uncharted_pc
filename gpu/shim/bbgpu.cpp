@@ -250,6 +250,12 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
         std::printf("Window closed (close button, Alt+F4 or system quit request)\n");
         std::fflush(stdout);
         Vulkan::FlushPipelineCacheForExit();
+#ifdef _WIN32
+        // bbport: _Exit is ExitProcess on Windows, which still runs every DLL's detach code with
+        // the other threads already gone: libsrt's (through FFmpeg) joined a thread through a
+        // winpthread lock one of them held, and the process never ended (exit hang, lldb).
+        TerminateProcess(GetCurrentProcess(), 0);
+#endif
         std::_Exit(0);
     });
     g_window_thread.detach();
