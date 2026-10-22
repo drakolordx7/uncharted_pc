@@ -372,7 +372,10 @@ static int split_at(uintptr_t a) {
     if (i==vma_count || vmas[i].start>=a) return 0;
     Vma right=vmas[i];
     right.start=a;
-    if (right.kind==KIND_DIRECT) right.phys+=a-vmas[i].start;
+    /* Flexible mappings are backed by the same pool and keep a phys offset too: the right half has
+     * to move with its start, or write_backing writes into the left half's page and drop_range
+     * frees pages the left half still uses (#497). */
+    if (right.kind==KIND_DIRECT || right.kind==KIND_FLEXIBLE) right.phys+=a-vmas[i].start;
     vmas[i].end=a;
     return vma_insert(i+1,right);
 }
