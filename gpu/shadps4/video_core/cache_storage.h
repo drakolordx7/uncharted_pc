@@ -40,6 +40,8 @@ public:
     void FinishPreload();
     /// bbport: removes every cached blob (an incompatible cache is rebuilt, not ignored).
     void Clear();
+    /// bbport: removes one stored blob (after the writes queued before it).
+    void Remove(BlobType type, const std::string& name);
 
     bool Save(BlobType type, const std::string& name, std::vector<u8>&& data);
     bool Save(BlobType type, const std::string& name, std::vector<u32>&& data);

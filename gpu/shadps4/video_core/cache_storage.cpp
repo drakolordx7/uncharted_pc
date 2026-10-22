@@ -207,8 +207,22 @@ bool WriteVector(const BlobType type, std::filesystem::path&& path_, std::vector
                         return;
                     }
                 }
+                // bbport: Windows refuses to replace a file another thread has open (the preload
+                // reads it): retry briefly instead of keeping the old file beside the new one of
+                // the shader's other half (the meta checksum catches a pair that still differs).
                 std::error_code error;
-                std::filesystem::rename(temp, path, error);
+                for (int attempt = 0; attempt < 20; ++attempt) {
+                    std::filesystem::rename(temp, path, error);
+                    if (!error) {
+                        break;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+                if (error) {
+                    LOG_WARNING(Render, "Cache file {} not replaced: {}", path.string(),
+                                error.message());
+                    std::filesystem::remove(temp, error);
+                }
             }
         }};
         std::scoped_lock lock{m_request};
@@ -360,6 +374,25 @@ void DataBase::Clear() {
         }
     }
     LOG_WARNING(Render, "Pipeline cache cleared ({} files): it is rebuilt for this build", removed);
+}
+
+void DataBase::Remove(BlobType type, const std::string& name) {
+    if (!opened || EmulatorSettings.IsPipelineCacheArchived()) {
+        return;
+    }
+    auto path = cache_path / name;
+    path.replace_extension(GetBlobFileExtension(type));
+    {
+        auto request = std::packaged_task<void()>{[path]() {
+            std::error_code error;
+            std::filesystem::remove(path, error);
+        }};
+        std::scoped_lock lock{m_request};
+        req_queue.emplace(std::move(request));
+    }
+    std::scoped_lock lk{submit_mutex};
+    ++num_requests;
+    request_cv.notify_one();
 }
 
 void DataBase::FinishPreload() {

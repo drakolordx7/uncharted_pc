@@ -10,6 +10,7 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include <xxhash.h>
 #include "bbport_threads.h"
 #include "common/serdes.h"
 #include "common/thread.h"
@@ -25,7 +26,7 @@
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
 static constexpr u32 ShaderBinaryVersion = 12u; // bbport: LDS bounds checks, scalar EXEC scopes and GCN NaN semantics (shadPS4 PR #5257); 10: motion shaders hold address stand-ins
-static constexpr u32 ShaderMetaVersion = 8u; // bbport: RuntimeInfo::Properties::dx10_clamp; 7: ImageResource::needs_native
+static constexpr u32 ShaderMetaVersion = 9u; // bbport: checksum of the shader binary; 8: RuntimeInfo::Properties::dx10_clamp; 7: ImageResource::needs_native
 static constexpr u32 PipelineKeyVersion = 6u; // bbport: Info layout (ImageResource::needs_native)
 } // namespace Serialization
 
@@ -69,6 +70,22 @@ void RegisterPipelineData(const GraphicsPipelineKey& key, u64 hash,
                                        fmt::format("g_{:#018x}", hash), ar.TakeOff());
 }
 
+// bbport: a shader is cached as two files, its meta and its binary, saved one after the other. If
+// Windows refuses to replace one of them (another thread reads it), the pair comes from two
+// translations and the shader draws with another version's code (BilalReloaded's port saw a
+// museum floor drawn flat red from one such pair). The meta keeps a checksum of the binary
+// saved just before it on the same thread; a pair that doesn't match is translated again.
+struct SavedBinary {
+    u64 pgm_hash;
+    size_t perm_idx;
+    u64 checksum;
+};
+static thread_local SavedBinary t_saved_binary{};
+
+static u64 BinaryChecksum(const std::vector<u32>& spv) {
+    return XXH3_64bits(spv.data(), spv.size() * sizeof(u32)) | 1; // 0: no binary saved
+}
+
 void RegisterShaderMeta(const Shader::Info& info,
                         const std::optional<Shader::Gcn::FetchShaderData>& fetch_shader_data,
                         const Shader::StageSpecialization& spec, size_t perm_hash,
@@ -85,6 +102,8 @@ void RegisterShaderMeta(const Shader::Info& info,
 
     meta.Write(perm_hash);
     meta.Write(perm_idx);
+    const bool same = t_saved_binary.pgm_hash == info.pgm_hash && t_saved_binary.perm_idx == perm_idx;
+    meta.Write(same ? t_saved_binary.checksum : u64{0});
 
     spec.Serialize(ar);
     info.Serialize(ar);
@@ -98,6 +117,7 @@ void RegisterShaderBinary(std::vector<u32>&& spv, u64 pgm_hash, size_t perm_idx)
         return;
     }
 
+    t_saved_binary = {pgm_hash, perm_idx, BinaryChecksum(spv)};
     Storage::DataBase::Instance().Save(Storage::BlobType::ShaderBinary,
                                        fmt::format("{:#018x}_{}", pgm_hash, perm_idx),
                                        std::move(spv));
@@ -105,7 +125,8 @@ void RegisterShaderBinary(std::vector<u32>&& spv, u64 pgm_hash, size_t perm_idx)
 
 bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
                     std::optional<Shader::Gcn::FetchShaderData>& fetch_shader_data,
-                    Shader::StageSpecialization& spec, size_t& perm_idx) {
+                    Shader::StageSpecialization& spec, size_t& perm_idx,
+                    u64* binary_checksum = nullptr) {
     Serialization::Reader meta{ar};
 
     u32 meta_version{};
@@ -123,6 +144,11 @@ bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
     u64 perm_hash_ar{};
     meta.Read(perm_hash_ar);
     meta.Read(perm_idx);
+    u64 checksum{};
+    meta.Read(checksum);
+    if (binary_checksum) {
+        *binary_checksum = checksum;
+    }
 
     spec.Deserialize(ar);
     info.Deserialize(ar);
@@ -386,6 +412,7 @@ void PipelineCache::WarmUpThread() {
     std::ranges::sort(stage_hashes);
     stage_hashes.erase(std::unique(stage_hashes.begin(), stage_hashes.end()), stage_hashes.end());
     std::vector<LoadedStage> stages(stage_hashes.size());
+    std::atomic<u32> mismatched_binaries{0};
     ParallelFor(stages.size(), threads, [&](size_t i) {
         auto& stage = stages[i];
         std::vector<u8> meta_blob;
@@ -398,7 +425,9 @@ void PipelineCache::WarmUpThread() {
         stage.program = std::make_unique<Program>();
         stage.spec.info = &stage.program->info;
         std::optional<Shader::Gcn::FetchShaderData> unused;
-        if (!LoadShaderMeta(meta_ar, stage.program->info, unused, stage.spec, stage.perm_idx) ||
+        u64 checksum = 0;
+        if (!LoadShaderMeta(meta_ar, stage.program->info, unused, stage.spec, stage.perm_idx,
+                            &checksum) ||
             Shader::Backend::SPIRV::IsForcedShader(stage.program->info.pgm_hash)) {
             stage.program.reset();
             return;
@@ -416,6 +445,15 @@ void PipelineCache::WarmUpThread() {
         db.Load(Storage::BlobType::ShaderBinary,
                 fmt::format("{:#018x}_{}", info.pgm_hash, stage.perm_idx), spv);
         if (spv.empty()) {
+            return;
+        }
+        if (BinaryChecksum(spv) != checksum) {
+            // Not this meta's binary (or none saved with it): both files go, and the shader is
+            // translated again when first used (and saved as a new pair).
+            mismatched_binaries.fetch_add(1, std::memory_order_relaxed);
+            db.Remove(Storage::BlobType::ShaderMeta, fmt::format("{:#018x}", stage_hashes[i]));
+            db.Remove(Storage::BlobType::ShaderBinary,
+                      fmt::format("{:#018x}_{}", info.pgm_hash, stage.perm_idx));
             return;
         }
         stage.module = CompileSPV(spv, device);
@@ -568,6 +606,10 @@ void PipelineCache::WarmUpThread() {
                 num_pipelines.load(), num_total_pipelines, u32(stages.size()), threads, elapsed_ms(),
                 t_keys, t_shaders - t_keys, t_programs - t_shaders, elapsed_ms() - t_programs,
                 t_ready);
+    if (const u32 n = mismatched_binaries.load()) {
+        std::printf("Pipeline cache: %u shader binaries did not match their meta: removed, "
+                    "translated again when used\n", n);
+    }
     // The driver's cache gets the entries this preload had to compile.
     if (driver_cache_loaded_size != DriverCacheSize()) {
         driver_cache_dirty.fetch_add(1);
