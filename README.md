@@ -66,6 +66,15 @@ official repository; the link goes to it.
 
 - 5.1 and 7.1 surround: [#392](https://github.com/Supermedo/uncharted_pc/pull/392)
 
+### From other forks
+
+- Itemzflow dumps (already decrypted executables) are accepted, the save mount limit no longer fails silently, a memory mapping split bug is fixed, and the EU CUSA02344 1.02 red-zone tables are added: currantsforeyes (the first three also as [#520](https://github.com/Supermedo/uncharted_pc/pull/520), [#522](https://github.com/Supermedo/uncharted_pc/pull/522), [#521](https://github.com/Supermedo/uncharted_pc/pull/521))
+- A display flip that arrives before its label no longer stops the game, a missing CE task no longer crashes the GPU thread, and FSR 3.1 no longer uses protected memory (noise on AMD Phoenix): from iannitram's fork
+- FSR 3 frame generation no longer leaks video memory every frame, and conditional GPU commands test the whole condition: Mevlock
+- Numpad keys are saved as keypad keys in the launcher: eduardoghi ([#473](https://github.com/Supermedo/uncharted_pc/pull/473))
+- The launcher reports why the game stopped and when input settings or the shader cache can't be written: poncho-ajmv
+- Dark title bar for the launcher on Windows: soni424
+
 Each release lists its exact changes in the [release notes](https://github.com/drakolordx7/uncharted_pc/releases).
 
 ## Reporting problems
