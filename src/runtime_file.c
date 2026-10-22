@@ -273,7 +273,7 @@ static void current_copy(char *path,size_t size,int write) {
     pthread_mutex_unlock(&lock);
 }
 /* Returns the descriptor of the copy, or -(errno). */
-static int open_for_commit(const char *path,const char *source,int flags,int mode,char **commit,char **temp) {
+static int open_for_commit(const char *path,const char *source,int flags,int mode,char **commit,char **temp,int *fresh) {
     int hf=host_flags(flags)&~O_DIRECTORY;
 #ifdef _WIN32
     (void)mode;
@@ -305,6 +305,7 @@ static int open_for_commit(const char *path,const char *source,int flags,int mod
         return -e;
     }
     *commit=c; *temp=t;
+    *fresh=!exists || (hf&O_TRUNC); /* created or emptied: committed even if nothing is written */
     return host;
 }
 static int commit_file(const File *f) {
@@ -358,6 +359,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
         flags&=~0x200;
     }
     char *commit=NULL, *temp=NULL, current[1024];
+    int fresh=0;
     snprintf(current,sizeof(current),"%s",path);
 #ifdef _WIN32
     /* Windows cannot open a directory as a CRT descriptor: directories are listings only. */
@@ -374,7 +376,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     } else {
         if (save_path(guest)) current_copy(current,sizeof(current),0);
         if (save_path(guest) && (flags&3)) {
-            host=open_for_commit(path,current,flags,mode,&commit,&temp);
+            host=open_for_commit(path,current,flags,mode,&commit,&temp,&fresh);
             if (host<0) { errno=-host; host=-1; }
         } else host=open(current,host_flags(flags)&~O_DIRECTORY,_S_IREAD|_S_IWRITE);
         if (save_trace() && save_path(guest))
@@ -390,7 +392,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     if (save_path(guest)) current_copy(current,sizeof(current),0);
     int host;
     if (save_path(guest) && (flags&3)) {
-        host=open_for_commit(path,current,flags,mode,&commit,&temp);
+        host=open_for_commit(path,current,flags,mode,&commit,&temp,&fresh);
         if (host<0) { errno=-host; host=-1; }
     } else host=open(current,host_flags(flags),mode ? mode : 0644);
     if (save_trace() && save_path(guest))
@@ -412,7 +414,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
         if (temp) unlink(temp);
         free(commit); free(temp); return -EMFILE;
     }
-    files[fd]=(File){.used=1,.host=host,.dir=dir,.commit=commit,.temp=temp};
+    files[fd]=(File){.used=1,.host=host,.dirty=fresh,.dir=dir,.commit=commit,.temp=temp};
     snprintf(files[fd].path,sizeof(files[fd].path),"%s",guest);
     ++opens;
     pthread_mutex_unlock(&lock);
