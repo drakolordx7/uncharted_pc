@@ -23,7 +23,12 @@ in the download.
 | [d4rksp4rt4n](https://github.com/d4rksp4rt4n) | Uncharted 1 crash at `0x63f5d0` on Intel 12th gen and later, guest stores below the red zone ([#403](https://github.com/Supermedo/uncharted_pc/pull/403)) |
 | [Umar-Qayyum-dev](https://github.com/Umar-Qayyum-dev) | Keyboard and mouse button prompts, keyboard layouts and custom keybinding ([#420](https://github.com/Supermedo/uncharted_pc/pull/420)) |
 | [kuraeow](https://github.com/kuraeow) | Idle job workers sleep, which lowers CPU load on 4 and 6 core processors ([#346](https://github.com/Supermedo/uncharted_pc/pull/346)) |
-| [iannitram](https://github.com/iannitram) | The nested indirect buffer leak fix, backported from shadPS4 ([#387](https://github.com/Supermedo/uncharted_pc/pull/387)), which matches our #445 |
+| [iannitram](https://github.com/iannitram) | The nested indirect buffer leak fix, backported from shadPS4 ([#387](https://github.com/Supermedo/uncharted_pc/pull/387)), which matches our #445; early flip IRQ, missing CE task guard, FSR 3.1 protected memory, FSR patch line endings |
+| [currantsforeyes](https://github.com/currantsforeyes) | Itemzflow plain ELF support, save mount limit, flexible mapping split, EU CUSA02344 red-zone tables, window title |
+| [Mevlock](https://github.com/Mevlock) | FSR 3 frame generation video memory leak, COND_EXEC condition width |
+| [eduardoghi](https://github.com/eduardoghi) | Numpad bindings saved as keypad keys ([#473](https://github.com/Supermedo/uncharted_pc/pull/473)) |
+| [poncho-ajmv](https://github.com/poncho-ajmv) | Launcher error reporting: crash reason, input settings and shader cache failures |
+| [soni424](https://github.com/soni424) | Dark launcher title bar |
 | [drakolordx7](https://github.com/drakolordx7) | Mouse hooks by pattern for 1.02, the slot-table crash, mesh raycaster copy, EOP tick matcher, address range retry, draw-prep walker, shader stutter, low VRAM, per-GPU caches, resolution and ultrawide, surround, XeSS, Xbox prompts, trophies, launcher game switches, the memory leak fix, and this fork |
 
 ## Research, testing and reports
