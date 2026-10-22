@@ -60,6 +60,7 @@ official repository; the link goes to it.
 - Keyboard and mouse button prompts, layouts and custom keybinding: [#420](https://github.com/Supermedo/uncharted_pc/pull/420) by Umar-Qayyum-dev
 - Xbox button prompts for Xbox and other controllers: [#469](https://github.com/Supermedo/uncharted_pc/pull/469)
 - Trophy notices in the game and a Trophies page in the launcher: [#472](https://github.com/Supermedo/uncharted_pc/pull/472)
+- A 30 FPS frame rate choice (for frame generation on top, or weaker PCs)
 - `--u1`, `--u2`, `--u3` start a game straight from a shortcut: [#399](https://github.com/Supermedo/uncharted_pc/pull/399)
 
 ### Audio
