@@ -53,7 +53,10 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
     // bbport: below ~5 GB the fixed floors above (pressure 1.5 GB, critical 3 GB) are most of the
     // card: the collector worked on images idle for 80-160 submissions while the whole process
     // was past the card's budget. GarbageCollectImages sizes its marks from the live budget.
-    tight_budget = !Vulkan::Vram::Legacy() && !instance.IsIntegrated() && device_local_memory < static_cast<s64>(5_GB);
+    // The same holds up to 8 GB cards: the formula below keeps 60% of the budget (4.8 GB at most)
+    // free, so an 8 GB card (budget ~6.2 GB) started evicting at 2.5 GB used, with 60% unused.
+    tight_budget = !Vulkan::Vram::Legacy() && !instance.IsIntegrated() &&
+                   device_local_memory < static_cast<s64>(8_GB);
     const s64 min_spacing_expected = device_local_memory - 1_GB;
     const s64 min_spacing_critical = device_local_memory - 512_MB;
     const s64 mem_threshold = std::min<s64>(device_local_memory, TARGET_GC_THRESHOLD);
@@ -1205,9 +1208,9 @@ void TextureCache::GarbageCollectImages() {
     if (instance.CanReportMemoryUsage()) {
         u64 budget_now = 0;
         instance.QueryMemory(total_used_memory, budget_now);
-        // A card (or what other programs leave of it) under 5.5 GB works from its live budget.
+        // A card (or what other programs leave of it) under 8 GB works from its live budget.
         tight_budget = !Vulkan::Vram::Legacy() && !instance.IsIntegrated() && budget_now != 0 &&
-                       budget_now < 5632_MB;
+                       budget_now < 8_GB;
         // bbport: images deleted but not yet destroyed (the GPU may still read them) are already
         // gone as far as the decisions below go; counting them evicted more and more.
         const u64 pending =

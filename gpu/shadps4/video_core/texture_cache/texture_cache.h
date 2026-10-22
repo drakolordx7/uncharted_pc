@@ -419,7 +419,7 @@ private:
     std::unordered_set<ImageId> download_images;
     std::unordered_set<ImageId> small_download_images; ///< bbport: ReadbackSmallTargets
     u64 total_used_memory = 0;
-    bool tight_budget = false;                  ///< bbport: card under ~5 GB
+    bool tight_budget = false;                  ///< bbport: card under 8 GB (budget-relative marks)
     std::atomic<u64> pending_free_bytes{0};     ///< bbport: deleted, not yet destroyed
     u64 registered_image_bytes = 0; ///< bbport: guest bytes of registered images (diagnostics)
     u64 gc_evictions = 0, gc_downloads = 0; ///< bbport: pressure report
