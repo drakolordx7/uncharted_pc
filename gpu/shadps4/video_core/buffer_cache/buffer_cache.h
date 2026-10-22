@@ -5,6 +5,7 @@
 
 #include "bbport_copy.h"
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -82,6 +83,12 @@ public:
     /// Retrieves the stream buffer.
     StreamBuffer& GetStreamBuffer() noexcept {
         return stream_buffer;
+    }
+
+    /// bbport: guest memory may have changed (a write in the command stream, a CPU write the
+    /// page tracking saw, a wait for the CPU): read-only ranges are streamed again.
+    void ForgetStreamCopies() noexcept {
+        stream_memo_epoch.fetch_add(1, std::memory_order_relaxed);
     }
 
     /// Returns minimum granularity of a sparse memory bind.
@@ -211,6 +218,20 @@ private:
     std::unique_ptr<MemoryTracker> memory_tracker;
 
     StreamBuffer stream_buffer;
+    /// bbport: read-only ranges streamed into the command buffer being recorded (ObtainBuffer).
+    /// U2's skinning dispatches (~1400 a frame) bind the same mesh data over and over: each bind
+    /// copied it again. An entry is reused while the tick (command buffer), the stream buffer's
+    /// lap and the epoch (ForgetStreamCopies) are unchanged.
+    struct StreamMemo {
+        VAddr address;
+        u32 size;
+        u64 offset;
+        u64 tick;
+        u64 lap;
+        u64 epoch;
+    };
+    std::array<StreamMemo, 256> stream_memo{};
+    std::atomic<u64> stream_memo_epoch{1};
     Buffer gds_buffer;
     /// bbport: the GPU-written ranges, read by the GPU command thread (resource table walks,
     /// SyncSrtReads) while the draw recording thread changes them (bindings that write, and
