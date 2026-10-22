@@ -465,8 +465,14 @@ private:
     struct MetaDataInfo {
         MetaType type;
         s32 clear_mask = -1;
+        /// bbport: the depth image that last bound this HTILE surface; only it erases the record
+        /// when deleted (an older image over the same memory doesn't).
+        ImageId owner{};
     };
     tsl::robin_map<VAddr, MetaDataInfo> surface_metas;
+    /// bbport: most layers seen for a depth array at an address (PadDepthLayers).
+    tsl::robin_map<VAddr, u32> depth_array_layers;
+    void PadDepthLayers(ImageInfo& info);
 };
 
 } // namespace VideoCore
