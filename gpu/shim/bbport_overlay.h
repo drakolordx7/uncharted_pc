@@ -51,6 +51,9 @@ void OpenControls();
 /// The game's language for the bindings window: 0 English, 1 French, 2 Spanish, 3 Portuguese.
 void SetLanguage(int language);
 bool ControlsChanged();
+/// U2: the Commandes menu has no row for the bindings window, so a button is drawn next to it. The rectangle is in the game's
+/// 1280x720 menu space (letterboxed like the game); `hot` is true while the cursor is over it.
+void SetControlsHint(bool show, bool hot, float x, float y, float w, float h);
 
 /// Window thread: the game's text dialog (sceImeDialog). Shown as a box on screen until
 /// `active` is false; typing goes to the window (sdl_window), the box only displays it.

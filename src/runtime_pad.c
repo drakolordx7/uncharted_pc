@@ -2015,6 +2015,236 @@ static void __attribute__((ms_abi)) u2_text_probe(uint64_t unused0, uint64_t unu
     }
 }
 static const unsigned char u2_text_probe_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56};
+/* U2 text lookup probe (BB_MOUSE_DEBUG): the game's text function at 0xcddc60 (table, id) -> the string; every new id it is asked for is
+ * logged with its text, to find the ids of the rows of a menu (the Commandes menu: "Rétablir les paramètres par défaut"...) and so the code
+ * that builds them (a row is made with its id as an immediate). */
+typedef const char *(__attribute__((sysv_abi)) *u2_text_fn)(uint64_t, uint64_t);
+/* The "Commandes" row of the Commandes menu (it opens the picture of the controller; text id 0xdd40dc7b, its own: the title, "COMMANDES", and
+ * the Options entry have other ids). The port gives it the label "Touches clavier / souris" and its own action (u2_keys_label_patch,
+ * u2_menu_buttons): the table where the game looks the text up is the one this hook sees asked for that id. */
+#define U2_KEYS_TEXT_ID 0xdd40dc7bu
+#define U2_KEYS_HOST_TEXT_ID 0x62501513u
+/* The screen of the controller's picture (Options > Commandes > "Commandes") draws its labels through this same lookup, every frame: the
+ * time of the last one of a few of them says the screen is up. It has no menu rows, so the mouse code would not know it is a menu. */
+static volatile uint64_t u2_layout_us;
+static volatile uint64_t u2_keys_tables[8];   /* the text tables seen asked for it (a table asks its parent first: all of them are patched) */
+static void __attribute__((ms_abi)) u2_text_lookup_probe(uint64_t table, uint64_t id, uint64_t image, uint64_t r14) {
+    (void)r14;
+    {
+        const uint32_t k=(uint32_t)id;   /* "Réinitialiser la caméra", "Mode photo", "Changer d'épaule en visant": only that picture has them */
+        if (k==0x4158a30du || k==0x9ef63173u || k==0x36fc7ed5u) u2_layout_us=now_us();
+    }
+    if ((uint32_t)id==U2_KEYS_TEXT_ID) {
+        for (int i=0;i<8;++i) { if (u2_keys_tables[i]==table) break; if (!u2_keys_tables[i]) { u2_keys_tables[i]=table; break; } }
+    }
+    static uint32_t seen[8192]; static int seen_count, busy;
+    if (busy || !mouse_debug() || image<0x10000) return;
+    if (!u2_image) u2_image=image;
+    const uint32_t id32=(uint32_t)id;
+    for (int i=0;i<seen_count;++i) if (seen[i]==id32) return;
+    if (seen_count>=8192) return;
+    seen[seen_count++]=id32;
+    busy=1;
+    const char *s=((u2_text_fn)(uintptr_t)(image+0xcddc60))(table,id32);
+    char buf[72]={0};
+    if (s && (uint64_t)(uintptr_t)s>0x10000) { size_t n=sizeof(buf)-1; while (n>0 && !safe_read(buf,(uint64_t)(uintptr_t)s,n)) --n; buf[n]=0; for (char *p=buf;*p;++p) if ((unsigned char)*p<32) *p=' '; }
+    uint64_t ret=0;   /* the code that asked (at the hook the return address is on top of the stack) */
+    safe_read(&ret,guest_callback_rsp,8);
+    printf("Mouse: U2 text id %08x table %#llx caller image+%#llx \"%s\"\n",id32,(unsigned long long)table,(unsigned long long)(ret-image),buf);
+    if (id32==U2_KEYS_TEXT_ID || id32==0xb69a538au || id32==0xc9b64fcdu) {   /* the stack, for the chain of callers: words that point into the code */
+        printf("Mouse: U2 stack for %08x:",id32);
+        for (int k=0;k<96;++k) {
+            uint64_t w=0;
+            if (safe_read(&w,guest_callback_rsp+8u*(uint64_t)k,8) && w>image+0x1000 && w<image+0xfe44b0) printf(" +%d:%#llx",k*8,(unsigned long long)(w-image));
+        }
+        printf("\n");
+    }
+    busy=0;
+}
+/* U2's menu builder (0x5c53a0, BB_MOUSE_DEBUG): it builds a menu from a definition the game loads as data (func 0xa15e70 gives it by the
+ * hash 0x74ffceeb: {count, array of 0x70-byte records}, each record with its own list of the same shape at +0x38). Logged here, to see how a
+ * row is described (and so how one more could be given). */
+typedef uint64_t (__attribute__((sysv_abi)) *u2_get_data_fn)(uint64_t);
+__attribute__((unused)) static void u2_dump_records(uint64_t p, int depth) {
+    int32_t count=0; uint64_t arr=0;
+    {
+        uint8_t head[0x30]={0};
+        const int got=safe_read(head,p,sizeof(head));
+        printf("Mouse: U2 menudef %*shead %#llx (read %d):",depth*2,"",(unsigned long long)p,got);
+        for (int b=0;b<(int)sizeof(head);++b) printf(" %02x",head[b]);
+        printf("\n");
+    }
+    if (!safe_read(&count,p,4) || !safe_read(&arr,p+8,8) || count<=0 || count>400 || arr<0x10000) return;
+    for (int i=0;i<count;++i) {
+        uint8_t rec[0x70];
+        if (!safe_read(rec,arr+0x70u*(uint64_t)i,0x70)) break;
+        printf("Mouse: U2 menudef %*s[%d] at %#llx:",depth*2,"",i,(unsigned long long)(arr+0x70u*(uint64_t)i));
+        for (int b=0;b<0x70;++b) printf(" %02x",rec[b]);
+        printf("\n");
+        uint64_t sub=0;
+        memcpy(&sub,rec+0x38,8);
+        if (depth<2 && sub>0x10000) u2_dump_records(sub,depth+1);
+    }
+}
+/* a list head: {int count, 0, ptr to the array of 0x70-byte records} */
+static int u2_is_list_head(uint64_t p) {
+    int32_t count=0, zero=-1; uint64_t arr=0;
+    return p>0x10000000ull && safe_read(&count,p,4) && safe_read(&zero,p+4,4) && safe_read(&arr,p+8,8) && count>0 && count<=64 && zero==0 && arr>0x10000000ull && arr<0x1400000000ull;
+}
+static int u2_tree_lines;
+static void u2_dump_tree(uint64_t p, int depth) {
+    int32_t count=0; uint64_t arr=0;
+    safe_read(&count,p,4); safe_read(&arr,p+8,8);
+    for (int i=0;i<count && u2_tree_lines<400;++i) {
+        uint8_t rec[0x70];
+        const uint64_t at=arr+0x70u*(uint64_t)i;
+        if (!safe_read(rec,at,0x70)) break;
+        ++u2_tree_lines;
+        printf("Mouse: U2 tree %*s[%d] %#llx:",depth*2,"",i,(unsigned long long)at);
+        for (int b=0;b<0x70;++b) printf(" %02x",rec[b]);
+        printf("\n");
+        if (depth<6) for (int off=0;off<=0x68;off+=8) {
+            uint64_t q=0; memcpy(&q,rec+off,8);
+            if (u2_is_list_head(q)) { printf("Mouse: U2 tree %*s  -> list at +%#x\n",depth*2,"",off); u2_dump_tree(q,depth+1); }
+            else if (q>0x1000000000ull && q<0x1400000000ull) {   /* some other pointer: what it points at, as bytes and as text */
+                uint8_t t[64];
+                if (safe_read(t,q,sizeof(t))) {
+                    printf("Mouse: U2 tree %*s  -> +%#x = %#llx:",depth*2,"",off,(unsigned long long)q);
+                    for (int b=0;b<64;++b) printf(" %02x",t[b]);
+                    printf("  \"");
+                    for (int b=0;b<64;++b) printf("%c",t[b]>=32 && t[b]<127 ? t[b] : '.');
+                    printf("\"\n");
+                }
+            }
+        }
+    }
+}
+/* every record of the definition (whole tree) that holds the text id of the "Commandes" row or of "Rétablir" in one of its 4-byte words:
+ * where they live (the list they are in, its name, the record bytes) says where a row of ours could be added */
+static int u2_find_lines;
+static void u2_find_ids(uint64_t list, int depth, const char *owner) {
+    int32_t count=0; uint64_t arr=0;
+    if (depth>8 || !safe_read(&count,list,4) || !safe_read(&arr,list+8,8) || count<=0 || count>400) return;
+    char name[40]={0};
+    if (!safe_read(name,list+0x14,32) || name[0]<'A' || name[0]>'Z') snprintf(name,sizeof(name),"%s",owner);
+    for (int i=0;i<count;++i) {
+        uint8_t rec[0x70];
+        const uint64_t at=arr+0x70u*(uint64_t)i;
+        if (!safe_read(rec,at,0x70)) break;
+        for (int off=0;off<=0x6c;off+=4) {
+            uint32_t w; memcpy(&w,rec+off,4);
+            if ((w==U2_KEYS_TEXT_ID || w==0xb69a538au) && u2_find_lines<60) {
+                ++u2_find_lines;
+                printf("Mouse: U2 find %08x depth %d list %#llx (%s) head count %d record %d at %#llx +%#x:",w,depth,(unsigned long long)list,name,count,i,(unsigned long long)at,off);
+                for (int b=0;b<0x70;++b) printf(" %02x",rec[b]);
+                printf("\n");
+            }
+        }
+        for (int off=0;off<=0x68;off+=8) {
+            uint64_t q; memcpy(&q,rec+off,8);
+            if (u2_is_list_head(q)) u2_find_ids(q,depth+1,name);
+        }
+    }
+}
+/* A row of ours in the Commandes menu: the builder (0x5c53a0) makes every menu from the definition (func 0xa15e70, hash 0x74ffceeb), one
+ * 0x70-byte record per row, and the page PAGE_CONTROLLER_LAYOUT is that menu (aiming, sensitivity... then the "Commandes" row, text
+ * id dd40dc7b, then "Rétablir"). At the entry of the builder a copy of that array with one more record is put in place: a clone of the
+ * "Commandes" record, with an id of its own and the text id 0x62501513, which carries the label (u2_keys_label_patch). The clone sits right
+ * after "Commandes". Off with BB_U2_ROW_INSERT=0. Records are never freed by the game (it keeps pointers to them). */
+static volatile int u2_row_inserted;
+#define U2_ROW_NEW_ID 0x62501514u
+static void *u2_def_alloc(size_t size, uint64_t near_to) {
+#ifdef _WIN32
+    /* the game's own pointers are all below 2^40: the new array is put in the same range, close to the old one */
+    (void)near_to;
+    /* the emulator owns the range around the definition: the free regions below 2^40 are walked, the first one big enough is taken */
+    MEMORY_BASIC_INFORMATION mbi;
+    for (uintptr_t addr=0x100000000ull;addr<0x10000000000ull && VirtualQuery((LPCVOID)addr,&mbi,sizeof(mbi));) {
+        const uintptr_t base=(uintptr_t)mbi.BaseAddress, end=base+mbi.RegionSize;
+        if (mbi.State==MEM_FREE) {
+            const uintptr_t at=(base+0xffffu)&~(uintptr_t)0xffffu;
+            if (at+size+0x10000u<=end) {
+                void *p=VirtualAlloc((LPVOID)at,size,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
+                if (p) return p;
+            }
+        }
+        addr=end;
+    }
+    return VirtualAlloc(NULL,size,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
+#else
+    (void)near_to;
+    return malloc(size);
+#endif
+}
+static void u2_menu_def_patch(uint64_t image) {
+    static int enabled=-1, tries;
+    if (enabled<0) { const char *e=getenv("BB_U2_ROW_INSERT"); enabled=!(e && e[0]=='0'); }
+    if (!enabled || tries>=40) return;
+    const uint64_t def=((u2_get_data_fn)(uintptr_t)(image+0xa15e70))(0x74ffceebu);
+    int32_t pages=0; uint64_t parr=0;
+    if (def<=0x10000 || !safe_read(&pages,def,4) || !safe_read(&parr,def+8,8) || pages<=0 || pages>400) return;
+    ++tries;
+    for (int i=0;i<pages;++i) {
+        uint64_t list=0; char name[32]={0};
+        if (!safe_read(&list,parr+0x70u*(uint64_t)i+0x38,8) || list<0x10000 || !safe_read(name,list+0x14,31)) continue;
+        if (strncmp(name,"PAGE_CONTROLLER_LAYOUT",23)!=0) continue;
+        int32_t count=0; uint64_t arr=0;
+        if (!safe_read(&count,list,4) || !safe_read(&arr,list+8,8) || count<=0 || count>64 || arr<0x10000) return;
+        uint8_t *old=malloc((size_t)count*0x70u);
+        if (!old) return;
+        int at=-1, have=0;
+        if (safe_read(old,arr,(size_t)count*0x70u)) {
+            for (int r=0;r<count;++r) {
+                uint32_t type, text;
+                memcpy(&type,old+0x70u*(size_t)r+0x10,4); memcpy(&text,old+0x70u*(size_t)r+0x28,4);
+                if (text==U2_KEYS_HOST_TEXT_ID) have=1;
+                if (text==U2_KEYS_TEXT_ID && type==2) at=r;
+            }
+        }
+        if (have) { u2_row_inserted=1; free(old); return; }   /* the definition was kept: done already */
+        if (at<0) { printf("Runtime: U2 keys row: the Commandes record was not found in the page\n"); free(old); tries=40; return; }
+        uint8_t *fresh=u2_def_alloc((size_t)(count+1)*0x70u,arr);
+        if (!fresh) { printf("Runtime: U2 keys row: no memory near the definition\n"); free(old); tries=40; return; }
+        memcpy(fresh,old,0x70u*(size_t)(at+1));
+        memcpy(fresh+0x70u*(size_t)(at+1),old+0x70u*(size_t)at,0x70);   /* the clone, then the rest */
+        memcpy(fresh+0x70u*(size_t)(at+2),old+0x70u*(size_t)(at+1),0x70u*(size_t)(count-at-1));
+        const uint32_t new_id=U2_ROW_NEW_ID, new_text=U2_KEYS_HOST_TEXT_ID;
+        memcpy(fresh+0x70u*(size_t)(at+1)+8,&new_id,4);
+        memcpy(fresh+0x70u*(size_t)(at+1)+0x28,&new_text,4);
+        const int32_t ncount=count+1;
+        const uint64_t nptr=(uint64_t)(uintptr_t)fresh;
+        if (safe_write(list+8,&nptr,8) && safe_write(list,&ncount,4)) {
+            u2_row_inserted=1;
+            printf("Runtime: U2 keys row inserted in %s (%d rows, after row %d; new array %#llx)\n",name,ncount,at,(unsigned long long)nptr);
+        } else printf("Runtime: U2 keys row: the definition cannot be written\n");
+        free(old);
+        return;
+    }
+}
+static void __attribute__((ms_abi)) u2_menu_builder_probe(uint64_t menu, uint64_t unused, uint64_t image, uint64_t r14) {
+    (void)unused; (void)r14;
+    if (image>=0x10000) u2_menu_def_patch(image);
+    if (!mouse_debug() || image<0x10000) return;
+    static int calls;
+    if (calls++>=1) return;
+    const uint64_t p=((u2_get_data_fn)(uintptr_t)(image+0xa15e70))(0x74ffceebu);
+    printf("Mouse: U2 menu builder: menu %#llx definition %#llx\n",(unsigned long long)menu,(unsigned long long)p);
+    if (p>0x10000) u2_find_ids(p,0,"(root)");
+    int32_t count=0; uint64_t arr=0;
+    if (p<=0x10000 || !safe_read(&count,p,4) || !safe_read(&arr,p+8,8)) return;
+    for (int i=0;i<count && i<200;++i) {   /* the page named PAGE_CONTROLS, whole tree below it */
+        uint64_t sub=0; char name[40]={0};
+        if (!safe_read(&sub,arr+0x70u*(uint64_t)i+0x38,8) || sub<0x10000) continue;
+        if (!safe_read(name,sub+0x14,32)) continue;
+        if (i==76 || !strncmp(name,"PAGE_CONTROLLER_LAYOUT",23) || !strncmp(name,"PAGE_CONTROLS",14)) {
+            printf("Mouse: U2 tree page %s: page record %#llx, list %#llx\n",name,(unsigned long long)(arr+0x70u*(uint64_t)i),(unsigned long long)sub);
+            u2_tree_lines=0;
+            u2_dump_tree(sub,0);
+        }
+    }
+}
+static const unsigned char u2_menu_builder_code[]={0x55,0x48,0x89,0xe5,0x41,0x57};
+static const unsigned char u2_text_lookup_code[]={0x55,0x48,0x89,0xe5,0x41,0x56};   /* 0xcddc00, the search the callers use (0xcddc60 wraps it with a default, no caller) */
 static const unsigned char u1_menu_item_begin_code[]={0x48,0x8b,0x07,0x4c,0x89,0xf6,0x4c,0x89,0xfa};
 static const unsigned char u1_menu_item_end1_code[]={0x41,0x8b,0x8d,0x98,0x00,0x00,0x00};
 static const unsigned char u1_menu_item_end2_code[]={0x49,0x8b,0x04,0x24,0x48,0x3b,0x45,0xd0};
@@ -2205,6 +2435,8 @@ static const RuntimeGuestCallback guest_callbacks[]={
     {"U3 follow camera (mouse)",0x121b90,u3_follow_camera_code,sizeof(u3_follow_camera_code),6,u3_follow_camera,NULL},
     {"U2 camera update (mouse, collection)",0x4374cc,u2b_camera_hook_code,sizeof(u2b_camera_hook_code),7,u2b_camera_hook,NULL},
     {"U2 menu text probe (collection)",0x5b56d0,u2_text_probe_code,sizeof(u2_text_probe_code),8,u2_text_probe,NULL},
+    {"U2 menu builder probe (collection)",0x5c53a0,u2_menu_builder_code,sizeof(u2_menu_builder_code),6,u2_menu_builder_probe,NULL},
+    {"U2 text lookup probe (collection)",0xcddc00,u2_text_lookup_code,sizeof(u2_text_lookup_code),6,u2_text_lookup_probe,NULL},
     {"U1 controls menu: keyboard row",0x145881,u1_add_keys_row_code,sizeof(u1_add_keys_row_code),5,u1_add_keys_row,NULL},
     {"U1 compare-with-friends prompt (hook)",0x128f64,u1_compare_code,sizeof(u1_compare_code),5,u1_compare_prompt,NULL},
     {"U1 compare-with-friends prompt (skip 1)",0x128f69,u1_compare_je_code,sizeof(u1_compare_je_code),sizeof(u1_compare_je_patch),NULL,u1_compare_je_patch},
@@ -3359,6 +3591,8 @@ static int u1_on_jetski(void) {
  * cursor) until the selected row is the one under the cursor; a click does the same, then presses cross. Not yet: wheel, sliders,
  * lists, Yes/No boxes. */
 static int u2_menu_on, u2_hover, u2_menu_reset;
+static volatile int u2_layout_on;      /* the controller's picture is on screen (u2_layout_us) */
+static volatile int u2_keys_row_sel;   /* the Commandes row (the first of the two wide rows of that screen) is the selected one */
 static int u2_menu_active(uint64_t now) {
     static uint64_t seen;
     static int disabled=-1;   /* BB_U2_MENU=0: no mouse in the menus (to tell a crash of the game from this code) */
@@ -3368,7 +3602,9 @@ static int u2_menu_active(uint64_t now) {
     pthread_mutex_lock(&menu_text_lock);
     for (int i=0;i<U2_ROWS && !hi;++i) if (u2_rows[i].us && now-u2_rows[i].us<150000 && u2_rows[i].s5>=2.5f) hi=1;
     pthread_mutex_unlock(&menu_text_lock);
-    if (hi) seen=now;
+    const int layout=u2_layout_us && now-u2_layout_us<400000 && u2_layout_us<=now+1000000;
+    u2_layout_on=layout;
+    if (hi || layout) seen=now;
     const int on=seen && now-seen<300000;
     if (on!=u2_menu_on) { u2_menu_on=on; u2_menu_reset=on; bbgpu_game_menu_cursor(on); printf("Runtime: U2 menu mouse %s\n",on ? "on" : "off"); }
     return on;
@@ -3504,16 +3740,18 @@ static uint32_t u2_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
         (k && (k[SDL_SCANCODE_W] || k[SDL_SCANCODE_S] || k[SDL_SCANCODE_UP] || k[SDL_SCANCODE_DOWN] || k[SDL_SCANCODE_A] || k[SDL_SCANCODE_D] ||
                k[SDL_SCANCODE_LEFT] || k[SDL_SCANCODE_RIGHT]))) h.active=0;
     U2Row hov={0}, sel={0}, slid={0};
-    int have_hov=0, have_sel=0, hi_n=0, have_slid=0;
-    float hi_cy[16];
+    int have_hov=0, have_sel=0, hi_n=0, have_slid=0, wide_n=0, on_cmd=0;
+    float hi_cy[16], wide_min=1e9f, wide_ys[6]; int wide_ys_n=0;
     pthread_mutex_lock(&menu_text_lock);
     for (int i=0;i<8;++i) {
         const U2Row *s=&u2_sliders[i];
+        if (s->us && now-s->us<150000 && fabsf(s->x-717.0f)<1.5f) on_cmd=1;
         if (s->us && now-s->us<100000 && ux>=s->x-10.0f && ux<=s->x+s->w+10.0f && uy>=s->y && uy<s->y+s->h) { slid=*s; have_slid=1; }
     }
     for (int i=0;i<U2_ROWS;++i) {
         const U2Row *r=&u2_rows[i];
         if (!r->us || now-r->us>=100000) continue;
+        if (fabsf(r->x-405.0f)<1.0f && (fabsf(r->w-520.0f)<1.0f || r->w>=1100.0f) && r->h>=33.0f && r->h<=33.9f)   /* (the section titles are 34.2 tall and as wide) */ { ++wide_n; if (r->y<wide_min) wide_min=r->y; if (wide_ys_n<6) wide_ys[wide_ys_n++]=r->y; }   /* the two last rows of Commandes (three with ours) */
         if (fabsf(r->h-34.2f)<0.2f) continue;   /* the section titles (Visée, Caméra...) and their bars: never selected */
         if (r->s5>=2.5f && (!have_sel || r->s5>sel.s5)) { sel=*r; have_sel=1; }
         if (r->s5>=2.5f && hi_n<16) hi_cy[hi_n++]=r->y+r->h*0.5f;
@@ -3529,7 +3767,7 @@ static uint32_t u2_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
     int dlg=0;
     for (int i=0;i<U2_ROWS && !dlg;++i) {
         const U2Row *a=&u2_rows[i];
-        if (!a->us || now-a->us>=100000 || a->h<30.0f || a->h>44.0f) continue;
+        if (!a->us || now-a->us>=100000 || a->h<38.0f || a->h>42.0f) continue;   /* 40 tall: not the 33.6 rows (a slider rail and a value column of one row have the same size too) */
         for (int j=0;j<U2_ROWS;++j) {
             const U2Row *b=&u2_rows[j];
             if (i==j || !b->us || now-b->us>=100000) continue;
@@ -3542,10 +3780,17 @@ static uint32_t u2_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
         have_hov=0;
         if (uy>=da.y && uy<da.y+da.h) { if (ux>=da.x && ux<da.x+da.w) { hov=da; have_hov=1; } else if (ux>=db.x && ux<db.x+db.w) { hov=db; have_hov=1; } }
         if (have_hov) { int skipped=0; for (int s=0;s<16;++s) if (now<skips[s].until && fabsf(skips[s].x-hov.x)<0.5f && fabsf(skips[s].y-hov.y)<0.5f) skipped=1; if (skipped) have_hov=0; }
+        on_cmd=0;
         if (fabsf(da.a-db.a)<0.5f) have_hov=0;   /* the chosen one is not clear (the box is opening, or a change is under way): never validate on a guess */
         have_slid=0; hi_n=0;
     }
     u2_hover=have_hov;
+    if (u2_row_inserted) {   /* Commandes, then ours, then Rétablir: ours is the middle one of the three wide rows */
+        float mid=1e9f;
+        for (int a=0;a<wide_ys_n;++a) { int below=0; for (int b=0;b<wide_ys_n;++b) if (wide_ys[b]<wide_ys[a]-0.5f) ++below; if (below==1) mid=wide_ys[a]; }
+        u2_keys_row_sel=on_cmd && wide_n>=3 && have_sel && fabsf(sel.x-405.0f)<1.0f && fabsf(sel.y-mid)<1.0f;
+    } else
+    u2_keys_row_sel=on_cmd && wide_n>=2 && have_sel && fabsf(sel.x-405.0f)<1.0f && fabsf(sel.y-wide_min)<1.0f;
     if (u2_menu_reset) { u2_menu_reset=0; memset(skips,0,sizeof(skips)); h.active=0; h.click=0; h.presses=0; h.press_until=h.cross_until=0; }   /* a rebuilt menu (a language was chosen): wait for the cursor to move */
     if (!left) h.drag=0;
     if (clicked && have_slid) {   /* on a slider's rail: no cross (it does nothing there), the row is selected and the mouse drags the value by steps */
@@ -3699,6 +3944,7 @@ static uint32_t u2_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
     if (now<wheel_until_us[0]) out|=dlg ? BTN_LEFT : BTN_UP;     /* the wheel: one row up / down per notch (left / right in a confirmation) */
     if (now<wheel_until_us[1]) out|=dlg ? BTN_RIGHT : BTN_DOWN;
     if (mouse & 8u) out|=BTN_CIRCLE;
+    if (u2_layout_on && (mouse & 2u)) out|=BTN_CIRCLE;   /* the controller's picture has nothing to click: the right button goes back */
     return out;
 }
 /* F8 in a U2 menu (BB_MOUSE_DEBUG): a snapshot of the data segment (image + 0x104c000, 0x6f0000 bytes) to find where a slider keeps its
@@ -3728,6 +3974,159 @@ static void u2_data_snapshot(void) {
         printf("Runtime: U2 data: %d words changed (snapshot %d)\n",shown,count);
     } else printf("Runtime: U2 data: first snapshot taken (image %#llx)\n",(unsigned long long)image);
     free(prev); prev=now; ++count;
+}
+/* U2: the Commandes menu has no row for the port's keyboard / mouse bindings window (U1 gets one built by a hook): a button is drawn in
+ * the empty left panel of that screen (the overlay, bbgpu_controls_hint) and a click on it opens the window. The screen is the one whose
+ * first slider (Sensibilité) has its rail at x 717. The window's language is the game's (BB_LANGUAGE, the console's number). */
+#define U2_HINT_X 110.0f
+#define U2_HINT_Y 300.0f
+#define U2_HINT_W 250.0f
+#define U2_HINT_H 46.0f
+/* The game's language for the bindings window and the row label: 0 English, 1 French, 2 Spanish, 3 Portuguese (BB_LANGUAGE is the console's number). */
+static int u2_ui_language(void) {
+    static int language=-1;
+    if (language<0) {
+        const char *e=getenv("BB_LANGUAGE");
+        const int id=e && *e ? atoi(e) : 1;
+        language=(id==2 || id==22) ? 1 : (id==3 || id==20) ? 2 : (id==7 || id==17) ? 3 : 0;
+        bbgpu_set_language(language);
+    }
+    return language;
+}
+/* The label of the row, put where the game looks its texts up (see u2_keys_label_patch). Done again every 300 ms (a language change loads fresh tables). */
+static volatile int u2_keys_patched;
+/* BB_U2_ID_SCAN=1: where do the rows of the Commandes menu keep their text ids? Every 4-byte occurrence of the ids of the "Commandes" row and
+ * of "Rétablir les paramètres par défaut" in the committed writable memory of the guest, with the bytes around it (a row record, perhaps). */
+static void u2_id_scan(void) {
+#ifdef _WIN32
+    static int done;
+    const char *e=getenv("BB_U2_ID_SCAN");
+    if (done || !e || e[0]!='1') return;
+    done=1;
+    static const uint32_t ids[2]={0xdd40dc7bu,0xb69a538au};
+    char *buf=malloc(4u<<20);
+    if (!buf) return;
+    int hits[2]={0,0};
+    uintptr_t addr=0x10000;
+    MEMORY_BASIC_INFORMATION mbi;
+    while (addr<0x1400000000ull && VirtualQuery((LPCVOID)addr,&mbi,sizeof(mbi))) {
+        const uintptr_t base=(uintptr_t)mbi.BaseAddress, size=mbi.RegionSize;
+        addr=base+size;
+        if (mbi.State!=MEM_COMMIT || (mbi.Protect&(PAGE_GUARD|PAGE_NOACCESS)) || !mbi.Protect) continue;
+        for (uintptr_t off=0;off<size;) {
+            size_t n=size-off<(4u<<20) ? size-off : (4u<<20);
+            SIZE_T got=0;
+            if (!ReadProcessMemory(GetCurrentProcess(),(LPCVOID)(base+off),buf,n,&got) || got<4) break;
+            for (size_t i=0;i+4<=got;i+=1) {   /* every byte: records may be packed */
+                uint32_t w; memcpy(&w,buf+i,4);
+                for (int k=0;k<2;++k) if (w==ids[k] && hits[k]<24) {
+                    ++hits[k];
+                    printf("Mouse: U2 id scan %08x at %#llx (image+%#llx):",w,(unsigned long long)(base+off+i),(unsigned long long)(base+off+i-u2_image));
+                    for (size_t b=(i>=32 ? i-32 : 0);b<i+64 && b<got;++b) printf(" %02x",(unsigned char)buf[b]);
+                    printf("\n");
+                }
+            }
+            off+=n>4 ? n-3 : n;
+            if (n<(4u<<20)) break;
+        }
+    }
+    free(buf);
+    printf("Mouse: U2 id scan done (%d, %d hits)\n",hits[0],hits[1]);
+#endif
+}
+static void u2_keys_label_patch(uint64_t now) {
+    static uint64_t last; static int logged;
+    if (now-last<300000) return;
+    last=now;
+    if (u2_keys_tables[0]) { u2_id_scan(); }
+    {   /* the "Commandes" row is renamed only when asked (BB_U2_KEYS_ROW=1): it replaces the controller picture, which must stay reachable */
+        static int enabled=-1;
+        if (enabled<0) { const char *e=getenv("BB_U2_KEYS_ROW"); enabled=e && e[0]=='1'; }
+        if (!enabled && !u2_row_inserted) { u2_keys_patched=0; return; }
+    }
+    const int lang=u2_ui_language();
+    const char *label=lang==1 ? "Touches clavier / souris" : lang>=2 ? "Teclado / Mouse" : "Keyboard / Mouse";
+    int ok=0;
+    for (int ti=0;ti<8;++ti) {
+        uint64_t t=u2_keys_tables[ti];
+        for (int depth=0;t && depth<6;++depth) {
+            uint32_t count=0; uint64_t entries=0, base=0, parent=0; uint8_t valid=0;
+            if (!safe_read(&count,t,4) || !safe_read(&entries,t+8,8) || !safe_read(&base,t+0x10,8) || !safe_read(&valid,t+0x38,1)) break;
+            safe_read(&parent,t+0x58,8);
+            if (mouse_debug() && logged<12) { ++logged; printf("Mouse: U2 text table %#llx: count %u entries %#llx base %#llx valid %u parent %#llx\n",(unsigned long long)t,count,(unsigned long long)entries,(unsigned long long)base,valid,(unsigned long long)parent); }
+            if (valid && count && count<400000 && entries>0x10000 && base>0x10000) {
+                uint32_t *arr=malloc((size_t)count*8);
+                if (arr && safe_read(arr,entries,(size_t)count*8)) {
+                    static uint64_t dumped[4]; static int dumped_n;
+                    const char *dump_env=getenv("BB_U2_TEXT_DUMP");
+                    int already=0;
+                    for (int i=0;i<dumped_n;++i) if (dumped[i]==t) already=1;
+                    if (dump_env && dump_env[0]=='1' && !already && dumped_n<4) {   /* every text of the table, to choose an unused long one */
+                        dumped[dumped_n++]=t;
+                        for (uint32_t i=0;i<count;++i) {
+                            char b[100]={0}; size_t n=sizeof(b)-1;
+                            while (n>0 && !safe_read(b,base+arr[2*i+1],n)) --n;
+                            b[n]=0;
+                            for (char *p=b;*p;++p) if ((unsigned char)*p<32) *p=' ';
+                            printf("Mouse: U2 text dump %08x len %zu \"%s\"\n",arr[2*i],strlen(b),b);
+                        }
+                    }
+                    for (uint32_t i=0;i<count;++i) if (arr[2*i]==U2_KEYS_TEXT_ID) {
+                        /* No memory of ours can be reached by a 32-bit offset from the table (the emulator owns the whole range around it): the label
+                         * is written over the text of another id, one that is never shown here (the PlayStation Network chat restriction message, long
+                         * enough in the four languages), and the entry of our id is pointed at it. */
+                        uint32_t j=count;
+                        for (uint32_t q=0;q<count;++q) if (arr[2*q]==U2_KEYS_HOST_TEXT_ID) { j=q; break; }
+                        if (j==count) { if (logged<14) { ++logged; printf("Runtime: U2 keys row: the host text id is not in this table\n"); } break; }
+                        const uint64_t host=base+arr[2*j+1];
+                        char cur[160]={0};
+                        size_t n=sizeof(cur)-1;
+                        while (n>0 && !safe_read(cur,host,n)) --n;
+                        cur[n]=0;
+                        const size_t need=strlen(label);
+                        if (strcmp(cur,label)!=0) {
+                            if (strlen(cur)>=need && safe_write(host,label,need+1)) { if (logged<14) { ++logged; printf("Runtime: U2 keys row: label written over the host text (table %#llx)\n",(unsigned long long)t); } }
+                            else { if (logged<14) { ++logged; printf("Runtime: U2 keys row: the host text cannot take the label (%zu bytes, needs %zu)\n",strlen(cur),need); } break; }
+                        }
+                        if (u2_row_inserted) { ok=1; break; }   /* our own row carries the host text id: no entry to redirect */
+                        if (arr[2*i+1]!=arr[2*j+1]) {
+                            if (safe_write(entries+8u*i+4u,&arr[2*j+1],4)) { if (logged<14) { ++logged; printf("Runtime: U2 keys row label patched (table %#llx, entry %u)\n",(unsigned long long)t,i); } ok=1; }
+                            else if (logged<14) { ++logged; printf("Runtime: U2 keys row label: the table cannot be written\n"); }
+                        } else ok=1;                        break;
+                    }
+                }
+                free(arr);
+            }
+            t=parent;
+        }
+    }
+    u2_keys_patched=ok;
+}
+static void u2_controls_hint(uint64_t now, uint32_t mouse, int menu_on) {
+    static int last_left;
+    u2_ui_language();
+    int on_commands=0;
+    pthread_mutex_lock(&menu_text_lock);
+    for (int i=0;i<8;++i) if (u2_sliders[i].us && now-u2_sliders[i].us<150000 && fabsf(u2_sliders[i].x-717.0f)<1.5f) on_commands=1;
+    pthread_mutex_unlock(&menu_text_lock);
+    const int show=menu_on && on_commands && !u2_keys_patched;   /* the drawn button is only for when the row could not be made */
+    int hot=0, clicked=0;
+    SDL_Window *w=show ? SDL_GetMouseFocus() : NULL;
+    if (w) {
+        float mx=0, my=0; int ww=0, wh=0;
+        SDL_GetMouseState(&mx,&my);
+        SDL_GetWindowSize(w,&ww,&wh);
+        if (ww>0 && wh>0) {
+            const float scale=fminf((float)ww/UI_WIDTH,(float)wh/UI_HEIGHT);
+            const float ux=(mx-((float)ww-UI_WIDTH*scale)*0.5f)/scale, uy=(my-((float)wh-UI_HEIGHT*scale)*0.5f)/scale;
+            hot=ux>=U2_HINT_X && ux<=U2_HINT_X+U2_HINT_W && uy>=U2_HINT_Y && uy<=U2_HINT_Y+U2_HINT_H;
+        }
+    }
+    const int left=(mouse & 1u)!=0;
+    clicked=left && !last_left;
+    last_left=left;
+    bbgpu_controls_hint(show,hot,U2_HINT_X,U2_HINT_Y,U2_HINT_W,U2_HINT_H);
+    if (show && hot && clicked) { printf("Runtime: U2 keys window requested from the Commandes menu\n"); bbgpu_open_controls(); }
 }
 static void sample_host(PadData *d) {
     host_rotate=host_sideways=0;
@@ -3813,10 +4212,29 @@ static void sample_host(PadData *d) {
     if (menu_mode && !menu_guard && !pad_only) d->buttons|=menu_mouse_buttons(k,mouse,now);
     else menu_hover=0;
     const int u2_menu=u2_menu_active(now) && !pad_only;
+    u2_controls_hint(now,mouse,u2_menu);
+    {   /* the controller's picture is of no use with a keyboard and a mouse: the bindings window opens over it, once each time the picture comes up */
+        static int was_layout;
+        const int layout=u2_menu && u2_layout_on;
+        static int auto_open=-1;   /* only when asked (BB_U2_LAYOUT_KEYS=1): the picture is not to be taken over */
+        if (auto_open<0) { const char *e=getenv("BB_U2_LAYOUT_KEYS"); auto_open=e && e[0]=='1'; }
+        if (auto_open && layout && !was_layout) { printf("Runtime: U2 controller picture: keys window opened\n"); bbgpu_open_controls(); }
+        was_layout=layout;
+    }
     if (mouse_debug()) { static int f8_was_down; const int f8=k && k[SDL_SCANCODE_F8]; if (f8 && !f8_was_down && u2_menu) u2_data_snapshot(); f8_was_down=f8; }
     /* the wheel is the d-pad left / right of the play (weapon change): in a menu it moves up / down instead, not both at once */
     if (u2_menu && (now<wheel_until_us[0] || now<wheel_until_us[1])) d->buttons&=~(BTN_UP|BTN_DOWN|BTN_LEFT|BTN_RIGHT);
-    if (u2_menu) { d->buttons|=u2_menu_buttons(k,mouse,now); if (!(mouse & 1u)) { mdx=mdy=0; captured=0; } } else u2_hover=0;   /* the mouse turns the models of the menus only with the left button held */
+    u2_keys_label_patch(now);
+    if (u2_menu) { d->buttons|=u2_menu_buttons(k,mouse,now); if (!(mouse & 1u)) { mdx=mdy=0; captured=0; } } else u2_hover=0;
+    {   /* the row that now reads "Touches clavier / souris": the cross (Space, the click) opens the bindings window instead of the controller picture */
+        static int cross_was_down;
+        const int cross=(d->buttons & BTN_CROSS)!=0;
+        if (u2_menu && u2_keys_patched && u2_keys_row_sel) {
+            if (cross && !cross_was_down) { printf("Runtime: U2 keys window requested from the Commandes row\n"); bbgpu_open_controls(); }
+            d->buttons&=~BTN_CROSS;
+        }
+        cross_was_down=cross;
+    }   /* the mouse turns the models of the menus only with the left button held */
     bbgpu_set_cursor((menu_mode || u2_menu) && !pad_only ? ((mouse & 1u) ? 2 : (menu_hover || u2_hover) ? 1 : 0) : 0);
     if (menu_mode && now-u1_compare_us<250000) d->buttons&=~BTN_CROSS;   /* statistics: no "compare with friends" */
     if (menu_mode && !pad_only) {   /* the row "Touches clavier / souris" of the Commandes menu: the cross (Enter, click) opens the bindings window */

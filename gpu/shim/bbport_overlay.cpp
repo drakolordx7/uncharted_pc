@@ -159,6 +159,10 @@ int capture_index = -1, capture_slot = 0; // the binding being captured: index i
 // The window speaks the game's language (the four of the dump): 0 English, 1 French, 2 Spanish (Latin America), 3 Brazilian
 // Portuguese. src/runtime_pad.c finds it from the text of the "Keyboard/Mouse" row and tells it through bbgpu_set_language.
 std::atomic<int> ui_language{1};
+// The button next to U2's Commandes menu (SetControlsHint): shown, cursor over it, rectangle in the 1280x720 menu space.
+std::atomic<bool> hint_show{false};
+std::atomic<bool> hint_hot{false};
+std::atomic<float> hint_rect[4];
 const char* T(const char* en, const char* fr, const char* es, const char* pt) {
     switch (ui_language.load()) {
     case 0: return en;
@@ -1406,6 +1410,15 @@ void SetLanguage(int language) {
     ui_language = language >= 0 && language <= 3 ? language : 1;
 }
 
+void SetControlsHint(bool show, bool hot, float x, float y, float w, float h) {
+    hint_show = show;
+    hint_hot = hot;
+    hint_rect[0] = x;
+    hint_rect[1] = y;
+    hint_rect[2] = w;
+    hint_rect[3] = h;
+}
+
 void OpenControls() {
     std::scoped_lock lock{imgui_mutex};
     if (!initialized) {
@@ -1423,16 +1436,7 @@ bool ControlsChanged() {
 }
 
 bool Visible() {
-    return initialized &&
-           (menu_open || text_entry_active || BbSettings::Get().show_fps || toast_busy);
-}
-
-void NotifyTrophy(int grade, std::string game, std::string name, std::vector<unsigned char> png) {
-    std::scoped_lock lock{toast_mutex};
-    if (toast_queue.size() < 32) {
-        toast_queue.push_back({grade, std::move(game), std::move(name), std::move(png)});
-        toast_busy = true;
-    }
+    return initialized && (menu_open || text_entry_active || hint_show || BbSettings::Get().show_fps);
 }
 
 bool CapturesInput() {
@@ -1505,7 +1509,24 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     if (text_entry_active) {
         TextEntryBox();
     }
-    TrophyToast();
+    if (hint_show && !menu_open && !controls_open) {
+        // the game's menu space is 1280x720, centred in the window and scaled to fit
+        const float ui_scale = std::min(float(extent.width) / 1280.0f, float(extent.height) / 720.0f);
+        const float ox = (float(extent.width) - 1280.0f * ui_scale) * 0.5f;
+        const float oy = (float(extent.height) - 720.0f * ui_scale) * 0.5f;
+        const ImVec2 a(ox + hint_rect[0] * ui_scale, oy + hint_rect[1] * ui_scale);
+        const ImVec2 b(a.x + hint_rect[2] * ui_scale, a.y + hint_rect[3] * ui_scale);
+        const bool hot = hint_hot;
+        ImDrawList* draw = ImGui::GetBackgroundDrawList();
+        draw->AddRectFilled(a, b, hot ? IM_COL32(110, 72, 36, 235) : IM_COL32(60, 38, 20, 215), 5.0f * ui_scale);
+        draw->AddRect(a, b, hot ? IM_COL32(255, 220, 140, 255) : IM_COL32(190, 150, 90, 230), 5.0f * ui_scale, 0, 2.0f * ui_scale);
+        const char* label = T("Keyboard / Mouse", "Touches clavier / souris", "Teclado / Mouse", "Teclado / Mouse");
+        const float font_size = (b.y - a.y) * 0.46f;
+        const ImVec2 text = ImGui::GetFont()->CalcTextSizeA(font_size, FLT_MAX, 0.0f, label);
+        draw->AddText(ImGui::GetFont(), font_size,
+                      ImVec2(a.x + ((b.x - a.x) - text.x) * 0.5f, a.y + ((b.y - a.y) - text.y) * 0.5f),
+                      hot ? IM_COL32(255, 255, 255, 255) : IM_COL32(235, 210, 160, 255), label);
+    }
     ImGui::Render();
 
     const vk::RenderingAttachmentInfo attachment{

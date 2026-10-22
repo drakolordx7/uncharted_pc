@@ -9,6 +9,7 @@ static uint16_t rumble_low, rumble_high;
 int bbgpu_overlay_captures_input(void) { return capture; }
 void bbgpu_menu_state(int open) { (void)open; }
 void bbgpu_game_menu_cursor(int open) { (void)open; }
+void bbgpu_controls_hint(int show, int hot, float x, float y, float w, float h) { (void)show; (void)hot; (void)x; (void)y; (void)w; (void)h; }
 void bbgpu_jetski_state(int on) { (void)on; }
 int bbgpu_atlas_recent(int ms) { (void)ms; return 0; }
 void bbgpu_open_controls(void) {}
