@@ -1,0 +1,14 @@
+name: Feature request
+description: Something you'd like the community build to do
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What would you like
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why, or what it would fix for you

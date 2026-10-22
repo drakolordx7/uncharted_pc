@@ -1,17 +1,88 @@
-# Uncharted: The Nathan Drake Collection for Windows
+# Uncharted: The Nathan Drake Collection for Windows (community build)
 
-**Uncharted 1, 2 and 3 from the PS4 collection running natively on Windows 10 and 11, by [SuperMedo](https://github.com/Supermedo).** Mohammed Albarghouthi
+**Uncharted 1, 2 and 3 from the PS4 collection running natively on Windows, built on
+[SuperMedo's port](https://github.com/Supermedo/uncharted_pc), with fixes from across the community.**
 
-Same idea as my [Bloodborne port](https://github.com/Supermedo/bloodborne_pc): the original PS4 game
-code runs directly on your PC and the graphics are translated to Vulkan. Unpack the zip, start
-`Uncharted.exe`, pick your game folder, choose a game and press **PLAY**.
+The port is SuperMedo's work: the original PS4 game code runs directly on your PC and the
+graphics go through Vulkan. This fork collects the fixes people have written since then, ours and
+other contributors', in one build that you can download and play. Everything we write here is also
+sent upstream as a pull request, so SuperMedo can take any of it at any time.
 
-**[Download the latest version](https://github.com/Supermedo/uncharted_pc/releases/latest)** · **[Join the Discord](https://discord.gg/s3RgH6cRfJ)**
+**[Download the latest community build](https://github.com/drakolordx7/uncharted_pc/releases/latest)** ·
+[What's in it](#whats-in-this-build) · [Report a problem](https://github.com/drakolordx7/uncharted_pc/issues/new/choose) ·
+[Credits](CREDITS.md)
 
 > **No game files are included.** You need your own decrypted dump of the collection
 > (CUSA02343, CUSA02320, ...: the folder with eboot.bin, big2-ps4_Shipping.elf,
 > big3-ps4_Shipping.elf, sce_sys, u1data, u2data and u3data).
 > This project is not affiliated with Sony Interactive Entertainment or Naughty Dog.
+
+## Installing and updating
+
+Unzip the download into a folder and run `Uncharted.exe`. To update, unzip the new build over the
+old folder and keep your `user` folder: it holds your settings, saves and logs. The launcher checks
+this fork's releases for updates, not the official ones.
+
+The builds don't include the DLSS bridge. XeSS and FSR work on any GPU.
+
+## What's in this build
+
+Everything in the official 0.3.6, plus the changes below. Each one is an open pull request on the
+official repository; the link goes to it.
+
+### Crashes
+
+- Uncharted 1 "execute access to 0" / exit code 3 (`0x63f5d0`, `0x641532`): [#396](https://github.com/Supermedo/uncharted_pc/pull/396), and [#403](https://github.com/Supermedo/uncharted_pc/pull/403) by d4rksp4rt4n for Intel 12th gen and later
+- Uncharted 2 chapter 21 grenade launcher (the big truck takes no damage) and other physics glitches: [#382](https://github.com/Supermedo/uncharted_pc/pull/382) by spacepepperoni
+- Uncharted 2 `iSubMesh < m_numSubMeshInstances` assertion: [#397](https://github.com/Supermedo/uncharted_pc/pull/397)
+- Start failures with exit 21 / error 487 (something already sits in the PS4 address range): [#406](https://github.com/Supermedo/uncharted_pc/pull/406)
+- Draw-preparation workers no longer take the whole game down when they fault: [#409](https://github.com/Supermedo/uncharted_pc/pull/409)
+- `m_gfxEopTick` assertion on more game versions: [#405](https://github.com/Supermedo/uncharted_pc/pull/405)
+- Memory use that keeps growing over a long session: [#445](https://github.com/Supermedo/uncharted_pc/pull/445) (same fix as iannitram's #387)
+
+### Performance
+
+- Much less CPU load on 4 and 6 core processors (idle job workers sleep): [#346](https://github.com/Supermedo/uncharted_pc/pull/346) by kuraeow
+- Less shader stutter: pipelines compile off the GPU thread: [#389](https://github.com/Supermedo/uncharted_pc/pull/389), [#416](https://github.com/Supermedo/uncharted_pc/pull/416)
+- 4 GB cards stay inside their video memory: [#390](https://github.com/Supermedo/uncharted_pc/pull/390)
+- A separate shader cache per GPU (fixes an Intel crash on a cache built by another GPU): [#412](https://github.com/Supermedo/uncharted_pc/pull/412)
+
+### Graphics
+
+- Uncharted 2 blur when aiming and on turrets: [#381](https://github.com/Supermedo/uncharted_pc/pull/381) by spacepepperoni
+- Black weapons and brightness flicker: [#449](https://github.com/Supermedo/uncharted_pc/pull/449) by G3545
+- Render above 1080p, and ultrawide: [#391](https://github.com/Supermedo/uncharted_pc/pull/391)
+- Intel XeSS as an anti-aliasing choice: [#476](https://github.com/Supermedo/uncharted_pc/pull/476)
+
+### Controls and launcher
+
+- Mouse look on game version 1.02 (hooks found by pattern): [#348](https://github.com/Supermedo/uncharted_pc/pull/348)
+- Keyboard and mouse button prompts, layouts and custom keybinding: [#420](https://github.com/Supermedo/uncharted_pc/pull/420) by Umar-Qayyum-dev
+- Xbox button prompts for Xbox and other controllers: [#469](https://github.com/Supermedo/uncharted_pc/pull/469)
+- Trophy notices in the game and a Trophies page in the launcher: [#472](https://github.com/Supermedo/uncharted_pc/pull/472)
+- `--u1`, `--u2`, `--u3` start a game straight from a shortcut: [#399](https://github.com/Supermedo/uncharted_pc/pull/399)
+
+### Audio
+
+- 5.1 and 7.1 surround: [#392](https://github.com/Supermedo/uncharted_pc/pull/392)
+
+Each release lists its exact changes in the [release notes](https://github.com/drakolordx7/uncharted_pc/releases).
+
+## Reporting problems
+
+Open an issue [here](https://github.com/drakolordx7/uncharted_pc/issues/new/choose) and attach
+`user\last_run.log` from the run where it went wrong. Copy the log before you start the game again,
+because the next run overwrites it.
+
+**Never run a command or a download from an issue or a comment.** Issues titled "All Crashes Fix
+Command" and similar are malware. Fixes only ever come as a release on this page.
+
+## Contributing
+
+Pull requests are welcome here. We also bring in good fixes from other forks and from pull requests
+on the official repository, and we keep their authors on the commits and in [CREDITS.md](CREDITS.md).
+If you'd rather your change didn't come in, open an issue and we'll take it out. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for how the branches are laid out.
 
 ## Features
 
@@ -67,6 +138,8 @@ MSYS2 CLANG64 on Windows: `bash build.sh` builds `out\bb-probe.exe`, and
 `bash packaging/windows/package.sh` makes `dist\uncharted-windows` and the zip.
 
 ## Credits
+
+The people whose fixes are in this community build are listed in [CREDITS.md](CREDITS.md).
 
 Built on [bbport](https://github.com/deadinside28/bloodborne_pc), the native Linux port of
 Bloodborne by deadinside28, and on the [shadPS4](https://github.com/shadps4-emu/shadPS4)

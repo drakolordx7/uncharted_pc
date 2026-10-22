@@ -1,0 +1,14 @@
+name: Suggest a fix from elsewhere
+description: A fix in another fork or an upstream pull request that this build should take in
+labels: ["ingest"]
+body:
+  - type: input
+    id: link
+    attributes:
+      label: Link to the commit, branch or pull request
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What it fixes, and how you tested it
