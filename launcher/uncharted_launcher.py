@@ -146,6 +146,9 @@ TK_KEYS = {'space': 'Space', 'Return': 'Return', 'Escape': 'Escape', 'Tab': 'Tab
            'KP_Insert': 'Keypad 0', 'KP_End': 'Keypad 1', 'KP_Down': 'Keypad 2', 'KP_Next': 'Keypad 3',
            'KP_Left': 'Keypad 4', 'KP_Begin': 'Keypad 5', 'KP_Right': 'Keypad 6', 'KP_Home': 'Keypad 7',
            'KP_Up': 'Keypad 8', 'KP_Prior': 'Keypad 9'}
+# Tk on Windows names numpad keys like the main ones ("8", "plus"), only the keycode tells them apart (#224).
+WIN_NUMPAD = {**{0x60 + n: f'Keypad {n}' for n in range(10)},
+              0x6A: 'Keypad *', 0x6B: 'Keypad +', 0x6D: 'Keypad -', 0x6E: 'Keypad .', 0x6F: 'Keypad /'}
 MOUSE_SENS_MIN, MOUSE_SENS_MAX = 0.1, 10.0  # the Controls page slider (the game's default pace is 1)
 # Insert opens the in-game settings menu; Left Alt frees the mouse cursor.
 RESERVED_KEYS = {'Insert': 'Insert opens the in-game settings menu.',
@@ -164,6 +167,24 @@ APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_
 def _(text):
     """Translations come later; every text goes through here."""
     return text
+
+
+def _run_problem_priority(line):
+    if line.startswith(('STOP:', 'GPU crash:')):
+        return 3
+    if line.startswith(('ERROR', 'Fault:', 'No eboot.bin', 'No big', 'Set BB_GAME_DIR',
+                        'bb-probe.exe not found')):
+        return 2
+    if 'failed' in line and not line.startswith('GPU ['):
+        return 1
+    return 0
+
+
+def select_run_problem(current, output):
+    """Keep the most useful diagnostic emitted before the game exits."""
+    line = output.strip()
+    line_priority = _run_problem_priority(line)
+    return line if line_priority and line_priority >= _run_problem_priority(current) else current
 
 
 # ---------------------------------------------------------------------------------------------
@@ -386,10 +407,7 @@ def game_resolution(s, screen=None):
 
 def game_environment(s, start=None):
     env = dict(os.environ)
-    try:
-        env['BB_INPUT_CONFIG'] = str(write_input_ini(s))
-    except OSError:
-        pass
+    env['BB_INPUT_CONFIG'] = str(write_input_ini(s))
     start = start or s['start']
     # The collection folder; with none, the folder of the game started. A game with a folder of its own
     # (Game page) is taken from it, also when another game of the collection starts it.
@@ -452,6 +470,49 @@ NAV_ICONS = {'play': '\ue768', 'game': '\ue7fc', 'display': '\ue7f4', 'controls'
 # Trophy grades as the console colours them (the platinum cool white-blue, the rest metal).
 TROPHY_COLORS = {'P': '#9fd0f5', 'G': GOLD, 'S': '#cfd3da', 'B': '#cf8548'}
 RUST, RUST_HI = GOLD, GOLD_HI
+DWM_USE_IMMERSIVE_DARK_MODE = 20
+DWM_USE_IMMERSIVE_DARK_MODE_LEGACY = 19
+DWM_CAPTION_COLOR, DWM_TEXT_COLOR = 35, 36
+GA_ROOT = 2
+
+
+def set_dark_title_bar(window):
+    """Match the native Windows caption to the launcher's dark palette."""
+    if sys.platform != 'win32':
+        return False
+    try:
+        hwnd = window.winfo_id()
+        if not hwnd:
+            return False
+        get_root = ctypes.windll.user32.GetAncestor
+        get_root.argtypes = (ctypes.c_void_p, ctypes.c_uint32)
+        get_root.restype = ctypes.c_void_p
+        root_hwnd = get_root(ctypes.c_void_p(hwnd), GA_ROOT)  # Tk client HWND -> caption HWND.
+        if root_hwnd:
+            hwnd = root_hwnd
+        set_attribute = ctypes.windll.dwmapi.DwmSetWindowAttribute
+        set_attribute.argtypes = (ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32)
+        set_attribute.restype = ctypes.c_long
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
+
+    def apply(attribute, value):
+        native_value = ctypes.c_uint32(value)
+        try:
+            return set_attribute(ctypes.c_void_p(hwnd), ctypes.c_uint32(attribute),
+                                 ctypes.byref(native_value), ctypes.sizeof(native_value)) == 0
+        except (AttributeError, OSError, TypeError, ValueError):
+            return False
+
+    # Honor the system dark theme on versions that support only the immersive flag.
+    dark_mode = apply(DWM_USE_IMMERSIVE_DARK_MODE, 1)
+    if not dark_mode:
+        dark_mode = apply(DWM_USE_IMMERSIVE_DARK_MODE_LEGACY, 1)  # Legacy Windows 10 attribute.
+
+    # Explicit colors keep this dark-themed launcher consistent when Windows is in Light mode.
+    caption = apply(DWM_CAPTION_COLOR, 0x000A0908)  # #08090a.
+    text = apply(DWM_TEXT_COLOR, 0x00E6EFF3)  # #f3efe6.
+    return dark_mode or (caption and text)
 
 
 class Launcher:
@@ -473,6 +534,7 @@ class Launcher:
         self.dpi = root.winfo_fpixels('1i') / 96.0
         root.geometry(f'{self.px(1180)}x{self.px(860)}')
         root.minsize(self.px(1040), self.px(760))
+        self._titlebar_map_binding = root.bind('<Map>', self._on_window_map, add='+')
         self.set_icon()
         self.load_fonts()
         self.style()
@@ -485,6 +547,14 @@ class Launcher:
 
     def px(self, size):
         return int(size * self.dpi)
+
+    def _on_window_map(self, event):
+        if event.widget is not self.root:
+            return
+        if self._titlebar_map_binding:
+            self.root.unbind('<Map>', self._titlebar_map_binding)
+            self._titlebar_map_binding = None
+        set_dark_title_bar(self.root)
 
     def set_icon(self):
         try:
@@ -1280,7 +1350,8 @@ class Launcher:
         if sym in RESERVED_KEYS:
             self.status.configure(text=_(RESERVED_KEYS[sym]), fg=GOLD)
             return 'break'
-        name = TK_KEYS.get(sym)
+        name = WIN_NUMPAD.get(event.keycode) if sys.platform == 'win32' else None
+        name = name or TK_KEYS.get(sym)
         if not name and len(sym) == 1 and sym.isalnum():
             name = sym.upper()
         if not name and sym.startswith('F') and sym[1:].isdigit():
@@ -1573,7 +1644,13 @@ class Launcher:
             return
         self.set_log('')
         try:
-            self.process = subprocess.Popen(run_command(), cwd=PORT_DIR, env=game_environment(self.app),
+            env = game_environment(self.app)
+        except OSError as error:
+            self.messagebox.showerror(
+                NAME, _('Could not save the input configuration: {}').format(error))
+            return
+        try:
+            self.process = subprocess.Popen(run_command(), cwd=PORT_DIR, env=env,
                                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                             stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
         except OSError as error:
@@ -1630,11 +1707,7 @@ class Launcher:
                         self.show('log')
                 else:
                     stripped = item.strip()
-                    if stripped.startswith(('STOP:', 'ERROR', 'GPU crash: the', 'Fault:')) or \
-                            ('failed' in stripped and not stripped.startswith('GPU [')) or \
-                            stripped.startswith(('No eboot.bin', 'No big', 'Set BB_GAME_DIR', 'bb-probe.exe not found')):
-                        if not self.last_problem or stripped.startswith(('STOP:', 'GPU crash')):
-                            self.last_problem = stripped
+                    self.last_problem = select_run_problem(self.last_problem, stripped)
                     if 'Entering original x86-64 code' in item:
                         self.entered = True
                         self.status.configure(text=_('The game is running.'), fg=GOLD)
@@ -1768,7 +1841,14 @@ class Launcher:
     def clear_cache(self):
         if self.process:
             return
-        shutil.rmtree(Path(self.app['user_dir'] or DATA_DIR / 'user') / 'cache', ignore_errors=True)
+        cache = Path(self.app['user_dir'] or DATA_DIR / 'user') / 'cache'
+        try:
+            shutil.rmtree(cache)
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            self.messagebox.showerror(NAME, _('Could not clear the shader cache: {}').format(error))
+            return
         self.messagebox.showinfo(NAME, _('Shader cache cleared. The next start stutters for a while as it is rebuilt.'))
 
     def shortcut(self):
@@ -1916,7 +1996,17 @@ def play_without_window(settings):
     log_dir = Path(settings.get('user_dir') or DATA_DIR / 'user')
     log_dir.mkdir(parents=True, exist_ok=True)
     with open(log_dir / 'last_run.log', 'w', encoding='utf-8', buffering=1) as log:
-        process = subprocess.Popen(run_command(), cwd=PORT_DIR, env=game_environment(settings),
+        try:
+            env = game_environment(settings)
+        except OSError as error:
+            text = _('Could not save the input configuration: {}').format(error) + '\n'
+            log.write(text)
+            try:
+                sys.stderr.write(text)
+            except (OSError, ValueError):
+                pass
+            return 1
+        process = subprocess.Popen(run_command(), cwd=PORT_DIR, env=env,
                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
         for raw in iter(process.stdout.readline, b''):
