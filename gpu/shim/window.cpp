@@ -13,6 +13,7 @@
 #include "sdl_window.h"
 #include "bbport_overlay.h"
 #include "bbport_keyicons.h"
+#include "video_core/renderer_vulkan/vk_frame_capture.h"
 
 namespace {
 // bbport: mouse input for runtime_pad.c (keyboard and mouse controls). The window thread adds
@@ -152,6 +153,44 @@ void UpdateMenuCursor(SDL_Window* window, bool menu_open) {
         applied_cursor = state;
     }
 }
+#if !defined(_WIN32) && SDL_VERSION_ATLEAST(3, 4, 0)
+// The window icon from launcher/uncharted.ico (on Windows the executable's icon resource gives
+// it). The .ico holds PNG images: the largest one is used, the desktop scales it.
+void SetWindowIcon(SDL_Window* window) {
+    const char* base = SDL_GetBasePath(); // out/ in a source tree
+    const std::string paths[] = {std::string(base ? base : "") + "../launcher/uncharted.ico",
+                                 "launcher/uncharted.ico"};
+    for (const std::string& path : paths) {
+        size_t size = 0;
+        auto* data = static_cast<const u8*>(SDL_LoadFile(path.c_str(), &size));
+        if (!data) {
+            continue;
+        }
+        const auto u32_at = [&](size_t at) {
+            return u32(data[at]) | u32(data[at + 1]) << 8 | u32(data[at + 2]) << 16 | u32(data[at + 3]) << 24;
+        };
+        const size_t count = size >= 6 ? (data[4] | data[5] << 8) : 0;
+        u32 best_size = 0, best_offset = 0;
+        for (size_t i = 0; i < count && 6 + 16 * (i + 1) <= size; ++i) {
+            const u32 image_size = u32_at(6 + 16 * i + 8), offset = u32_at(6 + 16 * i + 12);
+            if (image_size > best_size && offset <= size && image_size <= size - offset) {
+                best_size = image_size;
+                best_offset = offset;
+            }
+        }
+        SDL_Surface* icon =
+            best_size ? SDL_LoadPNG_IO(SDL_IOFromConstMem(data + best_offset, best_size), true) : nullptr;
+        if (icon) {
+            SDL_SetWindowIcon(window, icon);
+            SDL_DestroySurface(icon);
+        }
+        SDL_free(const_cast<u8*>(data));
+        return;
+    }
+}
+#else
+void SetWindowIcon(SDL_Window*) {}
+#endif
 } // namespace
 
 extern "C" void bbgpu_set_cursor(int state) {

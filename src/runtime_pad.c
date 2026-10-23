@@ -124,11 +124,8 @@ static SDL_Gamepad *current_gamepad(void) {
 #define MOUSE_DEGREES_PER_PIXEL 0.15f
 
 /* ---- bindings (input.ini) ---------------------------------------------------------------- */
-/* BIND_KEY: a physical key (SDL scancode, US position). BIND_LAYOUT: a character key the player
- * chose, found in the current keyboard layout (SDL keycode), so "Z" is the key labelled Z on an
- * AZERTY keyboard too. The default letters stay positions: WASD is ZQSD on AZERTY. */
-enum { BIND_KEY=1, BIND_MOUSE, BIND_WHEEL, BIND_LAYOUT };
-typedef struct { uint8_t kind; int32_t code; } Bind;
+enum { BIND_KEY=1, BIND_MOUSE, BIND_WHEEL };
+typedef struct { uint8_t kind; int16_t code; } Bind;
 typedef struct { const char *name; uint32_t ps; const char *keys; const char *pad; } Action;
 enum { A_LS_UP=16, A_LS_DOWN, A_LS_LEFT, A_LS_RIGHT, A_RS_UP, A_RS_DOWN, A_RS_LEFT, A_RS_RIGHT, A_WALK, ACTIONS };
 static const Action actions[ACTIONS]={
@@ -154,30 +151,15 @@ static struct {
     float mouse_sensitivity, mouse_aim_sensitivity;
 } input;
 
-/* Whether `name` is one of the keys in `defaults` ("Escape|Return"). */
-static int default_key(const char *name, const char *defaults) {
-    const size_t length=strlen(name);
-    for (const char *d=defaults; d && *d; ) {
-        const char *end=strchr(d,'|');
-        const size_t n=end ? (size_t)(end-d) : strlen(d);
-        if (n==length && !SDL_strncasecmp(d,name,n)) return 1;
-        d=end ? end+1 : NULL;
-    }
-    return 0;
-}
-static Bind parse_bind(const char *name, const char *defaults) {
+static Bind parse_bind(const char *name) {
     static const struct { const char *name; uint8_t kind; int16_t code; } mouse[]={
         {"Mouse Left",BIND_MOUSE,1}, {"Mouse Right",BIND_MOUSE,2}, {"Mouse Middle",BIND_MOUSE,4},
         {"Mouse 4",BIND_MOUSE,8}, {"Mouse 5",BIND_MOUSE,16}, {"Wheel Up",BIND_WHEEL,1}, {"Wheel Down",BIND_WHEEL,-1},
     };
     for (size_t i=0;i<sizeof(mouse)/sizeof(*mouse);++i)
         if (!SDL_strcasecmp(name,mouse[i].name)) return (Bind){mouse[i].kind,mouse[i].code};
-    if (name[0]>' ' && name[0]<127 && !name[1] && !default_key(name,defaults)) {
-        const SDL_Keycode key=SDL_GetKeyFromName(name);
-        if (key!=SDLK_UNKNOWN) return (Bind){BIND_LAYOUT,(int32_t)key};
-    }
     const SDL_Scancode code=SDL_GetScancodeFromName(name);
-    return code==SDL_SCANCODE_UNKNOWN ? (Bind){0,0} : (Bind){BIND_KEY,(int32_t)code};
+    return code==SDL_SCANCODE_UNKNOWN ? (Bind){0,0} : (Bind){BIND_KEY,(int16_t)code};
 }
 static void set_keys(int action, const char *value) {
     char text[128];
@@ -185,8 +167,8 @@ static void set_keys(int action, const char *value) {
     input.keys[action][0]=input.keys[action][1]=(Bind){0,0};
     char *second=strchr(text,'|');
     if (second) *second++=0;
-    if (*text) input.keys[action][0]=parse_bind(text,actions[action].keys);
-    if (second && *second) input.keys[action][1]=parse_bind(second,actions[action].keys);
+    if (*text) input.keys[action][0]=parse_bind(text);
+    if (second && *second) input.keys[action][1]=parse_bind(second);
 }
 static int parse_pad(const char *value) {
     if (!SDL_strcasecmp(value,"lefttrigger")) return PAD_TRIGGER_LEFT;
@@ -283,24 +265,9 @@ static uint8_t mouse_axis(float rate) {
 static int bind_down(const Bind *b, const bool *k, uint32_t mouse, uint64_t now) {
     switch (b->kind) {
     case BIND_KEY: return k && k[b->code];
-    case BIND_LAYOUT: {
-        const SDL_Scancode code=k ? SDL_GetScancodeFromKey((SDL_Keycode)b->code,NULL) : SDL_SCANCODE_UNKNOWN;
-        return code!=SDL_SCANCODE_UNKNOWN && k[code];
-    }
     case BIND_MOUSE: return (mouse & (uint32_t)b->code)!=0;
     case BIND_WHEEL: return now<wheel_until_us[b->code>0 ? 0 : 1];
     default: return 0;
-    }
-}
-/* Once the keyboard is up: where the layout put each character key the player chose. */
-static void log_layout_keys(void) {
-    for (int a=0;a<ACTIONS;++a) for (int i=0;i<2;++i) {
-        const Bind *b=&input.keys[a][i];
-        if (b->kind!=BIND_LAYOUT) continue;
-        const SDL_Scancode code=SDL_GetScancodeFromKey((SDL_Keycode)b->code,NULL);
-        printf("Runtime: key.%s %s: the key labelled so in this keyboard layout (US position %s)\n",
-               actions[a].name,SDL_GetKeyName((SDL_Keycode)b->code),
-               code==SDL_SCANCODE_UNKNOWN ? "none" : SDL_GetScancodeName(code));
     }
 }
 static int action_down(int a, const bool *k, uint32_t mouse, uint64_t now) {
@@ -357,8 +324,8 @@ static int camera_take(int queue, float *dx, float *dy) {
     return 1;
 }
 /* The follow camera's collision/position update runs once a frame with the camera object (U1
- * 1.00 and 1.02; U2 and U3 have the same function, in code compiled differently in each build, so the
- * hooks are found by instruction patterns, see guest_callbacks): its horizontal direction (x, y, z) at +0x1310 (U2 +0x9ec0, U3 +0x78c0) and the
+ * CUSA02343 1.00 and others with the same code; U2 and U3 have the same function, found by its
+ * instructions): its horizontal direction (x, y, z) at +0x1310 (U2 +0x9ec0, U3 +0x78c0) and the
  * vertical arc position at +0x12bc (U2 +0x9e60, U3 +0x7874: the right stick up lowers it). */
 static float wrap_degrees(float a) {
     while (a>180.0f) a-=360.0f;
@@ -461,8 +428,8 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
     const float total=turn+correction;
     follow_applied=total;
     follow_push=total>0.05f ? 0.3f : total<-0.05f ? -0.3f : 0.0f;
-    if (mouse_debug()) printf("Mouse: follow t=%.4f dx=%.1f dy=%.1f heading=%.2f shown=%.2f target=%.2f turn=%.2f total=%.2f arc=%.4f\n",
-                              now*1e-6,dx,dy,heading,shown,follow_target,turn,total,arc_offset ? *(float *)(uintptr_t)(camera+arc_offset) : -1.0f);
+    if (mouse_debug()) printf("Mouse: follow t=%.4f dx=%.1f heading=%.2f shown=%.2f target=%.2f turn=%.2f total=%.2f\n",
+                              now*1e-6,dx,heading,shown,follow_target,turn,total);
     if (total!=0.0f) {
         const float a=total*0.017453293f, c=SDL_cosf(a), s=SDL_sinf(a);
         const float x=dir[0], z=dir[2];
@@ -476,8 +443,7 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
     }
     if (dy!=0.0f && arc_offset) {
         float *arc=(float *)(uintptr_t)(camera+arc_offset);
-        const float pitch=arc_to_pitch(arc_table,*arc)-(input.mouse_invert_y ? -dy : dy)*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity;
-        const float v=pitch_to_arc(arc_table,pitch);
+        float v=*arc+(input.mouse_invert_y ? -dy : dy)*(MOUSE_DEGREES_PER_PIXEL/arc_degrees)*input.mouse_sensitivity;
         *arc=v<0.0f ? 0.0f : v>1.0f ? 1.0f : v;
         follow_arc_moved=1;
     }
@@ -545,13 +511,11 @@ static void __attribute__((ms_abi)) u1b_follow_camera(uint64_t camera, uint64_t 
     u1_camera_dt_offset=U1B_CAMERA_DT;
     follow_camera(camera,0x1310,0x12bc,61.0f,camera_stopped(image,U1B_CAMERA_DT));
 }
-static void __attribute__((ms_abi)) u2_follow_camera(uint64_t camera, uint64_t unused, uint64_t image, uint64_t r14, const RuntimeGuestRegs *regs) {
-    (void)regs;
+static void __attribute__((ms_abi)) u2_follow_camera(uint64_t camera, uint64_t unused, uint64_t image, uint64_t r14) {
     (void)unused; (void)image; (void)r14;
     follow_camera(camera,0x9ec0,0x9e60,135.0f,0);
 }
-static void __attribute__((ms_abi)) u3_follow_camera(uint64_t camera, uint64_t unused, uint64_t image, uint64_t r14, const RuntimeGuestRegs *regs) {
-    (void)regs;
+static void __attribute__((ms_abi)) u3_follow_camera(uint64_t camera, uint64_t unused, uint64_t image, uint64_t r14) {
     (void)unused; (void)image; (void)r14;
     follow_camera(camera,0x78c0,0x7874,105.0f,0);
 }
@@ -1253,34 +1217,9 @@ static void __attribute__((ms_abi)) u1_cover_camera(uint64_t output, uint64_t ca
 static uint64_t joypad_state;         /* the state the pad update fills (its first argument) */
 static uint64_t sticks_last_us;
 static float aim_test=-1.0f;          /* BB_MOUSE_AIM_TEST=<x>: right stick x while not following */
-/* The aiming camera's response to the right stick: degrees/s at stick values 0.1.. (measured in real aiming
- * with a gun, per game and build, using BB_MOUSE_CAL). Version 1.02 turns the stick up to 1 and nothing above is
- * faster (about 46 degrees/s sideways, 30 or 20 up and down); 1.00 keeps getting faster above 1 and is slower
- * in the middle. U2 and U3 turn alike in 1.02; U2 1.00 is not measured (its dev menu task jump fails) and uses
- * the U3 1.00 numbers. The mouse asks for a rate; the stick that gives it is looked up here. */
-typedef struct { int n; float x[12], rate[12]; } StickTable;
-typedef struct { StickTable h, v; } AimCurve;
-static const AimCurve u1_100_aim={
-    {12,{.1f,.2f,.3f,.4f,.5f,.6f,.7f,.8f,.9f,1,1.5f,3},{0,1.1f,3.1f,6.0f,10.1f,15.3f,21.6f,29.3f,38.3f,47.8f,74.1f,157}},
-    {12,{.1f,.2f,.3f,.4f,.5f,.6f,.7f,.8f,.9f,1,1.5f,3},{0,.5f,1.4f,2.5f,4.3f,6.4f,9.1f,12.3f,16.1f,19.8f,31,39.6f}}};
-static const AimCurve u1_102_aim={
-    {10,{.1f,.2f,.3f,.4f,.5f,.6f,.7f,.8f,.9f,1},{0,3.3f,7.1f,11.4f,16.2f,21.5f,27.0f,33.0f,39.1f,45.0f}},
-    {10,{.1f,.2f,.3f,.4f,.5f,.6f,.7f,.8f,.9f,1},{0,1.5f,3.1f,5.1f,7.1f,9.5f,11.9f,14.6f,17.1f,19.9f}}};
-static const AimCurve u23_100_aim={
-    {12,{.1f,.2f,.3f,.4f,.5f,.6f,.7f,.8f,.9f,1,1.5f,3},{0,1.1f,3.0f,5.9f,9.8f,14.8f,21.0f,28.3f,37.0f,46.3f,72.1f,153.9f}},
-    {12,{.1f,.2f,.3f,.4f,.5f,.6f,.7f,.8f,.9f,1,1.5f,3},{0,.65f,1.85f,3.65f,6.15f,9.4f,13.4f,18.1f,23.6f,29.5f,46.5f,62.6f}}};
-static const AimCurve u23_102_aim={
-    {10,{.1f,.2f,.3f,.4f,.5f,.6f,.7f,.8f,.9f,1},{0,3.4f,6.8f,11.2f,16.3f,21.5f,26.9f,33.1f,40.5f,46.0f}},
-    {10,{.1f,.2f,.3f,.4f,.5f,.6f,.7f,.8f,.9f,1},{0,2.1f,4.5f,7.4f,10.5f,14.0f,17.7f,21.6f,25.8f,30.0f}}};
-static float stick_for_rate(const StickTable *t, float rate) {
+static float aim_stick(float rate) {
     const float r=rate<0 ? -rate : rate;
-    float x=t->x[t->n-1];
-    if (r<t->rate[t->n-1]) {
-        int i=0;
-        while (i<t->n-2 && r>t->rate[i+1]) ++i;
-        x=t->x[i]+(r-t->rate[i])/(t->rate[i+1]-t->rate[i])*(t->x[i+1]-t->x[i]);
-    }
-    if (r<=0.0f) x=0.0f;
+    const float x=r<=45.0f ? SDL_sqrtf(r/45.0f) : (r+9.0f)/54.0f;
     return rate<0 ? -x : x;
 }
 /* The follow camera's response to the right stick value (measured in U1): about 144 x^2 degrees/s up
@@ -1292,8 +1231,7 @@ static float follow_stick(float rate) {
     if (x>0.9f) x=0.9f;
     return rate<0 ? -x : x;
 }
-static void __attribute__((ms_abi)) u1_pad_update(uint64_t state, uint64_t unused, uint64_t image, uint64_t r14, const RuntimeGuestRegs *regs) {
-    (void)regs;
+static void __attribute__((ms_abi)) u1_pad_update(uint64_t state, uint64_t unused, uint64_t image, uint64_t r14) {
     (void)unused; (void)r14;
     if (mouse_debug() && joypad_state!=state)
         printf("Mouse: joypad state %#llx (image %#llx, offset %#llx)\n",(unsigned long long)state,
@@ -1681,7 +1619,7 @@ static void __attribute__((ms_abi)) u1_joypad_sticks(uint64_t unused0, uint64_t 
     }
     static float follow_test=-1.0f;   /* BB_MOUSE_FOLLOW_TEST=<x>: right stick x everywhere (measuring) */
     if (follow_test<0.0f) { const char *t=getenv("BB_MOUSE_FOLLOW_TEST"); follow_test=t ? (float)atof(t) : 0.0f; }
-    if (follow_test>0.0f) { pad[2]+=follow_test; pad[6]+=follow_test; return; }
+    if (follow_test>0.0f) { ((float *)(uintptr_t)joypad_state)[2]+=follow_test; ((float *)(uintptr_t)joypad_state)[6]+=follow_test; return; }
     float dx, dy;
     camera_take(1,&dx,&dy);
     if (camera_stopped(image,u1_camera_dt_offset)) return; /* paused */
@@ -1700,11 +1638,7 @@ static void __attribute__((ms_abi)) u1_joypad_sticks(uint64_t unused0, uint64_t 
         if (now-t0>3000000 && now-last_summary>5000000) { last_summary=now; stickwatch_summary(); }
     }
     float x=0.0f, y=0.0f;
-    static int cal=-1;                /* BB_MOUSE_CAL=<pixels/s per stick unit>: the mouse is a raw stick value (measuring) */
-    static float cal_scale;
-    if (cal<0) { const char *t=getenv("BB_MOUSE_CAL"); cal_scale=t ? (float)atof(t) : 0.0f; cal=cal_scale>0.0f; }
-    if (cal) { x=dx/dt/cal_scale; y=dy/dt/cal_scale; }
-    else if (aim_test>0.0f) x=aim_test;
+    if (aim_test>0.0f) x=aim_test;
     else {
         /* the turn rate (degrees/s) the mouse asks for, through the inverse of the aiming curve
          * measured in U1: 45 x^2 degrees/s up to x = 1, then about 54 x - 9 (x = 3: 152, x = 6: 324) */
@@ -4919,21 +4853,6 @@ static void sample_host(PadData *d) {
             }
         }
     }
-    /* The device used last picks the button prompts: the game's PlayStation buttons or pictures
-     * of the bound keys (bbgpu_prompts_controller). A stick counts past half way, the mouse when
-     * it moves more than a few pixels. */
-    const int pad_used=g && (d->buttons || d->l2>60 || d->r2>60 || abs(d->left_x-128)>64 ||
-                             abs(d->left_y-128)>64 || abs(d->right_x-128)>64 || abs(d->right_y-128)>64);
-    int keys_used=mouse || wheel || (captured && SDL_fabsf(mdx)+SDL_fabsf(mdy)>3.0f);
-    for (int a=0;a<A_OVERLAY && !keys_used;++a) keys_used=action_down(a,k,mouse,now);
-    static int prompts_device=-1;
-    if (pad_used!=keys_used) {
-        const int device=pad_used ? prompts_pad_device(g) : 0;
-        if (device!=prompts_device) {
-            prompts_device=device;
-            bbgpu_prompts_controller(device);
-        }
-    }
     /* Keyboard and mouse, together with the controller. */
     menu_update(k,mouse);
     for (int a=0;a<16;++a) if (key_action_down(a,k,mouse,now)) d->buttons|=actions[a].ps;
@@ -5030,10 +4949,10 @@ static void sample_host(PadData *d) {
     if (rx) d->right_x=(uint8_t)(rx<0 ? 0 : 255);
     if (ry) d->right_y=(uint8_t)(ry<0 ? 0 : 255);
     /* Where the game's camera or joypad state takes the mouse directly (their callbacks ran in the
-     * last 100 ms), the motion goes there: the follow camera turns with the mouse (vertically too where
-     * its arc is known), with the right stick held a little the same way (follow_push); aiming, other
-     * cameras and a follow camera that keeps no turns get the mouse as a right stick value in the joypad
-     * state (all three games). Where a build's hooks were not found, the mouse is a right stick byte here. */
+     * last 100 ms), the motion goes there. U2 and U3 have no joypad callback: the follow camera turns
+     * with the mouse (vertically too where its arc is known), with the right stick held a little the
+     * same way (follow_push); aiming, other cameras and a follow camera that keeps no turns get the
+     * mouse as a right stick here. */
     pthread_mutex_lock(&camera_lock);
     const int following=camera_hook_us && now-camera_hook_us<100000;
     const int joypad=sticks_hook_us && now-sticks_hook_us<100000;
@@ -5244,16 +5163,7 @@ static void sample(PadData *d) {
     if (injected.buttons & BTN_R2) d->r2=255;
     uint8_t *axes[4]={&d->left_x,&d->left_y,&d->right_x,&d->right_y};
     for (int i=0;i<4;++i) if (injected.stick[i]>=0) *axes[i]=(uint8_t)injected.stick[i];
-    {
-        int dir=injected.rotate ? injected.rotate : host_rotate;
-        const uint64_t at=now_us();
-        /* At a wheel: left / right (keys, or the pad-file lx= at an end) and the rotate keys turn
-         * the stick the way the wheel wants (u1_gesture_query). */
-        if (wheel_asked_us && at-wheel_asked_us<300000 &&
-            (dir || host_sideways || injected.stick[0]==0 || injected.stick[0]==255)) dir=wheel_dir;
-        rotate_stick(d,dir,at);
-    }
-    /* Builds without a joypad callback: the right stick held a little while the mouse turns the follow
+    /* U2, U3 (no joypad callback): the right stick held a little while the mouse turns the follow
      * camera's direction (follow_push, see follow_camera), unless the stick is in use */
     const uint64_t now=now_us();
     if (!pad_only_mode && follow_push!=0.0f && camera_hook_us && now-camera_hook_us<100000 &&

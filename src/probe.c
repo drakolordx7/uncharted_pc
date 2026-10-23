@@ -808,12 +808,7 @@ static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t imag
     const RuntimeGuestCallback *callbacks=runtime_guest_callbacks(&count);
     unsigned char *thunks=NULL;
     size_t used=0;
-    /* Sized from the table, so no entry is dropped for room (a fixed 32 used to cut the table's end
-     * without a word, and 8 KiB of thunks about 25 hooks). */
-    const size_t thunk_bytes=(count ? count : 1)*320;
-    uint8_t installed[count ? count : 1];
-    uint64_t hook_offsets[count ? count : 1]; size_t hooks_done=0;
-    memset(installed,0,sizeof(installed));
+    uint8_t installed[32]={0};
     guest_image_size=image_size;
     /* A/B tests: BB_CALLBACKS=0 installs none, BB_CALLBACKS_SKIP=<text> none whose name contains the text */
     const char *off=getenv("BB_CALLBACKS"), *skip=getenv("BB_CALLBACKS_SKIP");
@@ -829,10 +824,9 @@ static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t imag
         if (!mapped(segments,ns,c->offset,c->signature_size) ||
             memcmp(image+c->offset,c->signature,c->signature_size)) continue;
         if (!c->callback) {
-            memcpy(image+offset,c->patch,c->moved);
+            memcpy(image+c->offset,c->patch,c->moved);
             installed[i]=1;
-            runtime_guest_callback_installed(c);
-            printf("Callbacks: %s at %#" PRIx64 " (patch)\n",c->name,offset);
+            printf("Callbacks: %s at %#" PRIx64 " (patch)\n",c->name,c->offset);
             continue;
         }
         if (!thunks && !(thunks=near_image_memory(16384))) { printf("Callbacks: no thunk memory\n"); return; }
@@ -882,8 +876,7 @@ static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t imag
         f[0]=0xe9; memcpy(f+1,&to,4); memset(f+5,0x90,c->moved-5);
         used+=(k+15)&~(size_t)15;
         installed[i]=1;
-        runtime_guest_callback_installed(c);
-        printf("Callbacks: %s at %#" PRIx64 "\n",c->name,offset);
+        printf("Callbacks: %s at %#" PRIx64 "\n",c->name,c->offset);
     }
     /* Names start with the game ("U2 ..."): a callback missing from a game whose other callbacks
      * attached is reported; callbacks of the other games are not. */

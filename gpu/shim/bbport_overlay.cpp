@@ -1436,7 +1436,15 @@ bool ControlsChanged() {
 }
 
 bool Visible() {
-    return initialized && (menu_open || text_entry_active || hint_show || BbSettings::Get().show_fps);
+    return initialized && (menu_open || text_entry_active || hint_show || BbSettings::Get().show_fps || toast_busy);
+}
+
+void NotifyTrophy(int grade, std::string game, std::string name, std::vector<unsigned char> png) {
+    std::scoped_lock lock{toast_mutex};
+    if (toast_queue.size() < 32) {
+        toast_queue.push_back({grade, std::move(game), std::move(name), std::move(png)});
+        toast_busy = true;
+    }
 }
 
 bool CapturesInput() {
@@ -1527,6 +1535,7 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
                       ImVec2(a.x + ((b.x - a.x) - text.x) * 0.5f, a.y + ((b.y - a.y) - text.y) * 0.5f),
                       hot ? IM_COL32(255, 255, 255, 255) : IM_COL32(235, 210, 160, 255), label);
     }
+    TrophyToast();
     ImGui::Render();
 
     const vk::RenderingAttachmentInfo attachment{
