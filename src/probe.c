@@ -1289,12 +1289,12 @@ static ABI int job_lock_wait(uint64_t counter, uint64_t a, uint32_t b) {
 static void patch_job_lock_wait(uint64_t image_size) {
     const char *env=getenv("BB_JOB_LOCK_WAIT_MS");
     if (env) job_lock_wait_ms=(unsigned)strtoul(env,NULL,10);
-    if (!job_lock_wait_ms) { printf("Job lock: BB_JOB_LOCK_WAIT_MS=0, workers suspend at once\n"); return; }
+    if (!job_lock_wait_ms) { printf("Job wait: BB_JOB_LOCK_WAIT_MS=0, workers suspend at once\n"); return; }
     /* mov rdi,[rbx+0x20]; mov rsi,r15; mov edx,r14d; call try; test al,al; jne done;
      * test r12b,r12b; je not_a_worker; nop5; (suspend loop:) mov rdi,rbx; mov rsi,r15; mov edx,r14d; call SuspendJob */
     const int64_t at=find_masked("488b7b20 4c89fe 4489f2 e8???????? 84c0 75?? 4584e4 74?? 0f1f440000 4889df 4c89fe 4489f2 e8????????",
                                  image_size);
-    if (at<0) { printf("Job lock: %s\n",at==-2 ? "pattern not unique, not patched" : "pattern not found, not patched"); return; }
+    if (at<0) { printf("Job wait: %s\n",at==-2 ? "pattern not unique, not patched" : "pattern not found, not patched"); return; }
     unsigned char *p=image+at;
     int32_t rel; memcpy(&rel,p+11,4);
     job_lock_try=(uint64_t)(uintptr_t)(p+15+rel);
@@ -1302,7 +1302,7 @@ static void patch_job_lock_wait(uint64_t image_size) {
     const uint64_t not_worker=(uint64_t)(uintptr_t)(p+24+(int8_t)p[23]);
     const uint64_t suspend_loop=(uint64_t)(uintptr_t)(p+29);
     unsigned char *t=near_image_memory(4096);
-    if (!t) { printf("Job lock: no thunk memory, not patched\n"); return; }
+    if (!t) { printf("Job wait: no thunk memory, not patched\n"); return; }
     size_t k=0;
     const uintptr_t host=(uintptr_t)job_lock_wait;
     static const unsigned char test_r12b[]={0x45,0x84,0xe4,0x75,0x0e};      /* test r12b,r12b; jnz worker */
@@ -1319,7 +1319,7 @@ static void patch_job_lock_wait(uint64_t image_size) {
     t[k++]=0xff; t[k++]=0x25; memset(t+k,0,4); k+=4; memcpy(t+k,&suspend_loop,8); k+=8;  /* jmp [rip]: suspend as before */
     const int32_t to=(int32_t)((int64_t)(uintptr_t)t-(int64_t)(uintptr_t)(p+19+5));
     p[19]=0xe9; memcpy(p+20,&to,4);                        /* replaces test r12b,r12b; je */
-    printf("Job lock: workers retry a taken job mutex in place for up to %u ms before suspending their job (0x%" PRIx64 ")\n",
+    printf("Job wait: workers with a render context open wait for a job counter in place for up to %u ms before suspending their job (0x%" PRIx64 ")\n",
            job_lock_wait_ms,(uint64_t)at);
 }
 /* Restarts the game through run.sh (the settings menu: a new render resolution is a patch
