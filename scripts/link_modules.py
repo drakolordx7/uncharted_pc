@@ -13,6 +13,7 @@ Output: out/boot-linked.bin (format BBPROBE5) and out/link.json.
 """
 import bisect
 import collections
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -48,6 +49,21 @@ RUNTIME_SPELLING = {
     'libkernel': ('p', 'J'),
 }
 RUNTIME_MODULE = {'libSceAppContent': 'libSceAppContentUtil', 'libScePosix': 'libkernel'}
+
+
+@contextmanager
+def atomic_output(path):
+    """Keep the previous linked image unless its replacement is written completely."""
+    temporary = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
+    try:
+        with temporary.open('wb') as stream:
+            yield stream
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def runtime_name(identity):
@@ -310,7 +326,7 @@ def link(game, out, module_names=DEFAULT_MODULES, exe='eboot.bin'):
         raise ValueError('unsupported eboot TLS layout')
     procparam = next(p for p in main['ph'] if p['type'] == 0x61000001)
     red_zone = protect_image(image, segments, relocs, text_sha256(main))
-    with (out / 'boot-linked.bin').open('wb') as f:
+    with atomic_output(out / 'boot-linked.bin') as f:
         f.write(struct.pack('<8s6Q', b'BBPROBE5', len(image), entry, len(segments), len(relocs), len(names), flags))
         f.write(struct.pack('<Q', procparam['vaddr']))
         f.write(struct.pack('<4Q', *main_tls_values))
