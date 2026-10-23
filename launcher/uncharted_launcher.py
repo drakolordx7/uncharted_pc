@@ -66,7 +66,7 @@ PRESENT_MODES = [('Mailbox', 'Mailbox (low latency, no tearing)'), ('Fifo', 'FIF
 # the prerecorded cutscenes keep 60 frames per second at every setting.
 FRAME_RATES = [('30', '30 FPS'), ('60', '60 FPS (as on PS4)'), ('120', '120 FPS'), ('144', '144 FPS (experimental)'),
                ('165', '165 FPS (experimental)'), ('240', '240 FPS (experimental)')]
-FPS_LIMITS = [('0', 'Default'), ('30', '30 FPS'), ('45', '45 FPS'), ('60', '60 FPS'),
+FPS_LIMITS = [('0', 'No limit'), ('30', '30 FPS'), ('45', '45 FPS'), ('60', '60 FPS'),
               ('90', '90 FPS'), ('120', '120 FPS'), ('240', '240 FPS')]
 # The window (or the screen in fullscreen) shows the game's picture at its size: FSR 1 (EASU) or
 # bilinear when the picture is smaller, then RCAS sharpening (BB_RCAS_ATTENUATION, lower is sharper).
@@ -80,14 +80,14 @@ WINDOW_SIZES = [('1280x720', '1280 × 720'), ('1600x900', '1600 × 900'),
 # width; the games keep their memory for it, so the sizes stop where it runs out.
 RENDER_HEIGHTS = [('1080', "1080p (the games' own)"), ('1440', '1440p'), ('1620', '1620p'), ('2160', '2160p (4K)')]
 ASPECTS = [('16:9', "16:9 (the games' own)"), ('21:9', '21:9 ultrawide'), ('32:9', '32:9 super ultrawide'),
-           ('window', "The shape of the window or screen")]
+           ('window', 'Match the window or screen')]
 ASPECT_RATIOS = {'16:9': 16 / 9, '21:9': 64 / 27, '32:9': 32 / 9}
 # Widths the screens of these shapes really have at each height (21:9 is 64:27 at 1080p and 43:18 at 1440p).
 SCREEN_WIDTHS = {('21:9', 1080): 2560, ('21:9', 1440): 3440, ('21:9', 1600): 3840, ('21:9', 1620): 3840,
                  ('21:9', 2160): 5120, ('32:9', 1080): 3840, ('32:9', 1440): 5120, ('32:9', 2160): 7680}
 MAX_RENDER_PIXELS = 5_800_000   # what the games' GPU memory holds: 3200x1800 starts, 4K does not (docs/resolution.md)
-SPEAKERS = [('auto', 'Automatic (the Windows speaker setup)'), ('2', 'Stereo'), ('6', '5.1 surround'), ('8', '7.1 surround')]
-SCALERS = [('fsr1', 'FSR 1 (AMD FidelityFX, sharp)'), ('bilinear', 'Smooth (bilinear)')]
+SPEAKERS = [('auto', 'Automatic (Windows setting)'), ('2', 'Stereo'), ('6', '5.1 surround'), ('8', '7.1 surround')]
+SCALERS = [('fsr1', 'FSR 1 (sharp)'), ('bilinear', 'Smooth (bilinear)')]
 SHARPENING = [('off', 'Off'), ('1000', 'Low'), ('500', 'Medium'), ('250', 'High'), ('0', 'Maximum')]
 # Temporal anti-aliasing at the games' 1920x1080 (BB_UPSCALER): it takes the scene before the
 # games' post-processing with their own motion vectors, so it replaces their edge smoothing.
@@ -99,11 +99,11 @@ AA_SHARPNESS = [('0', 'Off'), ('0.2', 'Low'), ('0.4', 'Medium'), ('0.7', 'High')
 # Frames generated between two of the game's (BB_FRAME_GEN, BB_FRAME_GEN_MULTIPLIER).
 FRAME_GENERATION = [('off', 'Off'), ('fsr3', 'AMD FSR 3 Frame Generation (any GPU)'),
                     ('dlss', 'NVIDIA DLSS Frame Generation (GeForce RTX 40/50)')]
-BUTTON_PROMPTS = [('auto', 'Automatic (follows the device you used last)'),
-                  ('keyboard', 'Keyboard and mouse keys'), ('xbox', 'Xbox buttons'),
-                  ('0', "PlayStation buttons (the game's own)")]
-FRAME_GEN_MULTIPLIERS = [('2', '2× (one generated frame)'), ('3', '3× (DLSS on GeForce RTX 50)'),
-                         ('4', '4× (DLSS on GeForce RTX 50)')]
+BUTTON_PROMPTS = [('auto', 'Automatic (last device used)'),
+                  ('keyboard', 'Keyboard and mouse'), ('xbox', 'Xbox'),
+                  ('0', "PlayStation (the game's own)")]
+FRAME_GEN_MULTIPLIERS = [('2', '2×'), ('3', '3× (DLSS, GeForce RTX 50)'),
+                         ('4', '4× (DLSS, GeForce RTX 50)')]
 # Controls (input.ini, read by the game: src/runtime_pad.c). Actions with their PS4 names, the
 # default keys ("A|B": two bindings) and the default controller buttons (SDL names).
 BUTTON_ACTIONS = [
@@ -154,8 +154,8 @@ WIN_NUMPAD = {**{0x60 + n: f'Keypad {n}' for n in range(10)},
               0x6A: 'Keypad *', 0x6B: 'Keypad +', 0x6D: 'Keypad -', 0x6E: 'Keypad .', 0x6F: 'Keypad /'}
 MOUSE_SENS_MIN, MOUSE_SENS_MAX = 0.1, 10.0  # the Controls page slider (the game's default pace is 1)
 # Insert opens the in-game settings menu; Left Alt frees the mouse cursor.
-RESERVED_KEYS = {'Insert': 'Insert opens the in-game settings menu.',
-                 'Alt_L': 'Left Alt frees the mouse cursor while held.'}
+RESERVED_KEYS = {'Insert': 'Insert is reserved for the in-game settings menu.',
+                 'Alt_L': 'Left Alt is reserved for freeing the mouse cursor.'}
 
 APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'start': 'u1', 'language': '1', 'player_name': '',
                 'fullscreen': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False,
@@ -819,7 +819,8 @@ class Launcher:
         head = tk.Frame(shell, bg=SURFACE)
         head.pack(fill='x', padx=self.px(26), pady=(self.px(18), self.px(14)))
         tk.Label(head, text=title, bg=SURFACE, fg=TEXT, font=self.font_title).pack(anchor='w')
-        tk.Label(head, text=subtitle, bg=SURFACE, fg=MUTED, font=self.font_ui).pack(anchor='w', pady=(2, 0))
+        if subtitle:
+            tk.Label(head, text=subtitle, bg=SURFACE, fg=MUTED, font=self.font_ui).pack(anchor='w', pady=(2, 0))
         # The page body scrolls when it is taller than the window (Display holds many options).
         body = tk.Frame(shell, bg=SURFACE)
         body.pack(fill='both', expand=True)
@@ -912,7 +913,7 @@ class Launcher:
             self.nav[name], self.nav_pills[name], self.nav_marks[name] = item, pill, mark
         tk.Frame(side, bg=BG).pack(fill='both', expand=True)
         self.side = side
-        self.side_note = tk.Label(side, text=_('Native port: the original PS4 game code runs directly on Windows.'),
+        self.side_note = tk.Label(side, text='',
                                   bg=BG, fg=MUTED, font=('Segoe UI', 9), justify='left',
                                   wraplength=side_w - 36)
         self.side_note.pack(anchor='w', padx=18, pady=(0, 18))
@@ -1002,7 +1003,7 @@ class Launcher:
         head.pack(fill='x', padx=self.px(22), pady=(self.px(14), self.px(8)))
         tk.Label(head, text=_('Library'), bg=SURFACE, fg=TEXT,
                  font=('Segoe UI Semibold', 14)).pack(side='left')
-        tk.Label(head, text=_('Double-click a cover to launch'), bg=SURFACE, fg=MUTED,
+        tk.Label(head, text=_('Double-click to play'), bg=SURFACE, fg=MUTED,
                  font=self.font_ui_sm).pack(side='right')
         cards = tk.Frame(shell, bg=SURFACE)
         cards.pack(fill='x', padx=self.px(14), pady=(0, self.px(6)))
@@ -1126,7 +1127,7 @@ class Launcher:
         c.create_rectangle(0, h - 1, w, h, fill=GOLD_DIM, outline='')
         info = self.info
         sub = (f"{info['id']}  ·  {_('version')} {info['version']}" if info
-               else _('Set your game folder on the Game page'))
+               else _('No game folder set'))
         c.create_text(self.px(24), h - self.px(14), text=sub, anchor='sw', fill=GOLD,
                       font=self.font_brand_sm)
         c.create_text(w - self.px(24), h - self.px(14), text=f'{_(title)}  ·  {_(subtitle)}',
@@ -1186,106 +1187,87 @@ class Launcher:
             return None
 
     def build_game(self):
-        f = self.page('game', _('Game'), _('Your own decrypted dump of the collection (CUSA02343, CUSA02320, …).'))
+        f = self.page('game', _('Game'), '')
         self.folder(f, 'game_dir', _('Game folder'), _('The folder with eboot.bin'),
-                    _('The folder with eboot.bin, big2-ps4_Shipping.elf and big3-ps4_Shipping.elf. '
-                      'Leave it empty if every game has a folder of its own, below.'),
+                    _('Holds eboot.bin, big2-ps4_Shipping.elf and big3-ps4_Shipping.elf. '
+                      'Leave empty if each game has its own folder below.'),
                     on_change=self.refresh)
-        self.folder(f, 'user_dir', _('Saves folder'), _('Where saves and the shader cache are kept'),
-                    _('Empty: the user folder next to the launcher.'))
+        self.folder(f, 'user_dir', _('Saves folder'), _('Choose the saves folder'),
+                    _('Saves and the shader cache go here. Empty uses the user folder next to the launcher.'))
         self.section(f, _('Separate game folders'))
-        self.note(f, _('Only when the games are not in one collection folder (each dumped on its own). A game with '
-                       'a folder here is taken from it; the others from the collection folder above.'), top=2)
+        self.note(f, _('Only needed if the games are dumped separately. Empty rows use the game folder above.'), top=2)
         for key, _title, subtitle, _exe in GAMES:
-            self.folder(f, f'game_dir_{key}', _(subtitle.split(' · ')[0]), _('The folder of this game'),
-                        _('Empty: the collection folder.'), on_change=self.refresh)
+            self.folder(f, f'game_dir_{key}', _(subtitle.split(' · ')[0]), _('Choose the folder for this game'),
+                        on_change=self.refresh)
         self.section(f, _('Console'))
         self.row(f, _('Language'), self.choice(f, 'language', LANGUAGES, 30),
-                 _('The language the PS4 would be set to; the games use it for text and speech.'))
+                 _('Game text and voices.'))
         name = self.ttk.Entry(f, textvariable=self.var('player_name'), width=30)
-        self.row(f, _('Player name'), name, _('Shown where the game uses the PSN name.'))
+        self.row(f, _('Player name'), name)
 
     def build_display(self):
-        f = self.page('display', _('Display'), _('How the game window is shown.'))
+        f = self.page('display', _('Display'), '')
         self.check(f, 'fullscreen', _('Fullscreen'))
-        self.row(f, _('Presentation'), self.choice(f, 'present_mode', PRESENT_MODES, 34),
-                 _('Mailbox shows each frame as soon as it is ready without tearing; FIFO waits for the display.'))
+        self.row(f, _('Presentation'), self.choice(f, 'present_mode', PRESENT_MODES, 34))
         refresh = display_refresh_rate()
-        hint = _('Gameplay keeps its normal speed at every setting; the cutscene videos always play at '
-                 '60 FPS. Above your display\'s refresh rate use Mailbox or Immediate.')
+        hint = _('How fast the game itself runs. Cutscene videos stay at 60. Above your display\'s refresh '
+                 'rate, use Mailbox or Immediate.')
         if refresh:
             hint += ' ' + _('Your display runs at {} Hz.').format(refresh)
-        self.row(f, _('Engine frame rate'), self.choice(f, 'frame_rate', FRAME_RATES, 34), hint)
-        self.row(f, _('Frame rate limit'), self.choice(f, 'fps_limit', FPS_LIMITS, 34),
-                 _('The engine frame rate is the highest it can go. Default keeps the port\'s normal behavior.'))
+        self.row(f, _('Game frame rate'), self.choice(f, 'frame_rate', FRAME_RATES, 34), hint)
+        self.row(f, _('Frame rate cap'), self.choice(f, 'fps_limit', FPS_LIMITS, 34),
+                 _('Caps the frames shown on screen. Doesn\'t change game speed.'))
         self.section(f, _('Resolution'))
         self.row(f, _('Render resolution'), self.choice(f, 'render_height', RENDER_HEIGHTS, 34),
-                 _('The size the games draw at, so a 1440p or 4K screen gets a sharper picture, not an enlarged '
-                   '1080p one. It needs more graphics memory and a faster GPU; the games\' GPU memory limits the '
-                   'largest size.'))
+                 _('Sharper on 1440p and 4K screens, but needs a faster GPU and more graphics memory. '
+                   'The games cap the largest size.'))
         self.row(f, _('Aspect ratio'), self.choice(f, 'aspect', ASPECTS, 34),
-                 _('Ultrawide screens: the games draw a wider view (more at the sides) instead of stretching the '
-                   '16:9 picture. "The shape of the window or screen" follows the window size below, or the '
-                   'screen in fullscreen.'))
+                 _('On ultrawide screens, shows more at the sides instead of stretching.'))
         self.row(f, _('Window size'), self.choice(f, 'window_size', WINDOW_SIZES, 34),
-                 _('The window the picture is shown in; fullscreen uses the screen. A picture of another size is '
-                   'scaled to fit (FSR 1 below when it is enlarged).'))
+                 _('Not used in fullscreen.'))
         self.row(f, _('Upscaling'), self.choice(f, 'scaler', SCALERS, 34),
-                 _('FSR 1 keeps edges sharp when the image is enlarged; bilinear is softer.'))
+                 _('Only used when the picture is smaller than the window.'))
         self.row(f, _('Sharpening'), self.choice(f, 'sharpening', SHARPENING, 34),
-                 _('AMD RCAS after FSR 1 (only while the image is enlarged).'))
+                 _('Only used when the picture is enlarged.'))
         self.section(f, _('Anti-aliasing'))
         modes = ANTI_ALIASING + ([FSR411] if fsr411_assets() else []) + ([XESS] if xess_available() else [])
         self.row(f, _('Anti-aliasing'), self.choice(f, 'anti_aliasing', modes, 34),
-                 _('Temporal anti-aliasing at the games\' 1920 × 1080, with their own motion vectors: '
-                   'smoother edges and less shimmering than the games\' own. DLSS needs a GeForce RTX; '
-                   'FSR 4 runs best on a Radeon RX 7000/9000 or a GeForce RTX 40/50. '
-                   'Intel XeSS runs on any GPU (best on Intel Arc).'))
+                 _('FSR 4 runs best on a Radeon RX 7000/9000 or a GeForce RTX 40/50.'))
         self.row(f, _('Anti-aliasing sharpness'), self.choice(f, 'aa_sharpness', AA_SHARPNESS, 34))
         self.section(f, _('Frame generation'))
-        hint = _('Frames made between two of the game\'s, for smoother motion: 60 FPS shows as 120. '
-                 'Use Mailbox or Immediate presentation and a display of at least that refresh rate. '
-                 'Adds a little input latency; menus and cutscene videos are not generated. Use it '
-                 'with the 60 or 120 FPS frame rate: above about 165 FPS it pauses.')
+        hint = _('60 FPS shows as 120, at the cost of a little input latency. Use Mailbox or Immediate and a '
+                 'display at the higher rate. Works with a game frame rate of 60 or 120; above about 165 FPS '
+                 'it pauses. Menus and cutscene videos are left alone.')
         if refresh:
             hint += ' ' + _('Your display runs at {} Hz.').format(refresh)
         self.row(f, _('Frame generation'), self.choice(f, 'frame_generation', FRAME_GENERATION, 34), hint)
         self.row(f, _('Multiplier'), self.choice(f, 'frame_gen_multiplier', FRAME_GEN_MULTIPLIERS, 34),
-                 _('FSR 3 makes one frame (2×). DLSS makes up to three on a GeForce RTX 50 (4×), '
-                   'one on an RTX 40.'))
+                 _('FSR 3 and RTX 40 only do 2×.'))
         self.check(f, 'show_fps', _('Show the FPS counter'))
         self.section(f, _('Audio'))
         self.row(f, _('Speakers'), self.choice(f, 'speakers', SPEAKERS, 34),
-                 _('What the games are told the speakers are, which sets the choices in their Audio Output '
-                   'menu (stereo, 5.1, 7.1). Automatic follows the Windows speaker configuration of the '
-                   'default playback device; set it to 5.1 or 7.1 when the games only offer stereo.'))
+                 _('Set 5.1 or 7.1 if the games only offer stereo.'))
 
     def build_controls(self):
-        f = self.page('controls', _('Controls'),
-                      _('Keyboard, mouse and controller. They work together; changes apply when the game starts.'))
+        f = self.page('controls', _('Controls'), _('Changes apply when the game starts.'))
         self.key_buttons = {}
         self.capturing = None
         self.section(f, _('Mouse'), top=6)
         self.check(f, 'mouse_look', _('Look around with the mouse'),
-                   _('The cursor stays in the game window; hold Left Alt (or switch windows) to free it. '
-                     'Insert opens the in-game settings menu.'))
+                   _('Hold Left Alt to free the cursor. Insert opens the in-game settings menu.'))
         from uncharted_widgets import Slider
         self.row(f, _('Mouse sensitivity'),
                  Slider(self.tk, self.target(f), self.var('mouse_sensitivity'), MOUSE_SENS_MIN, MOUSE_SENS_MAX, 0.05,
                         COLORS, self.px, self.font_ui_md, width=300, log=True, entry=True),
-                 _('How far the camera turns for a mouse movement; 1.00 is the default. Drag the slider or '
-                   'type a number (0.1 to 10) for a faster turn.'))
+                 _('Default is 1.00 (range 0.1 to 10).'))
         self.check(f, 'mouse_invert_y', _('Invert the mouse vertically'))
 
-        self.section(f, _('Button pictures'))
-        self.row(f, _('Show in the game'), self.choice(f, 'button_prompts', BUTTON_PROMPTS, 40),
-                 _('The pictures of buttons in menus and hints. Automatic shows your keys while you use '
-                   'the keyboard or mouse, Xbox buttons after an Xbox (or other) controller, and the '
-                   'PlayStation buttons after a PlayStation controller.'))
+        self.section(f, _('Button prompts'))
+        self.row(f, _('Style'), self.choice(f, 'button_prompts', BUTTON_PROMPTS, 40))
 
         self.section(f, _('Keyboard and mouse buttons'))
-        self.note(f, _('Click a box, then press a key or a mouse button (the wheel counts too). '
-                       '✕ removes a binding. Each action can have two.'), top=2)
+        self.note(f, _('Click a box, then press a key, a mouse button or scroll the wheel. ✕ clears a binding. '
+                       'Each action takes two.'), top=2)
         card = self.target(f)
         table = self.tk.Frame(card, bg=CARD)
         table.grid(row=self.next_row(card), column=0, columnspan=2, sticky='w', pady=(10, 0))
@@ -1308,10 +1290,9 @@ class Launcher:
         self.show_keys()
         holder = self.tk.Frame(card, bg=CARD)
         holder.grid(row=self.next_row(card), column=0, columnspan=2, sticky='w', pady=(12, 0))
-        self.pill(holder, _('Default keys'), self.reset_keys).pack(side='left')
+        self.pill(holder, _('Reset keys'), self.reset_keys).pack(side='left')
 
         self.section(f, _('Controller'))
-        self.note(f, _('Which controller button gives each PS4 button (Xbox / PlayStation names).'), top=2)
         self.pad_vars = {}
         for action, title, _k, _p in BUTTON_ACTIONS:
             var = self.tk.StringVar(value=(self.app.get('pad_bindings') or {}).get(action, DEFAULT_PAD[action]))
@@ -1326,16 +1307,15 @@ class Launcher:
         card = self.target(f)
         holder = self.tk.Frame(card, bg=CARD)
         holder.grid(row=self.next_row(card), column=0, columnspan=2, sticky='w', pady=(12, 0))
-        self.pill(holder, _('Default controller buttons'), self.reset_pad).pack(side='left')
+        self.pill(holder, _('Reset controller buttons'), self.reset_pad).pack(side='left')
 
         self.section(f, _('Vibration'))
         self.controller_name = self.ttk.Label(self.target(f), text=_('Detecting…'))
         self.row(f, _('Controller'), self.controller_name)
-        self.controller_status = self.ttk.Label(self.target(f), text=_('Checking vibration support…'),
+        self.controller_status = self.ttk.Label(self.target(f), text=_('Checking…'),
                                                 style='Muted.TLabel')
         self.row(f, _('Status'), self.controller_status)
-        self.check(f, 'pad_vibration', _('Controller vibration'),
-                   _('The setting applies the next time the game starts.'))
+        self.check(f, 'pad_vibration', _('Controller vibration'))
         self.row(f, _('Vibration intensity'),
                  Slider(self.tk, self.target(f), self.var('pad_vibration_strength'), 0, 100, 5,
                         COLORS, self.px, self.font_ui_md, fmt='{:.0f}', width=300, suffix='%'))
@@ -1460,9 +1440,7 @@ class Launcher:
     # ---- trophies ----------------------------------------------------------------------------
     def build_trophies(self):
         tk = self.tk
-        f = self.page('trophies', _('Trophies'),
-                      _("The games' own trophy lists. A trophy shows here, and as a notice in the game, "
-                        'when you earn it.'))
+        f = self.page('trophies', _('Trophies'), '')
         self.trophy_game = self.app.get('trophy_game') if self.app.get('trophy_game') in dict(
             (k, 1) for k, _t, _s, _e in GAMES) else GAMES[0][0]
         self.trophy_filter = 'all'
@@ -1618,13 +1596,12 @@ class Launcher:
         self.root.after(1500, self.poll_trophies)
 
     def build_advanced(self):
-        f = self.page('advanced', _('Advanced'), _('Maintenance and options for testing.'))
+        f = self.page('advanced', _('Advanced'), '')
         self.check(f, 'close_on_play', _('Close the launcher when the game starts'))
         extra = self.ttk.Entry(f, textvariable=self.var('extra_env'), width=60)
-        self.row(f, _('Environment'), extra, _('Extra variables for the game, NAME=value separated by spaces.'))
+        self.row(f, _('Environment variables'), extra, _('NAME=value, separated by spaces.'))
         self.section(f, _('Shader cache'))
-        self.note(f, _('Compiled shaders are kept so the game does not stutter again. Clear the cache only '
-                       'when the picture is broken after an update.'), top=2)
+        self.note(f, _('Clear it only if the picture is broken after an update.'), top=2)
         card = self.target(f)
         holder = self.tk.Frame(card, bg=CARD)
         holder.grid(row=self.next_row(card), column=0, columnspan=2, sticky='w', pady=(12, 0))
@@ -1632,7 +1609,7 @@ class Launcher:
         self.pill(holder, _('Open the saves folder'),
                   lambda: self.open_path(self.var('user_dir').get(), 'user_dir')).pack(side='left', padx=(8, 0))
         self.section(f, _('Updates'))
-        self.check(f, 'check_updates', _('Look for a new version when the launcher starts'))
+        self.check(f, 'check_updates', _('Check for updates on launch'))
         card = self.target(f)
         holder = self.tk.Frame(card, bg=CARD)
         holder.grid(row=self.next_row(card), column=0, columnspan=2, sticky='w', pady=(12, 0))
@@ -1677,7 +1654,7 @@ class Launcher:
         for key in self.cards:
             self.draw_card(key)
         if not info:
-            ready = _('Choose the game folder (the one with eboot.bin) on the Game page.')
+            ready = _('Set the game folder on the Game page.')
         else:
             missing = [title for key, title, _s, _e in GAMES if not self.available[key]]
             ready = f"{info['title']} · {info['id']} · {_('version')} {info['version']}"
@@ -1793,7 +1770,7 @@ class Launcher:
         self.stop_button.configure(state='normal')
         self.controller_refresh_button.configure(state='disabled')
         self.controller_test_button.configure(state='disabled')
-        self.status.configure(text=_('Preparing the game; it opens in its own window…'), fg=GOLD)
+        self.status.configure(text=_('Starting the game…'), fg=GOLD)
         if self.app.get('close_on_play'):
             self.root.after(5000, self.root.destroy)
 
@@ -1844,7 +1821,7 @@ class Launcher:
                         self.entered = True
                         self.status.configure(text=_('The game is running.'), fg=GOLD)
                     elif item.startswith('Switching to '):
-                        self.status.configure(text=_('Starting the next game of the collection…'), fg=GOLD)
+                        self.status.configure(text=_('Starting the next game…'), fg=GOLD)
                     self.append(item)
         except queue.Empty:
             pass
@@ -1938,8 +1915,7 @@ class Launcher:
             webbrowser.open(page)
             return
         if not self.messagebox.askyesno(NAME, _(
-                'Install version {} now? The launcher closes, installs it and opens again. Saves and settings '
-                'are kept.').format(version)):
+                'Install version {} now? The launcher will restart. Your saves and settings stay.').format(version)):
             return
         self.update_button.configure(state='disabled')
 
@@ -1990,7 +1966,7 @@ class Launcher:
         except OSError as error:
             self.messagebox.showerror(NAME, _('Could not clear the shader cache: {}').format(error))
             return
-        self.messagebox.showinfo(NAME, _('Shader cache cleared. The next start stutters for a while as it is rebuilt.'))
+        self.messagebox.showinfo(NAME, _('Shader cache cleared. The next launch will stutter while it rebuilds.'))
 
     def shortcut(self):
         """Uncharted.lnk on the desktop."""
@@ -2017,7 +1993,7 @@ class Launcher:
         steam = bbport_steam.steam_folder()
         configs = bbport_steam.user_configs(steam) if steam else []
         if not configs:
-            self.messagebox.showerror(NAME, _('Steam was not found on this PC (or nobody has signed in to it yet).'))
+            self.messagebox.showerror(NAME, _("Couldn't find Steam, or nobody has signed in to it yet."))
             return
         if FROZEN:
             exe, options = Path(sys.executable), '--play'
@@ -2027,8 +2003,8 @@ class Launcher:
         self.collect()
         restart = False
         if bbport_steam.steam_running():
-            if not self.messagebox.askyesno(NAME, _('Steam has to close while the game is added; it starts '
-                                                    'again afterwards. Close Steam now?')):
+            if not self.messagebox.askyesno(NAME, _('Steam needs to close to add the game, and will '
+                                                    'reopen afterwards. Close it now?')):
                 return
             subprocess.Popen([str(steam / 'steam.exe'), '-shutdown'], creationflags=NO_WINDOW)
             for _i in range(60):
@@ -2056,8 +2032,7 @@ class Launcher:
             return
         if restart:
             os.startfile('steam://open/games')
-        self.messagebox.showinfo(NAME, _('The collection is in your Steam library. It starts with the settings '
-                                         'saved in this launcher.'))
+        self.messagebox.showinfo(NAME, _('Added to your Steam library. It launches with the settings saved here.'))
 
     def close(self):
         try:
