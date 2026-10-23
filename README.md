@@ -83,6 +83,7 @@ official repository; the link goes to it.
 - Shader fixes: scalar instructions inside EXEC scopes ([#468](https://github.com/Supermedo/uncharted_pc/pull/468)) by G3545, and GCN-style NaN compares (from shadPS4) by iannitram
 - Large compute dispatches are split, and a sparse-capable queue is picked when the GPU needs it: Hugo Borges
 - Saves are written so an interrupted save can't corrupt the file: Mevlock
+- Freeze fixes: the GPU thread could hang on its list of GPU-written memory (an Uncharted 3 chapter 1 freeze, and a likely cause of Uncharted 2 freezes), and flips at deaths, cutscenes and movie changes no longer wait on the thread that raised them: Mevlock
 - Launcher: Stop reliably ends the game, a controller vibration toggle, and a frame rate cap: poncho-ajmv, Hugo Borges
 
 Each release lists its exact changes in the [release notes](https://github.com/drakolordx7/uncharted_pc/releases).

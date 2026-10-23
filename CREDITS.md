@@ -25,7 +25,7 @@ in the download.
 | [kuraeow](https://github.com/kuraeow) | Idle job workers sleep, which lowers CPU load on 4 and 6 core processors ([#346](https://github.com/Supermedo/uncharted_pc/pull/346)) |
 | [iannitram](https://github.com/iannitram) | The nested indirect buffer leak fix, backported from shadPS4 ([#387](https://github.com/Supermedo/uncharted_pc/pull/387)), which matches our #445; early flip IRQ, missing CE task guard, FSR 3.1 protected memory, FSR patch line endings; compute fences and queue drain (faster U2/U3, U3 freeze fix), crash guards for bad GPU commands, failed pipelines and null vertex tables, GCN NaN compares |
 | [currantsforeyes](https://github.com/currantsforeyes) | Itemzflow plain ELF support, save mount limit, flexible mapping split, EU CUSA02344 red-zone tables, window title |
-| [Mevlock](https://github.com/Mevlock) | FSR 3 frame generation video memory leak, COND_EXEC condition width, U3 cloth shared memory bounds, U3 flashlight and shadow slice dropout, tight typed-buffer write ranges, crash-safe saves |
+| [Mevlock](https://github.com/Mevlock) | FSR 3 frame generation video memory leak, COND_EXEC condition width, U3 cloth shared memory bounds, U3 flashlight and shadow slice dropout, tight typed-buffer write ranges, crash-safe saves, freeze fixes (buffer cache range lock, end-of-pipe flips, precise read-backs) |
 | [eduardoghi](https://github.com/eduardoghi) | Numpad bindings saved as keypad keys ([#473](https://github.com/Supermedo/uncharted_pc/pull/473)) |
 | [poncho-ajmv](https://github.com/poncho-ajmv) | Launcher error reporting (crash reason, input settings, shader cache), reliable Stop, vibration toggle |
 | [soni424](https://github.com/soni424) | Dark launcher title bar, null shader binding guard |
