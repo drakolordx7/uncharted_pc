@@ -1241,41 +1241,50 @@ static void patch_null_binding_handler(uint64_t image_size) {
     }
     if (!patched) printf("Shader bindings: null handler call site not found\n");
 }
-/* The job system's mutex (corelib job scheduling): a job worker that finds it taken suspends its
- * job (SuspendJob) and retries when the job runs again, which may be on another worker; other
- * threads sleep 1 ms and retry in place. On the PS4 each worker owns a core and a holder lets go
- * within microseconds. With 4 cores Windows preempts holders, so jobs suspended there: U2's water
- * Draw takes such a lock with a render command context open, resumed on another worker and failed
+/* The job system's counter wait (corelib job scheduling: until [counter+0x20] == or <= a target):
+ * a job worker that finds the counter not there yet suspends its job (SuspendJob) and retries when
+ * the job runs again, which may be on another worker; other threads sleep 1 ms and retry in place.
+ * On the PS4 each worker owns a core and the counter is there in time. With 4 cores the jobs it
+ * waits for lag: U2's water Draw waits with a render command context open, resumed on another
+ * worker and failed
  * "m_workerThreadIndex == GetCurrentWorkerThreadIndex()" (End) and "cmdBuf.m_bInUse == false"
  * (Begin, on the worker it left) within 1-7 deaths of a 4-core death loop. A worker with a render
  * context open (the Begin/End hooks above) now first retries in place (SwitchToThread, then 1 ms
  * sleeps, up to BB_JOB_LOCK_WAIT_MS, default 250; 0: off) and suspends its job only after that, as
- * before (a holder that is itself a suspended job still gets a free worker); other workers
- * suspend at once. Lock: try(rdi=[rbx+0x20], rsi=r15, edx=r14d) -> al. */
+ * before (the jobs it waits for still get a free worker); other workers suspend at once. The
+ * counter is read again on every try. */
 static uint64_t job_lock_try;
 static unsigned job_lock_wait_ms=250;
-static ABI int job_lock_wait(uint64_t lock, uint64_t a, uint32_t b) {
+static volatile long job_lock_fallbacks;
+static ABI int job_lock_wait(uint64_t counter, uint64_t a, uint32_t b) {
     typedef int (ABI *Try)(uint64_t, uint64_t, uint32_t);
-    const Try try_lock=(Try)(uintptr_t)job_lock_try;
+    const Try try_value=(Try)(uintptr_t)job_lock_try;
+    const volatile uint64_t *value=(const volatile uint64_t *)(uintptr_t)(counter+0x20);
+#define try_lock(c,x,y) try_value(*value,(x),(y))
 #ifdef _WIN32
     /* Without a render context open the job may move: suspend at once, as the game does (waiting
      * in place for every taken lock starved the job system: 3.6 fps loading with 4 cores). */
     if (!runtime_ndgi_open) return 0;
     for (unsigned i=0;i<16;++i) {
-        if (try_lock(lock,a,b)&0xff) return 1;
+        if (try_lock(counter,a,b)&0xff) return 1;
         SwitchToThread();
     }
     for (unsigned ms=0;ms<job_lock_wait_ms;++ms) {
-        if (try_lock(lock,a,b)&0xff) return 1;
+        if (try_lock(counter,a,b)&0xff) return 1;
         Sleep(1);
     }
 #else
     for (unsigned i=0;i<job_lock_wait_ms*10;++i) {
-        if (try_lock(lock,a,b)&0xff) return 1;
+        if (try_lock(counter,a,b)&0xff) return 1;
         usleep(100);
     }
 #endif
-    return try_lock(lock,a,b)&0xff;
+    if (try_lock(counter,a,b)&0xff) return 1;
+    const long n=__atomic_add_fetch(&job_lock_fallbacks,1,__ATOMIC_RELAXED);
+    if (n<=20) printf("Job wait: a worker with a render context open waited %u ms in vain, its job suspends (%ld)\n",
+                      job_lock_wait_ms,n);
+    return 0;
+#undef try_lock
 }
 static void patch_job_lock_wait(uint64_t image_size) {
     const char *env=getenv("BB_JOB_LOCK_WAIT_MS");
@@ -1300,7 +1309,7 @@ static void patch_job_lock_wait(uint64_t image_size) {
     memcpy(t+k,test_r12b,sizeof(test_r12b)); k+=sizeof(test_r12b);
     t[k++]=0xff; t[k++]=0x25; memset(t+k,0,4); k+=4; memcpy(t+k,&not_worker,8); k+=8;  /* jmp [rip]: not a worker */
     /* worker: */
-    static const unsigned char args[]={0x48,0x8b,0x7b,0x20,0x4c,0x89,0xfe,0x44,0x89,0xf2}; /* rdi=[rbx+0x20], rsi=r15, edx=r14d */
+    static const unsigned char args[]={0x48,0x89,0xdf,0x90,0x4c,0x89,0xfe,0x44,0x89,0xf2}; /* rdi=rbx (the counter), rsi=r15, edx=r14d */
     memcpy(t+k,args,sizeof(args)); k+=sizeof(args);
     t[k++]=0x48; t[k++]=0xb8; memcpy(t+k,&host,8); k+=8;   /* movabs rax, job_lock_wait */
     t[k++]=0xff; t[k++]=0xd0;                              /* call rax (rsp aligned as at the original calls) */
