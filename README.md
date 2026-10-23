@@ -120,7 +120,7 @@ If you'd rather your change didn't come in, open an issue and we'll take it out.
 ## Requirements
 
 - Windows 10 (1903 or later) or Windows 11, 64-bit.
-- An Intel Core 4th generation (Haswell) or newer, an AMD Ryzen, or an AMD FX.
+- An Intel Core 2nd generation (Sandy Bridge) or newer, an AMD Ryzen, or an AMD FX (the CPU needs AVX).
 - A graphics card with Vulkan 1.3 and a current driver, with 6 GB of video memory or more.
   4 GB cards (GTX 1650, RX 570) run out of video memory and crash after a while; on those, keep
   Anti-aliasing and Frame generation off.
@@ -145,9 +145,14 @@ If you'd rather your change didn't come in, open an issue and we'll take it out.
   0.3.4.
 - Uncharted 2 loading crashes (`ReadSync file (req/read: ...)`, white textures then
   `iSubMesh < m_numSubMeshInstances`): file reads could come back cut short. Fixed in 0.3.5.
-- Older CPUs: the games use instructions of the PS4's processor (AVX, BMI1, MOVBE, LZCNT).
-  AMD FX runs since 0.3.6 (its missing MOVBE is emulated, a bit slower). Intel Core 3rd generation
-  and older can't run the games yet; the game says so instead of crashing with 0xc000001d.
+- Older CPUs: the games use instructions of the PS4's processor (AVX, BMI1, MOVBE, LZCNT, F16C).
+  AMD FX runs since 0.3.6 (its missing MOVBE is emulated, a bit slower). Intel Core 2nd and 3rd
+  generation (Sandy Bridge, Ivy Bridge) and the Xeon E3/E5 v1 and v2 lack BMI1, MOVBE, LZCNT (and
+  Sandy Bridge F16C): the loader rewrites the game's uses of them when it starts (about 2,200 to
+  2,900 places per game) and runs them in software, a little slower (#197, #515). That needs the
+  Python package iced-x86 when you run from source; the release has it. New, tested on a modern
+  CPU with the rewrite forced (`BB_FORCE_LEGACY_CPU=1`), not yet on real Sandy or Ivy Bridge hardware.
+  CPUs without AVX (Nehalem and older, Phenom II) still can't run the games.
 - Uncharted 2, train wreck: `IsFinite(deltaTransform)` in character-leg-ik.cpp, fixed in 0.3.6
   for the EU 1.00 version.
 - Frame rates above 120 are experimental.

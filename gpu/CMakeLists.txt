@@ -269,7 +269,9 @@ if (WIN32)
     target_compile_options(atrac9 PRIVATE -w)
     set_target_properties(atrac9 PROPERTIES C_STANDARD 99 INTERPROCEDURAL_OPTIMIZATION OFF)
     add_executable(bb-probe ../src/probe.c ${BB_RUNTIME} ../src/compat_win.c ../src/vulkan_smoke.c
-        ../packaging/windows/bb-probe.rc)
+        ../src/cpu_check.c ../src/isa_rewrite.c ../src/isa_emulate.c ../packaging/windows/bb-probe.rc)
+    # The emulator runs inside guest code: it must not touch XMM/YMM registers (the stubs do not save them).
+    set_source_files_properties(../src/isa_emulate.c PROPERTIES COMPILE_OPTIONS -mgeneral-regs-only)
     set_target_properties(bb-probe PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
     target_compile_options(bb-probe PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wall -Wextra -Werror -Wno-unknown-warning-option -Wno-unused-but-set-global>)
     target_include_directories(bb-probe PRIVATE .. ../src)

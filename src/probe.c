@@ -9,6 +9,8 @@
 #include <cpuid.h>
 #include "runtime.h"
 #include "gpu/bbgpu.h"
+#include "cpu_check.h"
+#include "isa_rewrite.h"
 #if !defined(__x86_64__) || !defined(__GNUC__)
 #error This prototype requires x86-64 GCC or Clang (including MinGW).
 #endif
@@ -38,6 +40,9 @@ static LinkedModule modules[16];
 static uint64_t module_count;
 static int entered_game;
 static int gpu_enabled;
+/* Load-time rewrite of the instructions the host CPU lacks (check_cpu, isa_rewrite.c). */
+static IsaTable *isa_table;
+static unsigned isa_sets;
 int vulkan_smoke(void);
 
 static void fail(const char *message) { fprintf(stderr, "ERROR: %s\n", message); exit(1); }
@@ -145,15 +150,21 @@ __asm__(".text\n.globl enter_on_stack\nenter_on_stack:\n"
 #endif
 static ABI void guest_exit(void) { puts("Runtime: process finalizer callback reached"); }
 /* The game is built for the PS4's AMD Jaguar CPU: AVX throughout, and BMI1 (andn, bextr, blsi, blsr,
- * tzcnt), MOVBE, LZCNT and POPCNT in thousands of places, its libc's string functions among them.
- * Without them it stopped at the first one with an illegal instruction (0xc000001d in libc.prx
- * while module 0 initialized), except LZCNT, which older Intel CPUs run as BSR (other results).
- * Exit code 24 with a message instead; BB_SKIP_CPU_CHECK=1 starts anyway. */
-static void check_cpu(void) {
-    if (getenv("BB_SKIP_CPU_CHECK")) return;
-    unsigned a=0, b=0, c=0, d=0, basic=0, leaf7=0, extended=0;
+ * tzcnt), MOVBE, LZCNT, F16C and POPCNT in thousands of places, its libc's string functions among
+ * them. AVX, SSE4.2 and POPCNT are required (Intel Sandy Bridge, 2011, or AMD FX and newer). A CPU
+ * without BMI1, MOVBE, LZCNT or F16C (Sandy and Ivy Bridge, issues #197 and #515) runs the game with
+ * those instructions rewritten at load time (isa_rewrite.c, from the table scripts/isa_rewrite.py
+ * made; run.py passes it with --isa-rewrite). Without them the code stopped at the first one with an
+ * illegal instruction (0xc000001d in libc.prx while module 0 initialized), except LZCNT and TZCNT,
+ * which older CPUs run as BSR and BSF (other results), so they have to be rewritten before the game runs.
+ * BB_FORCE_LEGACY_CPU=1 rewrites all of them on any CPU (tests); BB_SKIP_CPU_CHECK=1 starts without
+ * any check. Returns the CPU_SET_* mask to rewrite; exit code 24 with a message when AVX, SSE4.2 or
+ * POPCNT is missing. */
+static unsigned check_cpu(char *names_out, size_t names_size) {
+    if (names_size) names_out[0]=0;
+    if (getenv("BB_SKIP_CPU_CHECK")) return 0;
+    unsigned a=0, b=0, c=0, d=0, basic=0;
     if (__get_cpuid(1,&a,&b,&c,&d)) basic=c;
-    if (__get_cpuid_max(0,NULL)>=7) { __cpuid_count(7,0,a,b,c,d); leaf7=b; }    if (__get_cpuid(0x80000001,&a,&b,&c,&d)) extended=c;
     int avx=0;
     if (((basic>>27)&1) && ((basic>>28)&1)) { /* OSXSAVE and AVX: the OS also has to save YMM state */
         unsigned low, high;
@@ -161,42 +172,37 @@ static void check_cpu(void) {
         avx=(low&6)==6;
     }
     const struct { int present; const char *name; } features[]={
-        {avx,"AVX"}, {(leaf7>>3)&1,"BMI1"}, {(basic>>22)&1,"MOVBE"}, {(extended>>5)&1,"LZCNT"},
-        {(basic>>23)&1,"POPCNT"}, {(basic>>20)&1,"SSE4.2"},
+        {avx,"AVX"}, {(basic>>23)&1,"POPCNT"}, {(basic>>20)&1,"SSE4.2"},
     };
     char missing[64]="";
-    int no_movbe=0;
     for (size_t i=0;i<sizeof(features)/sizeof(*features);++i) {
         if (features[i].present) continue;
-#ifdef _WIN32
-        /* MOVBE alone (AMD FX): the fault handler does it (emulate_movbe). */
-        if (!strcmp(features[i].name,"MOVBE")) { no_movbe=1; continue; }
-#endif
         if (*missing) strcat(missing,", ");
         strcat(missing,features[i].name);
     }
-    if (!*missing) {
-        if (no_movbe) printf("CPU: no MOVBE, the game's MOVBE instructions are emulated (slower)\n");
-        return;
-    }
-    unsigned words[12]={0};
-    char brand[49]="";
-    if (__get_cpuid_max(0x80000000,NULL)>=0x80000004)
-        for (unsigned i=0;i<3;++i) __get_cpuid(0x80000002+i,&words[i*4],&words[i*4+1],&words[i*4+2],&words[i*4+3]);
-    memcpy(brand,words,48);
-    for (size_t n=strlen(brand); n && brand[n-1]==' '; --n) brand[n-1]=0;
-    const char *name=brand;
-    while (*name==' ') ++name;
-    if (!*name) name="unknown processor";
-    fprintf(stderr,"STOP: unsupported CPU %s: missing %s (needs Intel Core 4th generation or newer, or AMD Ryzen)\n",name,missing);
+    if (*missing) {
+        unsigned words[12]={0};
+        char brand[49]="";
+        if (__get_cpuid_max(0x80000000,NULL)>=0x80000004)
+            for (unsigned i=0;i<3;++i) __get_cpuid(0x80000002+i,&words[i*4],&words[i*4+1],&words[i*4+2],&words[i*4+3]);
+        memcpy(brand,words,48);
+        for (size_t n=strlen(brand); n && brand[n-1]==' '; --n) brand[n-1]=0;
+        const char *name=brand;
+        while (*name==' ') ++name;
+        if (!*name) name="unknown processor";
+        fprintf(stderr,"STOP: unsupported CPU %s: missing %s (needs AVX: Intel Core 2nd generation or newer, or AMD FX or Ryzen)\n",name,missing);
 #ifdef _WIN32
-    char text[512];
-    snprintf(text,sizeof(text),"This processor cannot run the game:\n%s\n\nMissing instructions: %s\n\n"
-             "The game uses instructions of the PS4's processor. They need an Intel Core of the 4th "
-             "generation (Haswell, 2013) or newer, or an AMD Ryzen.",name,missing);
-    MessageBoxA(NULL,text,"Uncharted",MB_OK|MB_ICONERROR|MB_SETFOREGROUND);
+        char text[512];
+        snprintf(text,sizeof(text),"This processor cannot run the game:\n%s\n\nMissing instructions: %s\n\n"
+                 "The game needs AVX: an Intel Core of the 2nd generation (Sandy Bridge, 2011) or newer, "
+                 "an AMD FX or an AMD Ryzen.",name,missing);
+        MessageBoxA(NULL,text,"Uncharted",MB_OK|MB_ICONERROR|MB_SETFOREGROUND);
 #endif
-    exit(24);
+        exit(24);
+    }
+    const CpuFeatureWords none={0,0,0};
+    const int forced=getenv("BB_FORCE_LEGACY_CPU") && strcmp(getenv("BB_FORCE_LEGACY_CPU"),"0");
+    return cpu_missing_rewritable(forced ? none : cpu_feature_words(),names_out,names_size);
 }
 #ifdef _WIN32
 static void describe_address(char *out, size_t size, uintptr_t address) {
@@ -229,6 +235,12 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
             c->Rax,c->Rbx,c->Rcx,c->Rdx,c->Rsi,c->Rdi,c->Rbp,c->Rsp,
             c->R8,c->R9,c->R10,c->R11,c->R12,c->R13,c->R14,c->R15);
     if (gpu_enabled) bbgpu_dump_guest_writes(info);
+    if (isa_table) {
+        int site=isa_rewrite_site_of_stub(isa_table,(uintptr_t)c->Rip);
+        if (site>=0) fprintf(stderr,"  While emulating site 0x%llx (%s)\n",(unsigned long long)isa_table->sites[site].offset,
+                             isa_kind_name(isa_table->sites[site].kind));
+        isa_rewrite_report(isa_table,stderr);
+    }
     /* rbp chain (guest and host code keep frame pointers). */
     uintptr_t rbp=(uintptr_t)c->Rbp;
     for (int depth=0; depth<24 && rbp; ++depth) {
@@ -322,6 +334,20 @@ static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
             c->Rcx=(DWORD64)(uintptr_t)buffer;
             c->Rdx=1;
             c->Rip=(DWORD64)(uintptr_t)bb_longjmp;
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+    }
+    if (code==EXCEPTION_BREAKPOINT && isa_table && record->ExceptionAddress) {
+        /* An int3 that isa_rewrite.c put over a 4-byte instruction it could not jump from: emulated here. */
+        CONTEXT *c=info->ContextRecord;
+        IsaRegs regs;
+        regs.rflags=c->EFlags;
+        memcpy(regs.gpr,&c->Rax,sizeof(regs.gpr));   /* CONTEXT holds rax..r15 in x86 order */
+        uintptr_t next;
+        if (isa_rewrite_trap(isa_table,(uintptr_t)record->ExceptionAddress,&regs,&next)) {
+            memcpy(&c->Rax,regs.gpr,sizeof(regs.gpr));
+            c->EFlags=(DWORD)regs.rflags;
+            c->Rip=next;
             return EXCEPTION_CONTINUE_EXECUTION;
         }
     }
@@ -1012,6 +1038,13 @@ void runtime_restart(void) {
 #endif
 }
 
+#ifdef _WIN32
+/* BB_ISA_STATS=1: the most executed rewritten sites every 30 seconds (how much the rewrite costs). */
+static DWORD WINAPI isa_stats_thread(void *unused) {
+    (void)unused;
+    for (;;) { Sleep(30000); if (isa_table) isa_rewrite_report(isa_table, stdout); }
+}
+#endif
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
 #ifndef _WIN32
@@ -1024,7 +1057,13 @@ int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--controller-info")) return runtime_pad_tool(0,100);
     if (argc == 3 && !strcmp(argv[1], "--controller-test"))
         return runtime_pad_tool(1,atoi(argv[2]));
-    check_cpu();
+    char isa_names[64];
+    isa_sets=check_cpu(isa_names,sizeof(isa_names));
+    if (argc == 2 && !strcmp(argv[1], "--cpu-features")) {   /* run.py: does the game need the rewrite table? */
+        if (isa_sets) printf("CPU: missing %s\n",isa_names);
+        else puts("CPU: complete");
+        return 0;
+    }
 #ifdef _WIN32
     /* The PS4 user range must stay free of host allocations (GPU driver, heaps), and the guest
      * TCB needs one of the 64 TEB TLS slots before DLLs (Vulkan drivers) take them. */
@@ -1033,7 +1072,7 @@ int main(int argc, char **argv) {
 #endif
     int cpu_only = 0, strict_imports = 0, list_missing = 0;
     unsigned timeout_seconds = 10;
-    const char *content_profile=NULL, *app0=NULL, *user_dir=NULL, *patch_file=NULL, *guest_argv_file=NULL, *trophy_dir=NULL;
+    const char *content_profile=NULL, *app0=NULL, *user_dir=NULL, *patch_file=NULL, *guest_argv_file=NULL, *trophy_dir=NULL, *isa_file=NULL;
     for (int i = 2; i < argc; ++i) {
         if (!strcmp(argv[i], "--cpu-only")) cpu_only = 1;
         else if (!strcmp(argv[i], "--strict-imports")) strict_imports = 1;
@@ -1044,11 +1083,12 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--patches") && i+1<argc) patch_file=argv[++i];
         else if (!strcmp(argv[i], "--guest-argv") && i+1<argc) guest_argv_file=argv[++i];
         else if (!strcmp(argv[i], "--trophies") && i+1<argc) trophy_dir=argv[++i];
+        else if (!strcmp(argv[i], "--isa-rewrite") && i+1<argc) isa_file=argv[++i];
         else if (!strcmp(argv[i], "--timeout") && i+1<argc) timeout_seconds=(unsigned)strtoul(argv[++i],NULL,10);
         else { fprintf(stderr, "Unknown option: %s\n", argv[i]); return 1; }
     }
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s boot.bin [--cpu-only] [--strict-imports] [--list-missing] [--content-profile file] [--app0 dir] [--user dir] [--patches file] [--guest-argv file] [--trophies dir] [--timeout seconds] | --vulkan-only | --controller-info | --controller-test 0..100\n", argv[0]);
+        fprintf(stderr, "Usage: %s boot.bin [--cpu-only] [--strict-imports] [--list-missing] [--content-profile file] [--app0 dir] [--user dir] [--patches file] [--guest-argv file] [--trophies dir] [--isa-rewrite table] [--timeout seconds] | --vulkan-only | --controller-info | --controller-test 0..100\n", argv[0]);
         return 1;
     }
     if (content_profile) {
@@ -1215,10 +1255,38 @@ int main(int argc, char **argv) {
         printf("%" PRIu64 " of %" PRIu64 " imports missing\n",missing,import_count);
         return missing ? 20 : 0;
     }
-    image = runtime_image_map(round_page(size), PROT_READ | PROT_WRITE);
-    if (!image) image = allocate(round_page(size));
+    /* The rewrite stubs sit right behind the image, so every jmp between the two reaches. */
+    size_t isa_area = 0;
+    if (isa_sets) {
+        const int forced = getenv("BB_FORCE_LEGACY_CPU") && strcmp(getenv("BB_FORCE_LEGACY_CPU"), "0");
+#ifdef _WIN32
+        if (isa_file) {
+            if (!(isa_table = isa_table_load(isa_file))) {
+                fprintf(stderr, "STOP: this CPU lacks %s and the rewrite table cannot be used\n", isa_names);
+                exit(24);
+            }
+            isa_area = round_page(isa_stub_area_size(isa_table));
+        } else if (isa_sets != CPU_SET_MOVBE || forced) {
+            fprintf(stderr, "STOP: this CPU lacks %s (or BB_FORCE_LEGACY_CPU is set) and no rewrite table was given "
+                    "(start the game through run.py or the launcher, which make it)\n", isa_names);
+            exit(24);
+        } else {
+            printf("CPU: no MOVBE, the game's MOVBE instructions are emulated (slower)\n");
+        }
+#else
+        (void)forced;
+        fprintf(stderr, "STOP: this CPU lacks %s (the instruction rewrite is Windows only)\n", isa_names);
+        exit(24);
+#endif
+    }
+    image = runtime_image_map(round_page(size) + isa_area, PROT_READ | PROT_WRITE);
+    if (!image) image = allocate(round_page(size) + isa_area);
     if (fread(image, 1, size, f) != size || fgetc(f) != EOF) fail("incorrect memory image size");
     fclose(f);
+    if (isa_table && isa_table_matches(isa_table, image, size)) {
+        fprintf(stderr, "STOP: the rewrite table %s was made for another image (delete it; run.py makes it again)\n", isa_file);
+        exit(24);
+    }
     if (!cpu_only) {
         char title[128]="Bloodborne", serial[16]="UNKNOWN", sfo[4096];
         uint32_t attributes=0;
@@ -1275,6 +1343,20 @@ int main(int argc, char **argv) {
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
 #endif
+    if (isa_table) {
+        unsigned char *stubs = image + round_page(size);
+        IsaReport r = isa_rewrite_apply(isa_table, image, stubs, isa_sets);
+        if (r.unsupported_needed) {
+            fprintf(stderr, "STOP: this CPU lacks %s and %u instructions of the game cannot be rewritten\n", isa_names, r.unsupported_needed);
+            exit(24);
+        }
+        printf("ISA: CPU lacks %s: %u sites rewritten (%u jmp, %u relocated, %u int3), %u skipped\n", isa_names,
+               r.rewritten, r.jmp, r.relocated, r.int3, r.skipped);
+        protect(stubs, isa_area, 5);
+#ifdef _WIN32
+        if (getenv("BB_ISA_STATS")) CloseHandle(CreateThread(NULL, 0, isa_stats_thread, NULL, 0, NULL));
+#endif
+    }
     protect(traps, round_page((import_count + 1) * 32), 5);
     protect(image, round_page(size), 0);
     int executable_entry = 0;

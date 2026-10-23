@@ -28,6 +28,7 @@ in the download.
 | [Mevlock](https://github.com/Mevlock) | FSR 3 frame generation video memory leak, COND_EXEC condition width, U3 cloth shared memory bounds, U3 flashlight and shadow slice dropout, tight typed-buffer write ranges, crash-safe saves, freeze fixes (buffer cache range lock, end-of-pipe flips, precise read-backs) |
 | [eduardoghi](https://github.com/eduardoghi) | Numpad bindings saved as keypad keys ([#473](https://github.com/Supermedo/uncharted_pc/pull/473)) |
 | [poncho-ajmv](https://github.com/poncho-ajmv) | Launcher error reporting (crash reason, input settings, shader cache), reliable Stop, vibration toggle |
+| [FelipePrado0](https://github.com/FelipePrado0) | The load-time rewrite of BMI1, LZCNT, MOVBE and F16C instructions for Sandy and Ivy Bridge CPUs (site table, stubs, emulator), adapted from [SpartanPort](https://github.com/FelipePrado0/SpartanPort) (GPL-2.0) |
 | [soni424](https://github.com/soni424) | Dark launcher title bar, null shader binding guard |
 | [kj2223](https://github.com/kj2223) | Uncharted 1 upscaler shimmer fix (frame start and jitter) |
 | [Hugo Borges](https://github.com/hugouchoasborges) | Dispatch split above 65535 groups, sparse-capable queue, launcher frame rate cap |
