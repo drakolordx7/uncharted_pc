@@ -63,6 +63,10 @@ official repository; the link goes to it.
 - A 30 FPS frame rate choice (for frame generation on top, or weaker PCs)
 - `--u1`, `--u2`, `--u3` start a game straight from a shortcut: [#399](https://github.com/Supermedo/uncharted_pc/pull/399)
 
+### Older CPUs
+
+- Runs on Intel Sandy and Ivy Bridge: the instructions they lack are rewritten at start-up (adapted from FelipePrado0's SpartanPort). Not yet tested on real hardware.
+
 ### Audio
 
 - 5.1 and 7.1 surround: [#392](https://github.com/Supermedo/uncharted_pc/pull/392)
@@ -145,13 +149,10 @@ If you'd rather your change didn't come in, open an issue and we'll take it out.
   0.3.4.
 - Uncharted 2 loading crashes (`ReadSync file (req/read: ...)`, white textures then
   `iSubMesh < m_numSubMeshInstances`): file reads could come back cut short. Fixed in 0.3.5.
-- Older CPUs: the games use instructions of the PS4's processor (AVX, BMI1, MOVBE, LZCNT, F16C).
-  AMD FX runs since 0.3.6 (its missing MOVBE is emulated, a bit slower). Intel Core 2nd and 3rd
-  generation (Sandy Bridge, Ivy Bridge) and the Xeon E3/E5 v1 and v2 lack BMI1, MOVBE, LZCNT (and
-  Sandy Bridge F16C): the loader rewrites the game's uses of them when it starts (about 2,200 to
-  2,900 places per game) and runs them in software, a little slower (#197, #515). That needs the
-  Python package iced-x86 when you run from source; the release has it. New, tested on a modern
-  CPU with the rewrite forced (`BB_FORCE_LEGACY_CPU=1`), not yet on real Sandy or Ivy Bridge hardware.
+- Older CPUs: the games use PS4 CPU instructions (AVX, BMI1, MOVBE, LZCNT, F16C). AMD FX runs since
+  0.3.6. Intel 2nd and 3rd gen (Sandy and Ivy Bridge, Xeon E3/E5 v1 and v2) lack some of them, so the
+  loader rewrites those spots when the game starts and runs them in software, a little slower
+  (#197, #515). Tested with the rewrite forced on a modern CPU, not yet on a real Sandy or Ivy Bridge.
   CPUs without AVX (Nehalem and older, Phenom II) still can't run the games.
 - Uncharted 2, train wreck: `IsFinite(deltaTransform)` in character-leg-ik.cpp, fixed in 0.3.6
   for the EU 1.00 version.
