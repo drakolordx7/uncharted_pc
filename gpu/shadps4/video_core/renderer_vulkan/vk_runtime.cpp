@@ -814,6 +814,7 @@ void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size
             return;
         }
         barrier_tracker.InsertRange(range, access);
+        ++tracked_inserts;
         memo = {range.resource, range.range_start, range.range_end, access_epoch, u32(access)};
     };
     if (src_access & WRITE_MASK) {
@@ -825,6 +826,17 @@ void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size
 
     memory_barrier.srcStageMask |= src_stage;
     memory_barrier.srcAccessMask |= src_access & WRITE_MASK;
+    // bbport: the tracker is only cleared by a barrier. Where barriers are rare (U3's skinning
+    // dispatches since tight write ranges) its tree grew without bound and every binding's
+    // lookup slowed the recording thread down (U3's square: 92 FPS sinking to 61 within half a
+    // minute). Past BB_TRACKER_CAP ranges (4096) one barrier clears it.
+    static const u32 cap = [] {
+        const char* env = std::getenv("BB_TRACKER_CAP");
+        return env ? u32(std::strtoul(env, nullptr, 10)) : 4096u;
+    }();
+    if (cap && tracked_inserts >= cap) {
+        FlushBarriers();
+    }
 }
 
 void Runtime::FlushBarriers() {
@@ -862,6 +874,7 @@ void Runtime::FlushBarriers() {
 
     image_barriers.clear();
     barrier_tracker.Clear();
+    tracked_inserts = 0;
     ++access_epoch;
 }
 
