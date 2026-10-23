@@ -1726,6 +1726,18 @@ static void __attribute__((ms_abi)) u1_compare_prompt(uint64_t unused0, uint64_t
     (void)unused0; (void)unused1; (void)image; (void)r14;
     u1_compare_us=now_us();
 }
+/* U1 1.02: the same function (the prompt bar, 0x128c70, flags in r9d = param_7) draws the "SÉLECTIONNER" prompt when bit 0 of the flags is
+ * set. In Statistiques that prompt has nothing to do on a statistic (a click does nothing there, see menu_mouse_buttons): the hook at the
+ * start of the function clears the bit in the saved r9 (restored by the thunk) while u1_hide_select_us is recent. */
+static volatile uint64_t u1_hide_select_us;
+static void __attribute__((ms_abi)) u1_bar_flags(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t r14) {
+    (void)unused0; (void)unused1; (void)image; (void)r14;
+    if (now_us()-u1_hide_select_us>=150000) return;
+    uint64_t r9=saved_register(6);
+    r9&=~(uint64_t)1;
+    safe_write(guest_callback_rsp-8u*6u,&r9,8);
+}
+static const unsigned char u1_bar_flags_code[]={0x45,0x89,0xcf,0x44,0x89,0xbd,0xa8,0xfd,0xff,0xff};   /* mov r15d, r9d; mov [rbp-0x258], r15d */
 static const unsigned char u1_compare_code[]={0x41,0x83,0x7d,0x48,0x00,0x0f,0x84};
 static const unsigned char u1_compare_je_code[]={0x0f,0x84,0x34,0x02,0x00,0x00};
 static const unsigned char u1_compare_je_patch[]={0x0f,0x84,0xf8,0x02,0x00,0x00};   /* to 0x129267, past the prompt */
@@ -1895,6 +1907,7 @@ static const RuntimeGuestCallback guest_callbacks[]={
     {"U1 compare-with-friends prompt (skip 1)",0x128f69,u1_compare_je_code,sizeof(u1_compare_je_code),sizeof(u1_compare_je_patch),NULL,u1_compare_je_patch},
     {"U1 compare-with-friends prompt (skip 2)",0x128f76,u1_compare_jmp_code,sizeof(u1_compare_jmp_code),sizeof(u1_compare_jmp_patch),NULL,u1_compare_jmp_patch},
     {"U1 menu add item",0x132f00,u1_menu_add_item_code,sizeof(u1_menu_add_item_code),6,u1_menu_add_item,NULL},
+    {"U1 prompt bar flags",0x128c8a,u1_bar_flags_code,sizeof(u1_bar_flags_code),10,u1_bar_flags,NULL},
     {"U1 credits tick",0x3b41e0,u1_credits_code,sizeof(u1_credits_code),6,u1_credits_tick,NULL},
     {"U1 menu text draw",0x13acf0,u1_text_draw_code,sizeof(u1_text_draw_code),6,u1_text_draw,NULL},
     {"U1 menu item draw (1)",0x133fbc,u1_menu_item_begin_code,sizeof(u1_menu_item_begin_code),9,u1_menu_item_begin,NULL},
@@ -2792,7 +2805,7 @@ static uint32_t menu_mouse_buttons(const bool *k, uint32_t mouse, uint64_t now) 
     /* A scrolling list: the cursor over its rows moves the highlight there (up or down presses until the highlighted row
      * is at the cursor), a click then validates. */
     ListInfo list={0};
-    int list_ctl=0, list_delta=0;
+    int list_ctl=0, list_delta=0, list_title=0, list_noclick=0;
     int list_found=menu_list_find_ex(now,&list,0);
     if (list_found && list.sel_cy<0.0f) {   /* the highlighted row is out of view (scrolled away with the bar): where it would be */
         const int top=list_top_read(list.item), idx=menu_list_index(list.item);
@@ -2801,6 +2814,46 @@ static uint32_t menu_mouse_buttons(const bool *k, uint32_t mouse, uint64_t now) 
     if (list_found && ux>=list.colx-20.0f && ux<=list.colx+560.0f && uy>=list.top-4.0f && uy<=list.bottom+4.0f) {
         list_ctl=1;
         list_delta=(int)floorf((uy-list.sel_cy)/list.pitch+0.5f);
+        /* Statistiques (a list with a column of values on the right): only the difficulties of Contre-la-montre (rows with an empty value) open
+         * something. A click on a statistic does nothing, and the section titles (dimmer: style[1] 0.5) are never selected by the game, so
+         * the cursor over one must not chase it (the highlight shook between the rows around it). */
+        int stats=0, label=-1, value_w=0;
+        pthread_mutex_lock(&menu_text_lock);
+        for (int i=0;i<menu_text_count;++i) {
+            const MenuText *t=&menu_texts[i];
+            if (t->item!=list.item || now-t->us>100000 || t->ordinal<1) continue;
+            if (t->x>list.colx+300.0f && t->w>0.5f && t->h<30.0f) stats=1;
+            if (fabsf(t->x-list.colx)<1.0f && t->h>=22.0f && t->h<=29.0f && uy>=t->y-2.0f && uy<t->y+list.pitch-2.0f) label=i;
+        }
+        if (label>=0) {
+            const MenuText *l=&menu_texts[label];
+            for (int i=0;i<menu_text_count;++i) {
+                const MenuText *t=&menu_texts[i];
+                if (t->item==list.item && now-t->us<=100000 && t->ordinal>=1 && t->x>list.colx+300.0f && t->h<30.0f && fabsf(t->y-l->y)<2.0f && t->w>0.5f) value_w=1;
+            }
+            if (stats) {
+                if (l->style[1]<0.7f && l->style[5]<2.5f) { list_title=1; list_noclick=1; list_delta=0; }
+                else if (value_w) list_noclick=1;
+            }
+        }
+        pthread_mutex_unlock(&menu_text_lock);
+    }
+    if (list_found) {   /* Statistiques, highlight on a statistic (a row with a value): no "SÉLECTIONNER" in the prompt bar, see u1_bar_flags */
+        int stats=0, sel_value=0;
+        pthread_mutex_lock(&menu_text_lock);
+        const MenuText *sl=NULL;
+        for (int i=0;i<menu_text_count;++i) {
+            const MenuText *t=&menu_texts[i];
+            if (t->item!=list.item || now-t->us>100000 || t->ordinal<1) continue;
+            if (t->x>list.colx+300.0f && t->w>0.5f && t->h<30.0f) stats=1;
+            if (fabsf(t->x-list.colx)<1.0f && t->h>=22.0f && t->h<=29.0f && t->style[5]>2.5f) sl=t;
+        }
+        if (sl) for (int i=0;i<menu_text_count;++i) {
+            const MenuText *t=&menu_texts[i];
+            if (t->item==list.item && now-t->us<=100000 && t->ordinal>=1 && t->x>list.colx+300.0f && t->h<30.0f && fabsf(t->y-sl->y)<2.0f && t->w>0.5f) sel_value=1;
+        }
+        pthread_mutex_unlock(&menu_text_lock);
+        if (stats && sel_value) u1_hide_select_us=now;
     }
     uint64_t menu=0; int index=-1, count=0;
     const int on_row=list_ctl ? 0 : menu_row_at(ux,uy,now,&menu,&index,&count);
@@ -2811,7 +2864,8 @@ static uint32_t menu_mouse_buttons(const bool *k, uint32_t mouse, uint64_t now) 
         if (moved) { h.list_active=1; h.list_presses=0; }
         if (now<wheel_until_us[0] || now<wheel_until_us[1] ||
             (k && (k[SDL_SCANCODE_W] || k[SDL_SCANCODE_S] || k[SDL_SCANCODE_UP] || k[SDL_SCANCODE_DOWN]))) h.list_active=0;
-        if (clicked) { h.list_click=1; h.list_deadline=now+1500000; h.list_active=1; h.list_presses=0; }
+        if (clicked && !list_noclick) { h.list_click=1; h.list_deadline=now+1500000; h.list_active=1; h.list_presses=0; }
+        if (list_title) h.list_active=0;
     } else h.list_click=0;
     /* Hovering a row at the edge of a list must not scroll it: the first row shown is noted when the cursor starts to move the
      * highlight, and put back whenever the game moves it meanwhile (until a moment after the highlight is under the cursor, or the
@@ -2930,6 +2984,12 @@ static uint32_t menu_mouse_buttons(const bool *k, uint32_t mouse, uint64_t now) 
     }    if (h.queue!=0 && now>=h.step_until && now>=h.next_step) {
         h.step_dir=h.queue>0 ? 2 : 1;
         h.step_until=now+35000; h.next_step=now+70000;
+        const int n=h.queue>0 ? h.queue : -h.queue;
+        if (h.drag && n>1 && h.menu && !u1_jump_steps && !u1_jump_busy) {   /* a slider far from the cursor: one real press (event 3 left, 4 right) carries the other steps, see u1_menu_event */
+            u1_jump_menu=h.menu; u1_jump_type=h.queue>0 ? 4 : 3; u1_jump_us=now; u1_jump_steps=n-1;
+            h.queue=h.queue>0 ? 1 : -1;
+            h.next_step=now+45000;
+        }
         h.queue+=h.queue>0 ? -1 : 1;
     }
     if (now<h.step_until) out|=h.step_dir==1 ? BTN_LEFT : BTN_RIGHT;
