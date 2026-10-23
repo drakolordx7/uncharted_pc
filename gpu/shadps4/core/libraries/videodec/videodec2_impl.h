@@ -9,6 +9,7 @@
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavutil/cpu.h>
 #include <libavutil/imgutils.h>
 #include <libswscale/swscale.h>
 }
@@ -34,11 +35,13 @@ private:
     AVFrame* ConvertNV12Frame(AVFrame& frame);
     /// The frame fitted into the game's display size (frame is consumed), or the frame itself.
     AVFrame* FitToDisplay(AVFrame* frame);
+    bool ScaleThreaded(const AVFrame* src, AVFrame* canvas, s32 x0, s32 y0, s32 fit_w, s32 fit_h);
 
 private:
     AVCodecContext* m_codec_context = nullptr;
     SwsContext* m_sws_context = nullptr;
-    SwsContext* m_fit_context = nullptr;
+    SwsContext* m_fit_context = nullptr;   // fallback when the frame API fails
+    SwsContext* m_fit_threaded = nullptr;
 };
 
 } // namespace Libraries::Videodec2
