@@ -14,12 +14,13 @@ struct Profile;
 void InjectClipDistanceAttributes(IR::Program& program, RuntimeInfo& runtime_info);
 
 /// bbport: SharedMemoryBarrierPass also covers workgroups larger than one 64-lane wave.
-/// BB_WAVE_LDS_BARRIERS=0: only workgroups of exactly one wave, as before (part of the shader
-/// cache version, so a change rebuilds the cache).
+/// Opt-in here (BB_WAVE_LDS_BARRIERS=1): Umar-Qayyum-dev's fork has it on, but in this build it
+/// makes U3's London pub clearly darker and the title menu no longer matches the test references,
+/// so it stays off until compared with the console's picture. Part of the shader cache version.
 inline bool WaveLdsBarriers() {
     static const bool enabled = [] {
         const char* env = std::getenv("BB_WAVE_LDS_BARRIERS");
-        return !(env && env[0] == '0');
+        return env && env[0] == '1';
     }();
     return enabled;
 }
