@@ -75,6 +75,15 @@ official repository; the link goes to it.
 - Numpad keys are saved as keypad keys in the launcher: eduardoghi ([#473](https://github.com/Supermedo/uncharted_pc/pull/473))
 - The launcher reports why the game stopped and when input settings or the shader cache can't be written: poncho-ajmv
 - Dark title bar for the launcher on Windows: soni424
+- Faster in Uncharted 2 and 3 (U3 Cartagena square 26 → 48 FPS in our tests): compute work no longer waits on the whole draw pipe, compute fences run in order with it, and typed-buffer writes copy only what changed. Also fixes an Uncharted 3 freeze about 15 seconds in: iannitram, Mevlock
+- Uncharted 3 cloth no longer reads past shared memory, and the flashlight and shadow slices no longer drop out: Mevlock
+- Uncharted 1 shimmer with DLSS, FSR and TAA is fixed: kj2223
+- A bad GPU command, a failed pipeline or a missing vertex buffer table skips one draw instead of closing the game, and a null shader binding no longer crashes the jungle chapter (1.00 and 1.02): iannitram, soni424
+- Textures are freed again when video memory fills up, so it no longer keeps growing: parsifal295, devilismyfriend
+- Shader fixes: scalar instructions inside EXEC scopes ([#468](https://github.com/Supermedo/uncharted_pc/pull/468)) by G3545, and GCN-style NaN compares (from shadPS4) by iannitram
+- Large compute dispatches are split, and a sparse-capable queue is picked when the GPU needs it: Hugo Borges
+- Saves are written so an interrupted save can't corrupt the file: Mevlock
+- Launcher: Stop reliably ends the game, a controller vibration toggle, and a frame rate cap: poncho-ajmv, Hugo Borges
 
 Each release lists its exact changes in the [release notes](https://github.com/drakolordx7/uncharted_pc/releases).
 
