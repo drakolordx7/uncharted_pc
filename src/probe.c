@@ -852,9 +852,9 @@ static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t imag
         const uintptr_t base=(uintptr_t)image, host=(uintptr_t)c->callback;
         t[k++]=0x49; t[k++]=0xb8; memcpy(t+k,&base,8); k+=8;        /* movabs r8, image */
         t[k++]=0x4d; t[k++]=0x89; t[k++]=0xf1;                      /* mov r9, r14 */
-        /* the guest's rsp before the thunk (9 pushes below rbx) goes to guest_callback_rsp */
+        /* the guest's rsp before the thunk (12 pushes below rbx) goes to guest_callback_rsp */
         const uintptr_t rsp_slot=(uintptr_t)&guest_callback_rsp;
-        t[k++]=0x48; t[k++]=0x8d; t[k++]=0x43; t[k++]=0x48;         /* lea rax, [rbx+0x48] */
+        t[k++]=0x48; t[k++]=0x8d; t[k++]=0x43; t[k++]=0x60;         /* lea rax, [rbx+0x60] */
         t[k++]=0x49; t[k++]=0xba; memcpy(t+k,&rsp_slot,8); k+=8;    /* movabs r10, &guest_callback_rsp */
         t[k++]=0x49; t[k++]=0x89; t[k++]=0x02;                      /* mov [r10], rax */
         t[k++]=0x48; t[k++]=0xb8; memcpy(t+k,&host,8); k+=8;        /* movabs rax, callback */

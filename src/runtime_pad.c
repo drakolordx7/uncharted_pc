@@ -1503,9 +1503,9 @@ static void __attribute__((ms_abi)) u1b_cover_camera(uint64_t camera, uint64_t u
         cover_pending_pitch+=(input.mouse_invert_y ? -dy : dy)*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity;
         float dt=*(const volatile float *)(uintptr_t)(image+U1B_CAMERA_DT);
         if (!(dt>0.0005f && dt<0.05f)) dt=1.0f/60.0f;
-        const float follow=1.0f-SDL_expf(-dt/0.02f);
-        step=cover_pending_yaw*follow; step_pitch=cover_pending_pitch*follow;
-        cover_pending_yaw-=step; cover_pending_pitch-=step_pitch;
+        (void)dt;   /* no smoothing, as in U2's cover camera: the whole motion of the frame is applied at once */
+        step=cover_pending_yaw; step_pitch=cover_pending_pitch;
+        cover_pending_yaw=cover_pending_pitch=0.0f;
         frame_us=now; frame_camera=camera; frame_yaw=step; frame_pitch=step_pitch;
     }
     cover_native_us=now;
@@ -1527,6 +1527,20 @@ static void __attribute__((ms_abi)) u1b_cover_camera(uint64_t camera, uint64_t u
         const float x=dir[0], z=dir[2];
         dir[0]=x*c-z*s;
         dir[2]=x*s+z*c;
+        /* as in U2 (same layout: the position spring at dir+0x10, 3 m from the pivot at dir+0x60 (the cover spot, measured), follows its target about the pivot a few frames late):
+         * turned the same way so that nothing is left to catch up (the lag was the smoothing left in the cover camera) */
+        float *pos=(float *)(uintptr_t)(camera+0x250);
+        const float *pivot=(const float *)(uintptr_t)(camera+0x2a0);
+        const float px=pos[0]-pivot[0], py=pos[1]-pivot[1], pz=pos[2]-pivot[2], len2=px*px+py*py+pz*pz;
+        if (len2>0.01f && len2<900.0f) {
+            pos[0]=pivot[0]+px*c-pz*s;
+            pos[2]=pivot[2]+px*s+pz*c;
+        }
+        if (mouse_debug()) {
+            static unsigned n;
+            if (n++<1500) printf("Mouse: u1 coverspring t=%.4f step=%.3f lag=%.1f |pos|=%.2f y=%.2f pos=(%.2f %.2f) dir=(%.3f %.3f) pitch=%.2f\n",
+                                 now*1e-6,step,(SDL_atan2f(pz,px)-SDL_atan2f(-dir[2],-dir[0]))*57.29578f,SDL_sqrtf(px*px+pz*pz),py,pos[0],pos[2],dir[0],dir[2],*pitch);
+        }
     }
     if (step_pitch!=0.0f && shape>0x10000) {
         float v=*pitch-step_pitch; /* degrees (limits +-45, speed 90 degrees/s) */
