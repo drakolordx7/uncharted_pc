@@ -417,7 +417,6 @@ private:
     Common::SlotVector<ImageView> slot_image_views;
     tsl::robin_map<u64, Sampler> samplers;
     std::unordered_set<ImageId> download_images;
-    std::unordered_set<ImageId> small_download_images; ///< bbport: ReadbackSmallTargets
     u64 total_used_memory = 0;
     bool tight_budget = false;                  ///< bbport: card under 8 GB (budget-relative marks)
     std::atomic<u64> pending_free_bytes{0};     ///< bbport: deleted, not yet destroyed
@@ -439,6 +438,11 @@ private:
     Common::LeastRecentlyUsedCache<ImageId, u64> lru_cache;
     Common::LeastRecentlyUsedCache<u64, u64> sampler_lru_cache;
     const bool readback_linear_images;
+    /// bbport: tiny render results (a few pixels) the game reads on the CPU, copied back to
+    /// guest memory without waiting (TinyReadback).
+    std::unordered_set<ImageId> tiny_download_images;
+    /// bbport: whether the image is such a result: at most 4x4 pixels, linear or 1x1.
+    [[nodiscard]] static bool TinyReadback(const Image& image);
     PageTable page_table;
     std::mutex mutex;
     // bbport: FindImage results for unchanged image registrations (guarded by `mutex`).

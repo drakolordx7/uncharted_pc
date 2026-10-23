@@ -126,9 +126,10 @@ def patch_fs_loads(image, ph, base):
 
 
 def red_zones_enabled():
-    """Windows only (Linux signal frames skip the red zone); BB_RED_ZONE=0/1 overrides."""
-    override = os.environ.get('BB_RED_ZONE')
-    return override == '1' if override is not None else os.name == 'nt'
+    """Off unless BB_RED_ZONE_TABLE=1 (Windows only). Since 0.3.7 the loader protects the red zone itself
+    (src/red_zone.c, all game versions, BB_RED_ZONE=0 disables); this older link-time table is kept
+    for comparison, and the two must not both run."""
+    return os.environ.get('BB_RED_ZONE_TABLE') == '1' and os.name == 'nt'
 
 
 def protect_red_zones(image, sites, base, skip=()):
@@ -336,7 +337,7 @@ def link(game, out, module_names=DEFAULT_MODULES, exe='eboot.bin'):
     (out / 'link.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
     if red_zone['enabled']:
         print(f"Red zone: {red_zone['sites']}/{red_zone['available']} guest store sites run red-zone-safe "
-              f"({red_zone['table'] or 'no table for this executable'}; BB_RED_ZONE=0 disables)")
+              f"({red_zone['table'] or 'no table for this executable'}; BB_RED_ZONE_TABLE=0 disables)")
     summary = ', '.join(f"{t['file']}@{t['base']:#x}" for t in table)
     print(f'Linked modules: {summary}; {len(bindings)} native bindings, {len(unresolved)} imports left to the host runtime, '
           f'fs->gs patched={fs_patched}')

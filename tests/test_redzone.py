@@ -70,7 +70,7 @@ class LinkedImage(unittest.TestCase):
     def test_applied_site_adds_one_aligned_executable_segment(self):
         image = bytearray(leaf(0)[0])
         segments = [(0, len(image), 5)]
-        with patch.dict(os.environ, {'BB_RED_ZONE': '1'}):
+        with patch.dict(os.environ, {'BB_RED_ZONE_TABLE': '1'}):
             report = protect_image(image, segments, [], 'ab', self.write_tables('ab'))
         self.assertEqual((report['table'], report['sites'], report['segment']), ('test', 1, '0x10000'))
         self.assertEqual(segments[-1], (0x10000, 4096, 5))
@@ -79,14 +79,14 @@ class LinkedImage(unittest.TestCase):
 
     def test_another_executable_is_left_unchanged(self):
         image = bytearray(leaf(0)[0])
-        with patch.dict(os.environ, {'BB_RED_ZONE': '1'}):
+        with patch.dict(os.environ, {'BB_RED_ZONE_TABLE': '1'}):
             report = protect_image(image, [], [], 'cd', self.write_tables('ab'))
         self.assertEqual((report['table'], report['sites']), (None, 0))
         self.assertEqual(image, leaf(0)[0])
 
     def test_disabled_leaves_the_image_unchanged(self):
         image = bytearray(leaf(0)[0])
-        with patch.dict(os.environ, {'BB_RED_ZONE': '0'}):
+        with patch.dict(os.environ, {'BB_RED_ZONE_TABLE': '0'}):
             self.assertFalse(red_zones_enabled())
             report = protect_image(image, [], [], 'ab', self.write_tables('ab'))
         self.assertEqual((report['enabled'], report['sites']), (False, 0))
