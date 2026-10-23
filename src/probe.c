@@ -926,6 +926,7 @@ static void __attribute__((ms_abi)) ndgi_begin(uint64_t rdi, uint64_t rsi, uint6
     (void)rdi; (void)rsi; (void)base; (void)r14;
     runtime_ndgi_open=1;
 }
+static int64_t find_masked(const char *hex, uint64_t size);
 static void install_ndgi_hooks(uint64_t image_size) {
     const char *wait=getenv("BB_JOB_LOCK_WAIT_MS");
     if (wait && wait[0]=='0' && !wait[1]) return; /* nothing uses the flag */
@@ -936,7 +937,13 @@ static void install_ndgi_hooks(uint64_t image_size) {
         if (begin_at>=0) { begin_at=-2; break; }
         begin_at=(int64_t)at;
     }
-    if (begin_at>=0 && callback_thunk(image+begin_at,8,(const void *)ndgi_begin))
+    size_t begin_len=8;
+    if (begin_at==-1) {
+        /* US 1.02 (as CUSA02344): the worker path's mov [r15+0xe810], r12 */
+        begin_at=find_masked("4d89a710e80000",image_size);
+        begin_len=7;
+    }
+    if (begin_at>=0 && callback_thunk(image+begin_at,begin_len,(const void *)ndgi_begin))
         printf("Render contexts: begin hooked at %#" PRIx64 "\n",(uint64_t)begin_at);
     else
         printf("Render contexts: begin site %s\n",begin_at==-2 ? "not unique" : "not found");
@@ -948,6 +955,11 @@ static void install_ndgi_hooks(uint64_t image_size) {
         if (image[at]!=0x49 || memcmp(image+at,head,sizeof(head)) || memcmp(image+at+12,tail,sizeof(tail))) continue;
         if (found>=0) { printf("Render contexts: end site not unique\n"); return; }
         found=(int64_t)at;
+    }
+    if (found<0) {
+        /* US 1.02: cmp byte [r15+0xe7dc],0; je; mov r12,[r15+0xe810] (the index call is inlined) */
+        const int64_t us=find_masked("4180bfdce70000 00 0f84???????? 4d8ba710e80000",image_size);
+        if (us>=0) found=us+14;
     }
     if (found<0) { printf("Render contexts: end site not found\n"); return; }
     if (callback_thunk(image+found,7,(const void *)ndgi_end))
@@ -1215,6 +1227,42 @@ static ABI int job_lock_wait(uint64_t counter, uint64_t a, uint32_t b) {
     return 0;
 #undef try_lock
 }
+/* US 1.02 (CUSA02320, as CUSA02344), all three games: the try is inlined (counter r15, target r14,
+ * mode ebx) and the worker check is in al:
+ *   mov rcx,[r15+0x20]; cmp ebx,1; jne; cmp rcx,r14; setle cl; jmp; test ebx,ebx; jne; cmp rcx,r14;
+ *   sete cl; test cl,cl; jne done; test al,al; je not_a_worker; nop10; (suspend loop:) mov rdi,r15;
+ *   mov rsi,r14; mov edx,ebx; call SuspendJob
+ * The game keeps an uncalled copy of the try function, which job_lock_wait calls. */
+static void patch_job_lock_wait_us(uint64_t image_size) {
+    const int64_t at=find_masked("498b4f20 83fb01 75?? 4c39f1 0f9ec1 eb?? 85db 75?? 4c39f1 0f94c1 84c9 75?? 84c0 74?? "
+                                 "662e0f1f840000000000 4c89ff 4c89f6 89da e8????????",image_size);
+    const int64_t try_at=find_masked("83fa01 7507 4839f7 0f9ec0 c3 85d2 7507 4839f7 0f94c0 c3",image_size);
+    if (at<0 || try_at<0) { printf("Job wait: pattern not found, not patched\n"); return; }
+    unsigned char *p=image+at;
+    job_lock_try=(uint64_t)(uintptr_t)(image+try_at);
+    const uint64_t done=(uint64_t)(uintptr_t)(p+31+(int8_t)p[30]);
+    const uint64_t not_worker=(uint64_t)(uintptr_t)(p+35+(int8_t)p[34]);
+    const uint64_t suspend_loop=(uint64_t)(uintptr_t)(p+45);
+    unsigned char *t=near_image_memory(4096);
+    if (!t) { printf("Job wait: no thunk memory, not patched\n"); return; }
+    size_t k=0;
+    const uintptr_t host=(uintptr_t)job_lock_wait;
+    t[k++]=0x84; t[k++]=0xc0; t[k++]=0x75; t[k++]=0x0e;                                   /* test al,al; jnz worker */
+    t[k++]=0xff; t[k++]=0x25; memset(t+k,0,4); k+=4; memcpy(t+k,&not_worker,8); k+=8;    /* jmp [rip]: not a worker */
+    static const unsigned char args[]={0x4c,0x89,0xff,0x4c,0x89,0xf6,0x89,0xda};        /* rdi=r15 (the counter), rsi=r14, edx=ebx */
+    memcpy(t+k,args,sizeof(args)); k+=sizeof(args);
+    t[k++]=0x48; t[k++]=0xb8; memcpy(t+k,&host,8); k+=8;   /* movabs rax, job_lock_wait */
+    t[k++]=0xff; t[k++]=0xd0;                              /* call rax (rsp aligned as at the original call) */
+    t[k++]=0x84; t[k++]=0xc0;                              /* test al,al */
+    t[k++]=0x74; t[k++]=0x0e;                              /* jz suspend */
+    t[k++]=0xff; t[k++]=0x25; memset(t+k,0,4); k+=4; memcpy(t+k,&done,8); k+=8;          /* jmp [rip]: there */
+    t[k++]=0xff; t[k++]=0x25; memset(t+k,0,4); k+=4; memcpy(t+k,&suspend_loop,8); k+=8;  /* jmp [rip]: suspend as before */
+    const int32_t to=(int32_t)((int64_t)(uintptr_t)t-(int64_t)(uintptr_t)(p+31+5));
+    p[31]=0xe9; memcpy(p+32,&to,4);                        /* replaces test al,al; je */
+    memset(p+36,0x90,9);
+    printf("Job wait: workers with a render context open wait for a job counter in place for up to %u ms before suspending their job (0x%" PRIx64 ", US)\n",
+           job_lock_wait_ms,(uint64_t)at);
+}
 static void patch_job_lock_wait(uint64_t image_size) {
     const char *env=getenv("BB_JOB_LOCK_WAIT_MS");
     if (env) job_lock_wait_ms=(unsigned)strtoul(env,NULL,10);
@@ -1223,6 +1271,7 @@ static void patch_job_lock_wait(uint64_t image_size) {
      * test r12b,r12b; je not_a_worker; nop5; (suspend loop:) mov rdi,rbx; mov rsi,r15; mov edx,r14d; call SuspendJob */
     const int64_t at=find_masked("488b7b20 4c89fe 4489f2 e8???????? 84c0 75?? 4584e4 74?? 0f1f440000 4889df 4c89fe 4489f2 e8????????",
                                  image_size);
+    if (at==-1) { patch_job_lock_wait_us(image_size); return; }
     if (at<0) { printf("Job wait: %s\n",at==-2 ? "pattern not unique, not patched" : "pattern not found, not patched"); return; }
     unsigned char *p=image+at;
     int32_t rel; memcpy(&rel,p+11,4);
