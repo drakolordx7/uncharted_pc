@@ -1,7 +1,7 @@
 # Uncharted: The Nathan Drake Collection for Windows (community build)
 
 Uncharted 1, 2 and 3 from the PS4 collection running natively on Windows, built on
-[SuperMedo's port](https://github.com/Supermedo/uncharted_pc) (0.3.7), with fixes from across the community.
+[SuperMedo's port](https://github.com/Supermedo/uncharted_pc) (0.3.8), with fixes from across the community.
 
 The port is SuperMedo's work: the original PS4 game code runs directly on your PC and the
 graphics go through Vulkan. This fork collects the fixes people have written since then, ours and
@@ -27,50 +27,35 @@ The builds don't include the DLSS bridge. XeSS and FSR work on any GPU.
 
 ## What's in this build
 
-Everything in the official 0.3.7, plus the changes below. Where there is a link, it goes to the pull
+Everything in the official 0.3.8, plus the changes below. Where there is a link, it goes to the pull
 request on the official repository.
 
 ### Crashes
 
-- Uncharted 1, 2 and 3 "execute access to 0" (exit code 3) when the constant table fill takes a page fault: its pages are written before the fill starts, on top of 0.3.7's red-zone fix: [#396](https://github.com/Supermedo/uncharted_pc/pull/396)
-
-### Performance
-
-- Less shader stutter: pipelines compile off the GPU thread: [#389](https://github.com/Supermedo/uncharted_pc/pull/389), [#416](https://github.com/Supermedo/uncharted_pc/pull/416)
-- A separate shader cache per GPU (fixes an Intel crash on a cache built by another GPU): [#412](https://github.com/Supermedo/uncharted_pc/pull/412)
-
-### Graphics
-
-- Render above 1080p, and ultrawide: [#391](https://github.com/Supermedo/uncharted_pc/pull/391)
-- Intel XeSS as an anti-aliasing choice: [#476](https://github.com/Supermedo/uncharted_pc/pull/476)
+- Uncharted 1, 2 and 3 "execute access to 0" (exit code 3) when the constant table fill takes a page fault: its pages are written before the fill starts, on top of 0.3.8's red-zone fix: [#396](https://github.com/Supermedo/uncharted_pc/pull/396)
 
 ### Controls and launcher
 
-- Keyboard and mouse button prompts, layouts and custom keybinding: [#420](https://github.com/Supermedo/uncharted_pc/pull/420) by Umar-Qayyum-dev
-- Xbox button prompts for Xbox and other controllers: [#469](https://github.com/Supermedo/uncharted_pc/pull/469)
-- Trophy notices in the game and a Trophies page in the launcher: [#472](https://github.com/Supermedo/uncharted_pc/pull/472)
 - `--u1`, `--u2`, `--u3` start a game straight from a shortcut: [#399](https://github.com/Supermedo/uncharted_pc/pull/399)
 
 ### Older CPUs
 
-- Runs on Intel Sandy and Ivy Bridge: the instructions they lack (BMI1, MOVBE, LZCNT, F16C) are rewritten at start-up (adapted from FelipePrado0's SpartanPort). Players confirmed it on a real Ivy Bridge. 0.3.7 has its own rewrite for Ivy Bridge; this build uses this one instead, because it also covers Sandy Bridge.
+- Runs on Intel Sandy and Ivy Bridge: the instructions they lack (BMI1, MOVBE, LZCNT, F16C) are rewritten at start-up (adapted from FelipePrado0's SpartanPort). Players confirmed it on a real Ivy Bridge. 0.3.8 has its own rewrite for Ivy Bridge; this build uses this one instead, because it also covers Sandy Bridge.
 
 ### From other forks
 
 - A display flip that arrives before its label no longer stops the game, a missing CE task no longer crashes the GPU thread, and FSR 3.1 no longer uses protected memory (noise on AMD Phoenix): from iannitram's fork
 - FSR 3 frame generation no longer leaks video memory every frame, and conditional GPU commands test the whole condition: Mevlock
-- The launcher reports why the game stopped and when input settings or the shader cache can't be written: poncho-ajmv
 - Dark title bar for the launcher on Windows: soni424
 - Faster in Uncharted 2 and 3 (U3 Cartagena square 26 → 48 FPS in our tests): compute work no longer waits on the whole draw pipe, compute fences run in order with it, and typed-buffer writes copy only what changed. Also fixes an Uncharted 3 freeze about 15 seconds in: iannitram, Mevlock
 - Uncharted 3 cloth no longer reads past shared memory, and the flashlight and shadow slices no longer drop out: Mevlock
-- Uncharted 1 shimmer with DLSS, FSR and TAA is fixed: kj2223
 - A bad GPU command, a failed pipeline or a missing vertex buffer table skips one draw instead of closing the game, and a null shader binding no longer crashes the jungle chapter (1.00 and 1.02): iannitram, soni424
 - Textures are freed again when video memory fills up, so it no longer keeps growing: parsifal295, devilismyfriend
-- Shader fixes: scalar instructions inside EXEC scopes ([#468](https://github.com/Supermedo/uncharted_pc/pull/468)) by G3545, and GCN-style NaN compares (from shadPS4) by iannitram
+- Shader fix: GCN-style NaN compares (from shadPS4): iannitram
 - Large compute dispatches are split, and a sparse-capable queue is picked when the GPU needs it: Hugo Borges
 - Saves are written so an interrupted save can't corrupt the file: Mevlock
 - Freeze fixes: the GPU thread could hang on its list of GPU-written memory (an Uncharted 3 chapter 1 freeze, and a likely cause of Uncharted 2 freezes), and flips at deaths, cutscenes and movie changes no longer wait on the thread that raised them: Mevlock
-- Launcher: Stop reliably ends the game, a controller vibration toggle, and a frame rate cap: poncho-ajmv, Hugo Borges
+- Launcher: a frame rate cap: Hugo Borges
 - Frame generation no longer crashes on a resized or undersized frame, closing the window no longer hangs, and Uncharted 3 no longer hangs on a first run with an empty shader cache: Mevlock
 - Less CPU time spent waiting: the draw pipe sleeps instead of spinning, ignored predication no longer drains it, and barrier and register tracking do less work: Umar-Qayyum-dev, Mevlock
 - Uncharted 2 reuses texture sets and skinning data instead of rebuilding them: Umar-Qayyum-dev
@@ -99,6 +84,7 @@ If you'd rather your change didn't come in, open an issue and we'll take it out.
 
 - All three games from one launcher: Drake's Fortune, Among Thieves and Drake's Deception.
 - 60 FPS like on PS4, or 120 FPS (higher rates are experimental).
+- Render resolution above 1080p (up to 3200x1800) and ultrawide aspect ratios: the games draw a real larger or wider picture, set in the launcher.
 - Anti-aliasing with TAA, AMD FSR 3.1, AMD FSR 4, NVIDIA DLSS (DLAA) or Intel XeSS (any GPU).
 - Frame generation: AMD FSR 3 (any GPU) or NVIDIA DLSS (RTX 40 2x, RTX 50 up to 4x).
 - Keyboard, mouse and controller together, all remappable. Mouse look in all three games, aiming included (game versions 1.00 and 1.02; in Among Thieves 1.00 only checked up to the opening scene).
@@ -107,6 +93,8 @@ If you'd rather your change didn't come in, open an issue and we'll take it out.
   controller. Keys follow your keyboard layout (AZERTY...).
 - Trophies: the games' own trophy lists, a notice in the game when one is earned, and a Trophies page in the launcher.
 - Stereo, 5.1 or 7.1 sound: the games are told the real speaker layout (it follows the Windows setting, or pick it in the launcher).
+- Controller vibration settings, a Cheats page (infinite health and ammo per game), launcher languages, and your own covers and Steam art.
+- A Fixes page for the fixes that cost speed: Automatic turns each one on only where it helps.
 - Add to Steam and desktop shortcuts from the launcher, automatic updates.
 
 ## Requirements
