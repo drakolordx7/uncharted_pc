@@ -87,7 +87,9 @@ if [[ ! -f out/libatrac9.a || -n $(find third_party/LibAtrac9/C/src -newer out/l
     for source in "${atrac9[@]}"; do "$CC" -std=c99 -O2 -g -w -c "$source" -o "out/atrac9/$(basename "${source%.c}").o"; done
     ar rcs out/libatrac9.a out/atrac9/*.o
 fi
-"$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -no-pie "${includes[@]}" -I. -Isrc src/probe.c "${runtime[@]}" src/vulkan_smoke.c out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/bb-probe
+# The ISA emulator runs inside guest code and must not touch XMM/YMM registers.
+"$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -mgeneral-regs-only -Isrc -c src/isa_emulate.c -o out/isa_emulate.o
+"$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -no-pie "${includes[@]}" -I. -Isrc src/probe.c "${runtime[@]}" src/vulkan_smoke.c src/cpu_check.c src/isa_rewrite.c out/isa_emulate.o out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/bb-probe
 echo "Built $PWD/out/bb-probe"
 # GPU check for run.sh (live_resolution=auto): links only the Vulkan loader.
 "$CC" -std=c11 -O2 -Wall -Wextra -Werror tools/gpu_capabilities.c "${libraries[@]}" -o out/bb-gpu-capabilities
@@ -102,4 +104,10 @@ if [[ ${1:-} == --test ]]; then
     out/sema-test
     "$CC" -std=c11 -D_GNU_SOURCE -O2 -g -Wall -Wextra -Werror -I. -Isrc tests/test_content.c src/runtime_content.c -o out/content-test
     out/content-test
+    # The emulator against the real instructions (skips on a CPU without BMI1/LZCNT/MOVBE/F16C) and the site locator.
+    "$CC" -std=c11 -O1 -g -Wall -Wextra -Werror -mbmi -mlzcnt -mmovbe -mf16c -Isrc tests/test_isa_emulate.c out/isa_emulate.o -o out/isa-emulate-test
+    out/isa-emulate-test
+    "$CC" -std=c11 -O1 -g -Wall -Wextra -Werror -Isrc tests/test_isa_stub.c src/isa_rewrite.c out/isa_emulate.o -o out/isa-stub-test
+    out/isa-stub-test
+    python3 -m unittest tests/test_isa_rewrite.py
 fi
