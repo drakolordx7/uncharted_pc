@@ -341,8 +341,15 @@ void Scheduler::SyncRecording() {
     recorder_idle_cv.wait(lk, [this] { return recorder_queue.empty() && !recorder_busy; });
 }
 
+static thread_local bool t_on_recorder_thread = false;
+
+bool Scheduler::OnRecorderThread() {
+    return t_on_recorder_thread;
+}
+
 void Scheduler::RecorderThread(std::stop_token stoken) {
     Common::SetCurrentThreadName("bb:VkRecorder");
+    t_on_recorder_thread = true;
     while (true) {
         // Spin briefly before sleeping: the next chunk usually follows within microseconds,
         // and a sleeping recorder costs the GPU thread a wake-up syscall per kick. With few
