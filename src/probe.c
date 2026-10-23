@@ -967,14 +967,14 @@ static void patch_job_sleep(uint64_t image_size) {
         }
         /* Based on Mevlock@5d519ad. A sleeping worker starts a job only once the host has woken it:
          * work a frame does not wait for could miss it (U3's mine: the flashlight's light missing
-         * for a frame). BB_JOB_SLEEP_SPINS (default 50000, the game's 1000: cmp r8, 1000 in the
+         * for a frame). BB_JOB_SLEEP_SPINS (default the game's 1000; Mevlock used 50000: cmp r8, 1000 in the
          * worker loop) keeps a worker spinning through a frame's bursts of jobs; it sleeps when the
          * game is idle. The worker then waits up to 10 ms without looking at the queue again: a job
          * submitted after its last look waited for the timeout. The wait after the re-check
          * (mov edx, 10 in 1.00, mov edx, 10000 in 1.02: microseconds) becomes BB_JOB_SLEEP_MS
-         * (default 1; 10 = the game's). Both edits apply only where the expected old value is. */
+         * (default the game's 10; Mevlock used 1). Both edits apply only where the expected old value is. */
         const char *ms_env=getenv("BB_JOB_SLEEP_MS");
-        const int ms=ms_env ? atoi(ms_env) : 1;
+        const int ms=ms_env ? atoi(ms_env) : 10;
         int wait_ms=-1, spins_now=-1;
         for (unsigned o=builds[b][1].offset; o<48; ++o) {
             unsigned char *w=image+at[1]+o;
@@ -989,7 +989,7 @@ static void patch_job_sleep(uint64_t image_size) {
             break;
         }
         const char *spins_env=getenv("BB_JOB_SLEEP_SPINS");
-        const long spins=spins_env ? atol(spins_env) : 50000;
+        const long spins=spins_env ? atol(spins_env) : 1000;
         for (unsigned o=0; o<24; ++o) {
             unsigned char *c=image+at[0]+o;
             int32_t v;
