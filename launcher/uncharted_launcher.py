@@ -133,6 +133,45 @@ TK_KEYS = {'space': 'Space', 'Return': 'Return', 'Escape': 'Escape', 'Tab': 'Tab
 WIN_NUMPAD = {**{0x60 + n: f'Keypad {n}' for n in range(10)},
               0x6A: 'Keypad *', 0x6B: 'Keypad +', 0x6D: 'Keypad -', 0x6E: 'Keypad .', 0x6F: 'Keypad /'}
 MOUSE_SENS_MIN, MOUSE_SENS_MAX = 0.1, 10.0  # the Controls page slider (the game's default pace is 1)
+# Fixes page: fixes that cost speed, so they run only where they help unless the player picks.
+# key -> (title, hint, {choice: {variable: value}}); 'auto' sets nothing (the game's own default).
+FIXES = {
+    'fix_u2_gpu_results': (
+        'Exact GPU results (Uncharted 2)',
+        'Explosions, vehicle damage and the convoy of chapter 21 read results of GPU work back. '
+        'Automatic: on in Uncharted 2 only. Costs speed in busy scenes.',
+        {'on': {'BB_GPU_MERGE': '0'}, 'off': {'BB_GPU_MERGE': '1'}}),
+    'fix_u2_mesh': (
+        'Mesh raycaster copies (Uncharted 2)',
+        'Fixes "iSubMesh < m_numSubMeshInstances" after checkpoints. Automatic: on in Uncharted 2 only. '
+        'In Uncharted 3\'s Cartagena square it cost 94 to 54 FPS.',
+        {'on': {'BB_SCALAR_COPY64_SYNC': '2', 'BB_SCALAR_COPY64_DEFER': '1'},
+         'off': {'BB_SCALAR_COPY64_SYNC': '0', 'BB_SCALAR_COPY64_DEFER': '0'}}),
+    'fix_tiny_readback': (
+        'Aim and turret focus (Uncharted 2)',
+        'Enemies stay in focus when aiming. Automatic: on in Uncharted 2 only; elsewhere it costs about 13%.',
+        {'on': {'BB_TINY_READBACK': '1'}, 'off': {'BB_TINY_READBACK': '0'}}),
+    'fix_small_buffers': (
+        'Brightness flicker fix',
+        'Copies small GPU results back every frame (auto exposure). Automatic: off; it halved the frame '
+        'rate in Uncharted 3\'s Cartagena square.',
+        {'on': {'BB_READBACK_SMALL_BUFFERS': '1'}, 'off': {'BB_READBACK_SMALL_BUFFERS': '0'}}),
+    'fix_vram': (
+        'Small video memory mode',
+        'Keeps 4-8 GB graphics cards inside their video memory. Automatic: on for cards up to 8 GB.',
+        {'on': {'BB_VRAM_LEGACY': '0'}, 'off': {'BB_VRAM_LEGACY': '1'}}),
+    'fix_job_sleep': (
+        'Idle game workers sleep',
+        'Frees CPU cores while the game\'s workers wait. Automatic: on for CPUs with up to 8 threads; '
+        'on bigger CPUs it cost about 8%.',
+        {'on': {'BB_JOB_SLEEP': '1'}, 'off': {'BB_JOB_SLEEP': '0'}}),
+    'fix_thread_prio': (
+        'PS4 thread priorities',
+        'Game threads get the priorities they have on PS4. Automatic: on.',
+        {'on': {'BB_THREAD_PRIO': '1'}, 'off': {'BB_THREAD_PRIO': '0'}}),
+}
+FIX_CHOICES = [('auto', 'Automatic'), ('on', 'On'), ('off', 'Off')]
+
 # Insert opens the in-game settings menu; Left Alt frees the mouse cursor.
 RESERVED_KEYS = {'Insert': 'Insert opens the in-game settings menu.',
                  'Alt_L': 'Left Alt frees the mouse cursor while held.'}
@@ -143,7 +182,8 @@ APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_
                 'anti_aliasing': 'off', 'aa_sharpness': '0.2', 'frame_generation': 'off',
                 'frame_gen_multiplier': '2', 'extra_env': '', 'close_on_play': False,
                 'mouse_look': True, 'mouse_sensitivity': '1.0', 'mouse_invert_y': False,
-                'pad_invert_y': False, 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True}
+                'pad_invert_y': False, 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True,
+                **{key: 'auto' for key in FIXES}}
 
 
 def _(text):
@@ -357,6 +397,8 @@ def game_environment(s, start=None):
     env['BB_FSR_SHARPNESS'] = str(s.get('aa_sharpness') or '0')
     env['BB_FRAME_GEN'] = str(s.get('frame_generation') or 'off')
     env['BB_FRAME_GEN_MULTIPLIER'] = str(s.get('frame_gen_multiplier') or '2')
+    for key, (_title, _hint, choices) in FIXES.items():
+        env.update(choices.get(str(s.get(key) or 'auto'), {}))
     for item in str(s['extra_env']).split():
         if '=' in item:
             key, value = item.split('=', 1)
@@ -378,7 +420,7 @@ COLORS = {'surface': SURFACE, 'card': CARD, 'card_hi': CARD_HI, 'line': LINE, 't
           'button': '#25272b', 'button_hi': '#30333a'}
 # Sidebar icons (Segoe Fluent Icons on Windows 11, Segoe MDL2 Assets on Windows 10).
 NAV_ICONS = {'play': '\ue768', 'game': '\ue7fc', 'display': '\ue7f4', 'controls': '\ue765',
-             'advanced': '\ue713', 'log': '\ue8a5'}
+             'fixes': '\ue90f', 'advanced': '\ue713', 'log': '\ue8a5'}
 RUST, RUST_HI = GOLD, GOLD_HI
 
 
@@ -694,7 +736,8 @@ class Launcher:
         tk.Frame(side, bg=LINE, height=1).pack(fill='x', padx=18, pady=(0, 14))
         self.nav, self.nav_pills, self.nav_icons, self.nav_marks, self.current_page = {}, {}, {}, {}, None
         for name, title in (('play', _('Play')), ('game', _('Game')), ('display', _('Display')),
-                            ('controls', _('Controls')), ('advanced', _('Advanced')), ('log', _('Log'))):
+                            ('controls', _('Controls')), ('fixes', _('Fixes')), ('advanced', _('Advanced')),
+                            ('log', _('Log'))):
             row = tk.Frame(side, bg=BG, cursor='hand2')
             row.pack(fill='x', padx=(0, 12), pady=2)
             mark = tk.Frame(row, bg=BG, width=self.px(3))
@@ -752,6 +795,7 @@ class Launcher:
         self.build_game()
         self.build_display()
         self.build_controls()
+        self.build_fixes()
         self.build_advanced()
         self.build_log()
         self.refresh()
@@ -1220,6 +1264,12 @@ class Launcher:
     def reset_pad(self):
         for action, var in self.pad_vars.items():
             var.set(DEFAULT_PAD[action])
+
+    def build_fixes(self):
+        f = self.page('fixes', _('Fixes'), _('Fixes that cost speed. Automatic turns each one on only where it '
+                                             'helps; change one only when you see its problem.'))
+        for key, (title, hint, _choices) in FIXES.items():
+            self.row(f, _(title), self.choice(f, key, FIX_CHOICES, 16), _(hint))
 
     def build_advanced(self):
         f = self.page('advanced', _('Advanced'), _('Maintenance and options for testing.'))
