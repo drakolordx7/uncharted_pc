@@ -1654,6 +1654,19 @@ static int menu_mode, menu_guard;   /* defined with the menu keys below */
 #define FREE_TEXTS 160
 static MenuText free_texts[FREE_TEXTS];
 static int free_text_count;
+/* The credits (U1 1.02): the credits task updates and draws itself in image+0x3b41e0 (strings "CREDITS:: ..." and "credits-roll"), called every
+ * frame while they are on screen; they draw no menu text the port sees, so the menu keys and the mouse would otherwise be off there. */
+static volatile uint64_t u1_credits_us;
+static int u1_credits_recent(uint64_t now) { return u1_credits_us && now-u1_credits_us<300000 && u1_credits_us<=now+1000000; }
+static void __attribute__((ms_abi)) u1_credits_tick(uint64_t task, uint64_t unused1, uint64_t image, uint64_t r14) {   /* task = rdi: its first word is the state, 7..11 while the credits roll */
+    (void)unused1; (void)image; (void)r14;
+    uint32_t state=0;
+    static uint32_t last_state=0xffffffffu;
+    if (!safe_read(&state,task,4)) return;
+    if (mouse_debug() && state!=last_state) { last_state=state; printf("Runtime: U1 credits task state %u\n",state); }
+    if (state-7u<5u) u1_credits_us=now_us();
+}
+static const unsigned char u1_credits_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x98,0x01,0x00,0x00};
 static void __attribute__((ms_abi)) u1_text_draw(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t r14) {
     (void)unused0; (void)unused1; (void)image; (void)r14;
     const uint64_t item=menu_text_item;
@@ -1882,6 +1895,7 @@ static const RuntimeGuestCallback guest_callbacks[]={
     {"U1 compare-with-friends prompt (skip 1)",0x128f69,u1_compare_je_code,sizeof(u1_compare_je_code),sizeof(u1_compare_je_patch),NULL,u1_compare_je_patch},
     {"U1 compare-with-friends prompt (skip 2)",0x128f76,u1_compare_jmp_code,sizeof(u1_compare_jmp_code),sizeof(u1_compare_jmp_patch),NULL,u1_compare_jmp_patch},
     {"U1 menu add item",0x132f00,u1_menu_add_item_code,sizeof(u1_menu_add_item_code),6,u1_menu_add_item,NULL},
+    {"U1 credits tick",0x3b41e0,u1_credits_code,sizeof(u1_credits_code),6,u1_credits_tick,NULL},
     {"U1 menu text draw",0x13acf0,u1_text_draw_code,sizeof(u1_text_draw_code),6,u1_text_draw,NULL},
     {"U1 menu item draw (1)",0x133fbc,u1_menu_item_begin_code,sizeof(u1_menu_item_begin_code),9,u1_menu_item_begin,NULL},
     {"U1 menu item draw end (1)",0x133fc8,u1_menu_item_end1_code,sizeof(u1_menu_item_end1_code),7,u1_menu_item_end,NULL},
@@ -2342,6 +2356,7 @@ static int menu_exit_key;             /* 1: the last menu key pressed was Alt or
 static int menu_idle_off;
 static int menu_open(void) {
     if (!u1_image) return 0;
+    if (u1_credits_recent(now_us())) return 1;   /* (the credits have no menu item: the keys and the mouse must be on for the way back) */
     if (u1_camera_dt_offset && camera_stopped(u1_image,u1_camera_dt_offset)) return 1;
     if (menu_idle_off==2) return 1;
     if (menu_idle_off==1) return 0;
@@ -2399,7 +2414,7 @@ static int key_action_down(int a, const bool *k, uint32_t mouse, uint64_t now) {
         if (a==A_UP && now<wheel_until_us[0]) return 1;
         if (a==A_DOWN && now<wheel_until_us[1]) return 1;
     }
-    if (a==A_CIRCLE && (mouse & 8u)) return 1;
+    if (a==A_CIRCLE && ((mouse & 8u) || ((mouse & 2u) && u1_credits_recent(now)))) return 1;   /* (the credits have nothing to click: the right button goes back) */
     if (menu_button) {
         if (menu_key_action_down(a,k)) return 1;
         /* No menu text while the menu keys are on, but a button icon on screen (a hint): a scripted scene with its own prompt
@@ -2471,7 +2486,7 @@ static void menu_update(const bool *k, uint32_t mouse) {
         static uint64_t on_since;
         const uint64_t t=now_us();
         if (!menu_mode) on_since=0; else if (!on_since) on_since=t;
-        const int idle=menu_mode && t-on_since>1000000 && !menu_texts_recent(t);
+        const int idle=menu_mode && t-on_since>1000000 && !menu_texts_recent(t) && !u1_credits_recent(t);   /* (the credits draw no menu text, yet they are no cutscene: Esc goes back there) */
         if (idle!=menu_no_text) { menu_no_text=idle; bbgpu_menu_cursor_hidden(idle); printf("Runtime: menu no text (cutscene) %s\n",idle ? "yes" : "no"); }
         const int esc=k && k[SDL_SCANCODE_ESCAPE];
         if (!esc) menu_esc_latch=0; else if (menu_no_text) menu_esc_latch=1;
@@ -2490,6 +2505,7 @@ static void menu_update(const bool *k, uint32_t mouse) {
             for (int i=0;i<menu_text_count && !texts;++i) if (t-menu_texts[i].us<300000) texts=1;
             pthread_mutex_unlock(&menu_text_lock);
         }
+        if (u1_credits_recent(t)) texts=1;
         if (stopped || follow) { quiet_since=busy_since=0; menu_idle_off=0; }
         else if (!texts) {
             busy_since=0; if (!quiet_since) quiet_since=t;
