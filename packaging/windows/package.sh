@@ -22,11 +22,11 @@ export USERPROFILE=${USERPROFILE:-$(cygpath -w "/c/Users/$(id -un)")}
 if [[ ! -x out/pyenv/Scripts/python.exe ]]; then
     "$python" -m venv out/pyenv
 fi
-out/pyenv/Scripts/python.exe -m pip install -q --disable-pip-version-check pyinstaller pillow
+out/pyenv/Scripts/python.exe -m pip install -q --disable-pip-version-check pyinstaller pillow iced-x86
 # The scripts run inside Uncharted.exe (--script): the standard modules they import come along.
 hidden=()
 for module in argparse base64 collections hashlib json re shutil struct tempfile zlib ctypes.wintypes \
-              uncharted_art uncharted_fonts uncharted_widgets bbport_steam PIL.ImageTk; do
+              uncharted_art uncharted_fonts uncharted_widgets bbport_steam PIL.ImageTk iced_x86; do
     hidden+=(--hidden-import "$module")
 done
 out/pyenv/Scripts/python.exe -m PyInstaller --noconfirm --clean --log-level WARN --windowed \
