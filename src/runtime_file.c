@@ -148,6 +148,8 @@ static int translate(const char *guest,char *out,size_t size) {
     if (result==ENOENT) fprintf(stderr,"Runtime: no mount for guest path %s\n",guest);
 #ifndef _WIN32
     if (!result) fix_case(out,root);
+#else
+    (void)root;
 #endif
     return result;
 }
