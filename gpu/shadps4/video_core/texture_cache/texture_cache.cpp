@@ -53,7 +53,10 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
     // bbport: below ~5 GB the fixed floors above (pressure 1.5 GB, critical 3 GB) are most of the
     // card: the collector worked on images idle for 80-160 submissions while the whole process
     // was past the card's budget. GarbageCollectImages sizes its marks from the live budget.
-    tight_budget = !Vulkan::Vram::Legacy() && !instance.IsIntegrated() && device_local_memory < static_cast<s64>(5_GB);
+    // The same holds up to 8 GB cards: the formula below keeps 60% of the budget (4.8 GB at most)
+    // free, so an 8 GB card (budget ~6.2 GB) started evicting at 2.5 GB used, with 60% unused.
+    tight_budget = !Vulkan::Vram::Legacy() && !instance.IsIntegrated() &&
+                   device_local_memory < static_cast<s64>(8_GB);
     const s64 min_spacing_expected = device_local_memory - 1_GB;
     const s64 min_spacing_critical = device_local_memory - 512_MB;
     const s64 mem_threshold = std::min<s64>(device_local_memory, TARGET_GC_THRESHOLD);
@@ -204,6 +207,31 @@ void TextureCache::UnmapMemory(VAddr cpu_addr, size_t size) {
     }
 }
 
+/// bbport: U3 keeps its shadow maps as one depth array (16 layers, one per light) at a fixed address
+/// and switches the whole array between 1024 and 1280 as the camera turns. A new image of the other
+/// size started with one layer and was made again, copied, for every further layer the game drew
+/// that frame (ten times in a frame): the layers drawn before were lost, so those lights lost their
+/// shadow maps (the flashlight's light vanished for a frame, then came back in blocky tiles).
+/// A depth image made at an address that has held a deeper array gets all those layers at once; the
+/// game draws each layer again every frame. BB_DEPTH_ARRAY_PAD=0: off.
+/// (Mevlock 670bf18.)
+void TextureCache::PadDepthLayers(ImageInfo& info) {
+    static const bool pad = [] {
+        const char* env = std::getenv("BB_DEPTH_ARRAY_PAD");
+        return !(env && env[0] == '0');
+    }();
+    if (!pad || !info.props.is_depth) {
+        return;
+    }
+    auto& seen = depth_array_layers[info.guest_address];
+    if (info.resources.layers > seen) {
+        seen = info.resources.layers;
+    } else if (seen > info.resources.layers && seen > 1) {
+        info.resources.layers = seen;
+        info.UpdateSize();
+    }
+}
+
 ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, BindingType binding,
                                           ImageId cache_image_id) {
     auto& cache_image = slot_images[cache_image_id];
@@ -253,6 +281,7 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         auto new_info = requested_info;
         new_info.resources = std::max(requested_info.resources, cache_image.info.resources);
         new_info.UpdateSize();
+        PadDepthLayers(new_info);
         const auto new_image_id = slot_images.insert(instance, runtime, slot_image_views, new_info);
         RegisterImage(new_image_id);
 
@@ -262,6 +291,21 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         new_image.flags &= ~ImageFlagBits::Dirty;
         // When creating a depth buffer through overlap resolution don't clear it on first use.
         new_image.info.meta_info.htile_clear_mask = 0;
+        // bbport: the new image takes over the old one's HTILE record as it stands, so a fast
+        // clear the game made before is still applied to the slices not bound since. Freeing the
+        // old image erased it and the new one started with no slice cleared: U3 grows its point
+        // light shadow array a layer at a time (512x512 x 48 above 1080p), so the cubes in layers
+        // 12 and up kept a depth of 0 and shadowed everything (the hand torch lit a trapezoid).
+        // (Mevlock 397eefb.)
+        const VAddr old_htile = cache_image.info.meta_info.htile_addr;
+        if (old_htile && (!new_image.info.meta_info.htile_addr ||
+                          new_image.info.meta_info.htile_addr == old_htile)) {
+            new_image.info.meta_info.htile_addr = old_htile;
+            cache_image.info.meta_info.htile_addr = 0;
+            if (const auto it = surface_metas.find(old_htile); it != surface_metas.end()) {
+                it.value().owner = new_image_id;
+            }
+        }
         runtime.CopyColorAndDepth(&cache_image, &new_image);
 
         // Free the cache image.
@@ -578,7 +622,14 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
         if (cache_image.info.guest_address != info.guest_address) {
             continue;
         }
-        if (cache_image.info.guest_size != info.guest_size) {
+        // bbport: a depth array made with more layers (PadDepthLayers) answers a request for
+        // fewer layers of the same size and format.
+        const bool deeper_depth_array =
+            info.props.is_depth && cache_image.info.props.is_depth &&
+            cache_image.info.resources.levels == info.resources.levels &&
+            cache_image.info.resources.layers >= info.resources.layers &&
+            cache_image.info.guest_size >= info.guest_size;
+        if (cache_image.info.guest_size != info.guest_size && !deeper_depth_array) {
             continue;
         }
         if (cache_image.info.size != info.size) {
@@ -627,7 +678,11 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     }
     // Create and register a new image
     if (!image_id) {
-        image_id = slot_images.insert(instance, runtime, slot_image_views, info);
+        auto new_info = info;
+        if (desc.type == BindingType::DepthTarget) {
+            PadDepthLayers(new_info);
+        }
+        image_id = slot_images.insert(instance, runtime, slot_image_views, new_info);
         RegisterImage(image_id);
     }
 
@@ -759,9 +814,10 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
 
     // Register meta data for this depth buffer
     if (desc.info.meta_info.htile_addr) {
-        surface_metas.emplace(desc.info.meta_info.htile_addr,
-                              MetaDataInfo{.type = MetaType::HTile,
-                                           .clear_mask = image.info.meta_info.htile_clear_mask});
+        const auto meta = surface_metas.emplace(
+            desc.info.meta_info.htile_addr,
+            MetaDataInfo{.type = MetaType::HTile, .clear_mask = image.info.meta_info.htile_clear_mask});
+        meta.first.value().owner = image_id;
         image.info.meta_info.htile_addr = desc.info.meta_info.htile_addr;
     }
 
@@ -1152,9 +1208,9 @@ void TextureCache::GarbageCollectImages() {
     if (instance.CanReportMemoryUsage()) {
         u64 budget_now = 0;
         instance.QueryMemory(total_used_memory, budget_now);
-        // A card (or what other programs leave of it) under 5.5 GB works from its live budget.
+        // A card (or what other programs leave of it) under 8 GB works from its live budget.
         tight_budget = !Vulkan::Vram::Legacy() && !instance.IsIntegrated() && budget_now != 0 &&
-                       budget_now < 5632_MB;
+                       budget_now < 8_GB;
         // bbport: images deleted but not yet destroyed (the GPU may still read them) are already
         // gone as far as the decisions below go; counting them evicted more and more.
         const u64 pending =
@@ -1198,14 +1254,34 @@ void TextureCache::GarbageCollectImages() {
             }
         }
     }
+    // bbport: gc_tick (one per guest submission, hundreds a second) at each of the last 64
+    // seconds, for ages in seconds. Below the pressure mark an image goes once unused for
+    // BB_GC_IDLE_SECONDS (20) instead of 16 submissions (~3 frames), so textures briefly off
+    // screen are not evicted and uploaded again. (From bbport 0.3, deadinside28/bloodborne_pc
+    // 4d4d208, via iannitram's 0680e7c52.)
+    const u64 second = u64(std::chrono::duration_cast<std::chrono::seconds>(
+                               std::chrono::steady_clock::now().time_since_epoch())
+                               .count());
+    if (second != gc_second) {
+        gc_second = second;
+        gc_tick_at_second[second % gc_tick_at_second.size()] = gc_tick;
+    }
     if (total_used_memory < trigger_gc_memory && !urgent_pass) {
         return;
     }
+    static const u64 idle_seconds = [] {
+        const char* env = std::getenv("BB_GC_IDLE_SECONDS");
+        return std::clamp<u64>(env ? std::strtoull(env, nullptr, 10) : 20, 1, 63);
+    }();
+    // The tick at the start of that second (an older one where no submission came then).
+    const u64 idle_tick = gc_tick_at_second[(second - idle_seconds) % gc_tick_at_second.size()];
     std::scoped_lock lock{mutex};
     bool pressured = false;
     bool aggresive = false;
     u64 ticks_to_destroy = 0;
+    u64 below_tick = 0;
     size_t num_deletions = 0;
+    u32 visited = 0;
 
     const auto configure = [&](bool allow_aggressive) {
         pressured = total_used_memory >= pressure_gc_memory;
@@ -1225,22 +1301,37 @@ void TextureCache::GarbageCollectImages() {
             }
         }
         ticks_to_destroy = std::min(ticks_to_destroy, gc_tick);
+        below_tick = gc_tick - ticks_to_destroy;
+        if (!pressured && !aggresive) {
+            below_tick = std::min(below_tick, idle_tick);
+        }
+        visited = 0;
     };
     const auto clean_up = [&](ImageId image_id) {
-        if (num_deletions == 0) {
+        if (num_deletions == 0 || ++visited > 256) {
             return true;
         }
-        --num_deletions;
         auto& image = slot_images[image_id];
         const bool download = image.SafeToDownload();
         const bool tiled = image.info.IsTiled();
+        // bbport: images that cannot go now (GPU-written: their contents exist only here, and
+        // tiled ones cannot be written back at all) neither use up the deletions nor stay first
+        // in line. The oldest ten being such render targets stopped the collector for good, and
+        // VRAM grew with every area visited up to the pressure mark; with 20 of them an 8 GB card
+        // stayed over its pressure limit all session with 0 evictions. Only evictions count.
+        // (iannitram 0680e7c52 and 751149262, merged with the budget rules above.)
         if (tiled && download) {
             // This is a workaround for now. We can't handle non-linear image downloads.
+            ++gc_kept;
+            gc_kept_bytes += image.info.guest_size;
+            lru_cache.Touch(image.lru_id, gc_tick);
             return false;
         }
         if (download && !pressured) {
+            lru_cache.Touch(image.lru_id, gc_tick);
             return false;
         }
+        --num_deletions;
         if (download) {
             // bbport: synchronously, while the image still protects its pages. A deferred
             // write-back landed after FreeImage had unprotected them, over whatever the game
@@ -1266,24 +1357,28 @@ void TextureCache::GarbageCollectImages() {
 
     // Try to remove anything old enough and not high priority.
     configure(false);
-    lru_cache.ForEachItemBelow(gc_tick - ticks_to_destroy, clean_up);
+    gc_kept = gc_kept_bytes = 0;
+    lru_cache.ForEachItemBelow(below_tick, clean_up);
 
     if (total_used_memory >= critical_gc_memory) {
         // If we are still over the critical limit, run an aggressive GC
         configure(true);
-        lru_cache.ForEachItemBelow(gc_tick - ticks_to_destroy, clean_up);
+        gc_kept = gc_kept_bytes = 0;
+        lru_cache.ForEachItemBelow(below_tick, clean_up);
     }
     // bbport: evictions under memory pressure, at most every 5 s (BB_FRAME_STATS or not).
     if (pressured || gc_downloads != 0) {
         const auto now = std::chrono::steady_clock::now();
         if (now - gc_report_time >= std::chrono::seconds(5)) {
             std::printf("Texture cache: memory pressure, %llu of %llu MiB (critical %llu): "
-                        "%llu images evicted, %llu written back since the last report "
+                        "%llu images evicted, %llu written back since the last report; "
+                        "%llu old GPU-written tiled images kept (%llu MiB) "
                         "(registered images: %llu MiB guest size)\n",
                         (unsigned long long)(total_used_memory >> 20),
                         (unsigned long long)(pressure_gc_memory >> 20),
                         (unsigned long long)(critical_gc_memory >> 20),
                         (unsigned long long)gc_evictions, (unsigned long long)gc_downloads,
+                        (unsigned long long)gc_kept, (unsigned long long)(gc_kept_bytes >> 20),
                         (unsigned long long)(registered_image_bytes >> 20));
             gc_report_time = now;
             gc_evictions = gc_downloads = 0;
@@ -1362,7 +1457,12 @@ void TextureCache::DeleteImage(ImageId image_id) {
         surface_metas.erase(meta_info.fmask_addr);
     }
     if (meta_info.htile_addr) {
-        surface_metas.erase(meta_info.htile_addr);
+        // bbport: only the image that last bound the record erases it (an older image over the
+        // same memory doesn't).
+        const auto it = surface_metas.find(meta_info.htile_addr);
+        if (it != surface_metas.end() && (!it->second.owner || it->second.owner == image_id)) {
+            surface_metas.erase(it);
+        }
     }
 
     {

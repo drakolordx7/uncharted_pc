@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include "bbport_toggles.h"
@@ -418,11 +419,15 @@ private:
     std::unordered_set<ImageId> download_images;
     std::unordered_set<ImageId> small_download_images; ///< bbport: ReadbackSmallTargets
     u64 total_used_memory = 0;
-    bool tight_budget = false;                  ///< bbport: card under ~5 GB
+    bool tight_budget = false;                  ///< bbport: card under 8 GB (budget-relative marks)
     std::atomic<u64> pending_free_bytes{0};     ///< bbport: deleted, not yet destroyed
     u64 registered_image_bytes = 0; ///< bbport: guest bytes of registered images (diagnostics)
     u64 gc_evictions = 0, gc_downloads = 0; ///< bbport: pressure report
     std::chrono::steady_clock::time_point gc_report_time{};
+    u64 gc_kept = 0, gc_kept_bytes = 0; ///< bbport: old GPU-written tiled images kept by one walk
+    /// bbport: gc_tick at each of the last 64 seconds (GarbageCollectImages).
+    std::array<u64, 64> gc_tick_at_second{};
+    u64 gc_second = 0;
     u64 trigger_gc_memory = 0;
     u64 pressure_gc_memory = 0;
     u64 critical_gc_memory = 0;
@@ -460,8 +465,14 @@ private:
     struct MetaDataInfo {
         MetaType type;
         s32 clear_mask = -1;
+        /// bbport: the depth image that last bound this HTILE surface; only it erases the record
+        /// when deleted (an older image over the same memory doesn't).
+        ImageId owner{};
     };
     tsl::robin_map<VAddr, MetaDataInfo> surface_metas;
+    /// bbport: most layers seen for a depth array at an address (PadDepthLayers).
+    tsl::robin_map<VAddr, u32> depth_array_layers;
+    void PadDepthLayers(ImageInfo& info);
 };
 
 } // namespace VideoCore

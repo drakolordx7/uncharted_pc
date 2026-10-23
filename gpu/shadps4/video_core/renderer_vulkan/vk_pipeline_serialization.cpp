@@ -24,7 +24,7 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 10u; // bbport: motion shaders hold address stand-ins
+static constexpr u32 ShaderBinaryVersion = 11u; // bbport: LDS bounds checks + shared memory size in the compute key; scalar instructions split EXEC scopes
 static constexpr u32 ShaderMetaVersion = 7u; // bbport: ImageResource::needs_native
 static constexpr u32 PipelineKeyVersion = 6u; // bbport: Info layout (ImageResource::needs_native)
 } // namespace Serialization
@@ -502,6 +502,11 @@ void PipelineCache::WarmUpThread() {
             auto pipeline = std::make_unique<ComputePipeline>(
                 instance, scheduler, desc_heap, profile, *pipeline_cache, entry.ckey,
                 *it->second->owner->info_template, it->second->module, entry.csdata, true);
+            // bbport: a cached pipeline the driver cannot create (a new driver, or one saved by a
+            // build that stopped on it) is left to compile when the game uses it.
+            if (!pipeline->IsValid()) {
+                return;
+            }
             pipeline->RebindStage(&it->second->owner->info);
             std::unique_lock lock{pipelines_mutex};
             num_pipelines += compute_pipelines.try_emplace(entry.ckey, std::move(pipeline)).second;
@@ -540,6 +545,10 @@ void PipelineCache::WarmUpThread() {
         auto pipeline = std::make_unique<GraphicsPipeline>(
             instance, scheduler, desc_heap, profile, entry.gkey, *pipeline_cache, infos,
             no_runtime_infos, fetch_shader, modules, entry.gsdata, true);
+        if (!pipeline->IsValid()) {
+            ReleaseClaim(claim_id);
+            return;
+        }
         pipeline->RebindStages(program_infos);
         {
             std::unique_lock lock{pipelines_mutex};
