@@ -853,6 +853,8 @@ void Instance::CollectPhysicalMemoryInfo() {
         // If memory budget is not supported, use the size of the heap as the budget.
         total_memory_budget += memory_props.memoryHeaps[i].size;
     }
+    Vram::device_memory.store(Vram::TestLimit() ? Vram::TestLimit() : total_memory_budget,
+                              std::memory_order_relaxed);
     if (!IsIntegrated()) {
         if (const u64 test_limit = Vram::TestLimit()) {
             // bbport: BB_TEST_VRAM_MB: a card of that size; the driver's budget is ~90% of it.

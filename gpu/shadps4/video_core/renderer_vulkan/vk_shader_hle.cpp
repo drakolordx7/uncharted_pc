@@ -317,8 +317,10 @@ static bool ExecuteScalarCopyHLE(const Shader::Info& info, const AmdGpu::Compute
         // the first step's destination is GPU-only and needs nothing. BB_SCALAR_COPY64_SYNC=0:
         // off, 1: both steps, unset: second step only.
         static const int sync_64 = [] {
+            // Unset: off. run.py sets 2 for Uncharted 2, which needs it; in U3's Cartagena
+            // square it cost 94 -> 54 FPS.
             const char* env = std::getenv("BB_SCALAR_COPY64_SYNC");
-            return !env ? 2 : env[0] == '0' ? 0 : env[0] == '1' ? 1 : 2;
+            return !env ? 0 : env[0] == '0' ? 0 : env[0] == '1' ? 1 : 2;
         }();
         const bool src_written = src_gpu && buffer_cache.IsRangeGpuWritten(src.base_address, size);
         static const bool small_sync = [] {
