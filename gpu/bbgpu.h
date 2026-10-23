@@ -67,14 +67,7 @@ int bbgpu_controls_changed(void);
 /* Heading (degrees, about the vertical axis) of the camera the game last rendered with and how old
  * it is; 0 before the first frame with a known camera. */
 int bbgpu_camera_yaw(float *yaw_degrees, double *age_seconds);
-/* 1 while the menu's Gyro aiming setting is on (bbport.ini gyro_aim). */
-int bbgpu_gyro_aim(void);
-/* The keys that open and close the in-game menu (input.ini key.overlay, two bindings: slot 0 and 1).
- * kind: NONE unbound, SCANCODE a physical key (SDL_Scancode), KEYCODE a key by the character it
- * types in the current layout (SDL_Keycode), MOUSE an SDL mouse button number (not left or right).
- * Until this is called the menu opens with Insert in slot 0. */
-enum { BBGPU_OVERLAY_KEY_NONE, BBGPU_OVERLAY_KEY_SCANCODE, BBGPU_OVERLAY_KEY_KEYCODE, BBGPU_OVERLAY_KEY_MOUSE };
-void bbgpu_overlay_key_configure(int slot, int kind, int code);
+void bbgpu_menu_drag(int on);   /* a menu's 3D model is being turned: the motion of the free cursor is sampled too (bbgpu_mouse_sample) */
 int bbgpu_mouse_sample(float *dx, float *dy, uint32_t *buttons, int *wheel);
 /* The screenshot key (input.ini key.share, the PS4 Share button; two bindings, same kinds as the menu key):
  * pressing it saves the next frame the game shows, at the game's own resolution, as a picture in the user

@@ -820,18 +820,9 @@ static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t imag
     if (off && off[0]=='0') { printf("Callbacks: disabled (BB_CALLBACKS=0)\n"); return; }
     for (size_t i=0;i<count;++i) {
         const RuntimeGuestCallback *c=&callbacks[i];
-        if (skip && *skip && strstr(c->name,skip)) continue;
-        if (!runtime_guest_callback_wanted(c,0)) continue;              /* switched off (launcher setting) */
-        uint64_t found=0;
-        size_t length=0, matches=find_pattern(segments,ns,c->pattern,&found,&length);
-        if (matches>1) { printf("Callbacks: %s: %zu matches, not installed\n",c->name,matches); continue; }
-        if (!matches) continue;
-        const uint64_t offset=found+c->skip;
-        int hooked=0;
-        for (size_t j=0;j<hooks_done;++j) if (hook_offsets[j]==offset) hooked=1;
-        if (hooked) continue;                                          /* an earlier entry took this site */
-        hook_offsets[hooks_done++]=offset;
-        runtime_guest_callback_wanted(c,offset);
+        if (getenv("BB_SKIP_U2_WIDGET") && strstr(c->name,"U2 list widget")) continue;   /* diagnosis: this hook also matches a function of U1 */
+        if (!mapped(segments,ns,c->offset,c->signature_size) ||
+            memcmp(image+c->offset,c->signature,c->signature_size)) continue;
         if (!c->callback) {
             memcpy(image+offset,c->patch,c->moved);
             installed[i]=1;

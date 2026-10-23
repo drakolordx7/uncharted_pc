@@ -22,6 +22,7 @@ float mouse_dx{}, mouse_dy{};
 int mouse_wheel{};
 u32 mouse_buttons{};
 std::atomic<bool> mouse_look{false}, mouse_captured{false};
+std::atomic<bool> menu_drag{false}; // the mouse turns the 3D model of a menu (left button held on it): the free cursor's motion counts
 std::atomic<bool> game_menu{false}; // a game menu is open: the cursor is free
 std::atomic<bool> menu_cursor_hidden{false}; // menu keys on but no menu drawn (loading, cutscene): no cursor
 bool window_focused{true};
@@ -214,7 +215,11 @@ extern "C" int bbgpu_mouse_sample(float* dx, float* dy, uint32_t* buttons, int* 
     *wheel = mouse_wheel;
     mouse_dx = mouse_dy = 0.0f;
     mouse_wheel = 0;
-    return mouse_captured ? 1 : 0;
+    return (mouse_captured || menu_drag) ? 1 : 0;
+}
+
+extern "C" void bbgpu_menu_drag(int on) {
+    menu_drag = on != 0;
 }
 
 namespace Frontend {
@@ -346,17 +351,22 @@ bool WindowSDL::PollEvents() {
     // Mouse look holds the cursor in the window (relative mode) while the game has the focus;
     // the settings menu, text entry, a game menu and (in play) a held Left Alt give it back.
     {
+        static bool drag_was = false;
+        static float drag_x = 0.0f, drag_y = 0.0f;
         const bool* keys = SDL_GetKeyboardState(nullptr);
-        const bool want = mouse_look && window_focused && !text_active && !game_menu && input_mode == 0 &&
+        const bool want = mouse_look && window_focused && !text_active && (!game_menu || menu_drag) && input_mode == 0 &&
                           !BbOverlay::CapturesInput() && !(keys && keys[SDL_SCANCODE_LALT]);
         if (want != mouse_captured) {
             ignore_mouse_until = SDL_GetTicks() + 300;
+            if (want && menu_drag) SDL_GetMouseState(&drag_x, &drag_y);   // (the cursor comes back where it was taken)
             SDL_SetWindowRelativeMouseMode(window, want);
+            if (!want && game_menu && drag_was) SDL_WarpMouseInWindow(window, drag_x, drag_y);
             mouse_captured = want;
             std::scoped_lock lock{mouse_mutex};
             mouse_dx = mouse_dy = 0.0f;
-            mouse_buttons = 0;
+            if (!(want ? menu_drag.load() : (game_menu.load() && drag_was))) mouse_buttons = 0;   // (turning a menu's model: the button is still held, and stays so)
         }
+        drag_was = menu_drag;
     }
     UpdateMenuCursor(window, game_menu && !menu_cursor_hidden && input_mode == 0 && !BbOverlay::CapturesInput());
     {   // with a controller in hand, the pointer is out of the way (it comes back with the mouse)
@@ -468,7 +478,7 @@ bool WindowSDL::PollEvents() {
             if (SDL_GetTicks() >= ignore_mouse_until && std::fabs(event.motion.xrel) + std::fabs(event.motion.yrel) >= 2.0f) {
                 SetInputMode(0);
             }
-            if (mouse_captured) {
+            if (mouse_captured || menu_drag) {
                 std::scoped_lock lock{mouse_mutex};
                 mouse_dx += event.motion.xrel;
                 mouse_dy += event.motion.yrel;
