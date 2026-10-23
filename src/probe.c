@@ -11,6 +11,9 @@
 #include "gpu/bbgpu.h"
 #include "cpu_check.h"
 #include "isa_rewrite.h"
+#ifdef _WIN32
+#include "red_zone.h"
+#endif
 #if !defined(__x86_64__) || !defined(__GNUC__)
 #error This prototype requires x86-64 GCC or Clang (including MinGW).
 #endif
@@ -209,6 +212,8 @@ static void describe_address(char *out, size_t size, uintptr_t address) {
     HMODULE module=NULL;
     char name[MAX_PATH]="?";
     if (image && address-(uintptr_t)image<0x20000000) { snprintf(out,size,"guest offset 0x%" PRIxPTR,address-(uintptr_t)image); return; }
+    uint64_t site;
+    if (red_zone_site(address,&site)) { snprintf(out,size,"red-zone thunk for guest offset %#" PRIx64,site); return; }
     if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,(LPCSTR)address,&module) && module) {
         GetModuleFileNameA(module,name,sizeof(name));
         const char *base=strrchr(name,'\\');
@@ -323,7 +328,10 @@ static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
     DWORD code=record->ExceptionCode;
     if (code==EXCEPTION_ACCESS_VIOLATION && record->NumberParameters>=2) {
         /* GPU page tracking (write-protected guest pages) is resolved first. */
-        if (gpu_enabled && bbgpu_handle_fault(info,(void *)record->ExceptionInformation[1])) return EXCEPTION_CONTINUE_EXECUTION;
+        if (gpu_enabled && bbgpu_handle_fault(info,(void *)record->ExceptionInformation[1])) {
+            red_zone_fault_handled(info->ContextRecord->Rip);
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
         if (runtime_fault_recover) {
             /* A speculative guest memory read (GPU draw preparation) faulted: the thread resumes
              * in bb_longjmp, outside the exception dispatcher, back at its recovery point. */
@@ -924,6 +932,13 @@ static int64_t find_unique_pattern(uint64_t image_size, const char *pattern) {
 static void patch_job_sleep(uint64_t image_size) {
     const char *env=getenv("BB_JOB_SLEEP");
     if (env && env[0]=='0') { printf("Job workers: spin while idle (BB_JOB_SLEEP=0)\n"); return; }
+#ifdef _WIN32
+    /* Sleeping workers free the cores of small CPUs, but cost ~8% in busy scenes on a 16-thread
+     * one (U3 Cartagena square: 87 vs 94 FPS). By default only up to 8 hardware threads;
+     * BB_JOB_SLEEP=1 forces it. */
+    const DWORD threads=GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+    if (!env && threads>8) { printf("Job workers: spin while idle (%lu hardware threads)\n",(unsigned long)threads); return; }
+#endif
     struct Patch {
         const char *name, *pattern;
         unsigned offset, original_size, size;
@@ -1378,6 +1393,14 @@ int main(int argc, char **argv) {
     }
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
+    /* Last code patch: Windows exception frames and the red zone of leaf functions (red_zone.c). */
+    {
+        RedZoneSegment *loaded=calloc(ns ? ns : 1,sizeof(*loaded));
+        if (!loaded) fail("allocation failed");
+        for (uint64_t s=0;s<ns;++s) loaded[s]=(RedZoneSegment){segments[s].address,segments[s].size,segments[s].flags};
+        red_zone_patch(image, size, loaded, ns);
+        free(loaded);
+    }
 #endif
     if (isa_table) {
         unsigned char *stubs = image + round_page(size);

@@ -344,18 +344,20 @@ static bool ExecuteScalarCopyHLE(const Shader::Info& info, const AmdGpu::Compute
             const char* env = std::getenv("BB_SCALAR_COPY_SYNC");
             return env && env[0] == '1';
         }();
-        // The 64-dword copy moves the results of the game's mesh raycasters (U1, U2 and U3) into
-        // their record arrays in guest memory (MeshRaycaster::HandleResults reads them there), in
-        // two steps: GPU output -> staging buffer, staging buffer -> record array. GPU readbacks are
+        // The 64-dword copy moves the results of the game's mesh raycasters into their record
+        // arrays in guest memory (MeshRaycaster::HandleResults reads them there), in two steps:
+        // GPU output -> staging buffer, staging buffer -> record array. GPU readbacks are
         // relaxed, so a read of the record array never fetches GPU data. Copied on the GPU only,
         // the records the game read were not the ones this copy made (U2: assertion in
-        // GetSubMeshInstance, mostly after a checkpoint). The second step, whose destination the
-        // guest CPU writes, reads its source back and also copies in guest memory; the first step's
-        // destination is GPU-only and needs nothing. BB_SCALAR_COPY64_SYNC=0: off, 1: both steps
-        // (what 0.3.6 + the first version of this fix did), unset: second step only.
+        // GetSubMeshInstance after a checkpoint). The second step, whose destination the guest
+        // CPU writes, also copies in guest memory, with the GPU-written bytes of its source;
+        // the first step's destination is GPU-only and needs nothing. BB_SCALAR_COPY64_SYNC=0:
+        // off, 1: both steps, unset: second step only.
         static const int sync_64 = [] {
+            // Unset: off. run.py sets 2 for Uncharted 2, which needs it; in U3's Cartagena
+            // square it cost 94 -> 54 FPS.
             const char* env = std::getenv("BB_SCALAR_COPY64_SYNC");
-            return !env ? 2 : env[0] == '0' ? 0 : env[0] == '1' ? 1 : 2;
+            return !env ? 0 : env[0] == '0' ? 0 : env[0] == '1' ? 1 : 2;
         }();
         const bool src_written = src_gpu && buffer_cache.IsRangeGpuWritten(src.base_address, size);
         static const bool small_sync = [] {

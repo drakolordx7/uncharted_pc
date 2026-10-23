@@ -1,7 +1,7 @@
 # Uncharted: The Nathan Drake Collection for Windows (community build)
 
 Uncharted 1, 2 and 3 from the PS4 collection running natively on Windows, built on
-[SuperMedo's port](https://github.com/Supermedo/uncharted_pc), with fixes from across the community.
+[SuperMedo's port](https://github.com/Supermedo/uncharted_pc) (0.3.7), with fixes from across the community.
 
 The port is SuperMedo's work: the original PS4 game code runs directly on your PC and the
 graphics go through Vulkan. This fork collects the fixes people have written since then, ours and
@@ -27,56 +27,38 @@ The builds don't include the DLSS bridge. XeSS and FSR work on any GPU.
 
 ## What's in this build
 
-Everything in the official 0.3.6, plus the changes below. Each one is an open pull request on the
-official repository; the link goes to it.
+Everything in the official 0.3.7, plus the changes below. Where there is a link, it goes to the pull
+request on the official repository.
 
 ### Crashes
 
-- Uncharted 1 "execute access to 0" / exit code 3 (`0x63f5d0`, `0x641532`): [#396](https://github.com/Supermedo/uncharted_pc/pull/396), and [#403](https://github.com/Supermedo/uncharted_pc/pull/403) by d4rksp4rt4n for Intel 12th gen and later
-- Uncharted 2 chapter 21 grenade launcher (the big truck takes no damage) and other physics glitches: [#382](https://github.com/Supermedo/uncharted_pc/pull/382) by spacepepperoni
-- Uncharted 2 `iSubMesh < m_numSubMeshInstances` assertion: [#397](https://github.com/Supermedo/uncharted_pc/pull/397)
-- Start failures with exit 21 / error 487 (something already sits in the PS4 address range): [#406](https://github.com/Supermedo/uncharted_pc/pull/406)
-- Draw-preparation workers no longer take the whole game down when they fault: [#409](https://github.com/Supermedo/uncharted_pc/pull/409)
-- `m_gfxEopTick` assertion on more game versions: [#405](https://github.com/Supermedo/uncharted_pc/pull/405)
-- Memory use that keeps growing over a long session: [#445](https://github.com/Supermedo/uncharted_pc/pull/445) (same fix as iannitram's #387)
+- Uncharted 1, 2 and 3 "execute access to 0" (exit code 3) when the constant table fill takes a page fault: its pages are written before the fill starts, on top of 0.3.7's red-zone fix: [#396](https://github.com/Supermedo/uncharted_pc/pull/396)
 
 ### Performance
 
-- Much less CPU load on 4 and 6 core processors (idle job workers sleep): [#346](https://github.com/Supermedo/uncharted_pc/pull/346) by kuraeow
 - Less shader stutter: pipelines compile off the GPU thread: [#389](https://github.com/Supermedo/uncharted_pc/pull/389), [#416](https://github.com/Supermedo/uncharted_pc/pull/416)
-- 4 GB cards stay inside their video memory: [#390](https://github.com/Supermedo/uncharted_pc/pull/390)
 - A separate shader cache per GPU (fixes an Intel crash on a cache built by another GPU): [#412](https://github.com/Supermedo/uncharted_pc/pull/412)
 
 ### Graphics
 
-- Uncharted 2 blur when aiming and on turrets: [#381](https://github.com/Supermedo/uncharted_pc/pull/381) by spacepepperoni
-- Black weapons and brightness flicker: [#449](https://github.com/Supermedo/uncharted_pc/pull/449) by G3545
 - Render above 1080p, and ultrawide: [#391](https://github.com/Supermedo/uncharted_pc/pull/391)
 - Intel XeSS as an anti-aliasing choice: [#476](https://github.com/Supermedo/uncharted_pc/pull/476)
 
 ### Controls and launcher
 
-- Mouse look on game version 1.02 (hooks found by pattern): [#348](https://github.com/Supermedo/uncharted_pc/pull/348)
 - Keyboard and mouse button prompts, layouts and custom keybinding: [#420](https://github.com/Supermedo/uncharted_pc/pull/420) by Umar-Qayyum-dev
 - Xbox button prompts for Xbox and other controllers: [#469](https://github.com/Supermedo/uncharted_pc/pull/469)
 - Trophy notices in the game and a Trophies page in the launcher: [#472](https://github.com/Supermedo/uncharted_pc/pull/472)
-- A 30 FPS frame rate choice (for frame generation on top, or weaker PCs)
 - `--u1`, `--u2`, `--u3` start a game straight from a shortcut: [#399](https://github.com/Supermedo/uncharted_pc/pull/399)
 
 ### Older CPUs
 
-- Runs on Intel Sandy and Ivy Bridge: the instructions they lack are rewritten at start-up (adapted from FelipePrado0's SpartanPort). Not yet tested on real hardware.
-
-### Audio
-
-- 5.1 and 7.1 surround: [#392](https://github.com/Supermedo/uncharted_pc/pull/392)
+- Runs on Intel Sandy and Ivy Bridge: the instructions they lack (BMI1, MOVBE, LZCNT, F16C) are rewritten at start-up (adapted from FelipePrado0's SpartanPort). Players confirmed it on a real Ivy Bridge. 0.3.7 has its own rewrite for Ivy Bridge; this build uses this one instead, because it also covers Sandy Bridge.
 
 ### From other forks
 
-- Itemzflow dumps (already decrypted executables) are accepted, the save mount limit no longer fails silently, a memory mapping split bug is fixed, and the EU CUSA02344 1.02 red-zone tables are added: currantsforeyes (the first three also as [#520](https://github.com/Supermedo/uncharted_pc/pull/520), [#522](https://github.com/Supermedo/uncharted_pc/pull/522), [#521](https://github.com/Supermedo/uncharted_pc/pull/521))
 - A display flip that arrives before its label no longer stops the game, a missing CE task no longer crashes the GPU thread, and FSR 3.1 no longer uses protected memory (noise on AMD Phoenix): from iannitram's fork
 - FSR 3 frame generation no longer leaks video memory every frame, and conditional GPU commands test the whole condition: Mevlock
-- Numpad keys are saved as keypad keys in the launcher: eduardoghi ([#473](https://github.com/Supermedo/uncharted_pc/pull/473))
 - The launcher reports why the game stopped and when input settings or the shader cache can't be written: poncho-ajmv
 - Dark title bar for the launcher on Windows: soni424
 - Faster in Uncharted 2 and 3 (U3 Cartagena square 26 → 48 FPS in our tests): compute work no longer waits on the whole draw pipe, compute fences run in order with it, and typed-buffer writes copy only what changed. Also fixes an Uncharted 3 freeze about 15 seconds in: iannitram, Mevlock
@@ -124,6 +106,7 @@ If you'd rather your change didn't come in, open an issue and we'll take it out.
   input from an Xbox (or other) controller, and the PlayStation buttons after a PlayStation
   controller. Keys follow your keyboard layout (AZERTY...).
 - Trophies: the games' own trophy lists, a notice in the game when one is earned, and a Trophies page in the launcher.
+- Stereo, 5.1 or 7.1 sound: the games are told the real speaker layout (it follows the Windows setting, or pick it in the launcher).
 - Add to Steam and desktop shortcuts from the launcher, automatic updates.
 
 ## Requirements
@@ -157,8 +140,11 @@ If you'd rather your change didn't come in, open an issue and we'll take it out.
 - Older CPUs: the games use PS4 CPU instructions (AVX, BMI1, MOVBE, LZCNT, F16C). AMD FX runs since
   0.3.6. Intel 2nd and 3rd gen (Sandy and Ivy Bridge, Xeon E3/E5 v1 and v2) lack some of them, so the
   loader rewrites those spots when the game starts and runs them in software, a little slower
-  (#197, #515). Tested with the rewrite forced on a modern CPU, not yet on a real Sandy or Ivy Bridge.
+  (#197, #515). Players confirmed it on a real Ivy Bridge; Sandy Bridge is only tested with the rewrite
+  forced on a modern CPU.
   CPUs without AVX (Nehalem and older, Phenom II) still can't run the games.
+- Random crashes with "execute access to 0" or a fault at `0x63f5d0` (U1): Windows wrote its
+  exception data over values the game keeps just below the stack pointer. Fixed in 0.3.7.
 - Uncharted 2, train wreck: `IsFinite(deltaTransform)` in character-leg-ik.cpp, fixed in 0.3.6
   for the EU 1.00 version.
 - Frame rates above 120 are experimental.

@@ -34,13 +34,21 @@ inline bool TestHard() {
     return hard;
 }
 
-/// BB_VRAM_LEGACY=1: the behaviour before the low-memory work (A/B tests).
+/// The card's video memory (Instance::CollectDeviceParameters; 0 until known).
+inline std::atomic<u64> device_memory{0};
+
+/// BB_VRAM_LEGACY=1: the behaviour before the low-memory work (A/B tests), =0: the low-memory
+/// work on any card. Unset: the low-memory work on cards up to 8 GiB, which it was made for
+/// (above, the old behaviour ran faster in U3's Cartagena square).
 inline bool Legacy() {
-    static const bool legacy = [] {
+    static const int forced = [] {
         const char* env = std::getenv("BB_VRAM_LEGACY");
-        return env && env[0] == '1';
+        return env ? (env[0] == '1' ? 1 : 0) : -1;
     }();
-    return legacy;
+    if (forced >= 0) {
+        return forced == 1;
+    }
+    return device_memory.load(std::memory_order_relaxed) > (8ull << 30) + (512ull << 20);
 }
 
 /// BB_TEST_VRAM_STRICT=1: an image allocation that does not fit the simulated card fails for
