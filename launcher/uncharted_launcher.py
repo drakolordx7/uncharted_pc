@@ -1189,64 +1189,57 @@ class Launcher:
     def build_game(self):
         f = self.page('game', _('Game'), '')
         self.folder(f, 'game_dir', _('Game folder'), _('The folder with eboot.bin'),
-                    _('Holds eboot.bin, big2-ps4_Shipping.elf and big3-ps4_Shipping.elf. '
-                      'Leave empty if each game has its own folder below.'),
+                    _('Empty if each game has its own folder below.'),
                     on_change=self.refresh)
         self.folder(f, 'user_dir', _('Saves folder'), _('Choose the saves folder'),
-                    _('Saves and the shader cache go here. Empty uses the user folder next to the launcher.'))
+                    _('Empty: the user folder next to the launcher.'))
         self.section(f, _('Separate game folders'))
-        self.note(f, _('Only needed if the games are dumped separately. Empty rows use the game folder above.'), top=2)
+        self.note(f, _('Empty rows use the game folder above.'), top=2)
         for key, _title, subtitle, _exe in GAMES:
             self.folder(f, f'game_dir_{key}', _(subtitle.split(' · ')[0]), _('Choose the folder for this game'),
                         on_change=self.refresh)
         self.section(f, _('Console'))
         self.row(f, _('Language'), self.choice(f, 'language', LANGUAGES, 30),
-                 _('Game text and voices.'))
+                 _('Text and voices.'))
         name = self.ttk.Entry(f, textvariable=self.var('player_name'), width=30)
         self.row(f, _('Player name'), name)
 
     def build_display(self):
         f = self.page('display', _('Display'), '')
         self.check(f, 'fullscreen', _('Fullscreen'))
-        self.row(f, _('Presentation'), self.choice(f, 'present_mode', PRESENT_MODES, 34))
+        self.row(f, _('Presentation'), self.choice(f, 'present_mode', PRESENT_MODES, 34),
+                 _('Mailbox or Immediate for high frame rates.'))
         refresh = display_refresh_rate()
-        hint = _('How fast the game itself runs. Cutscene videos stay at 60. Above your display\'s refresh '
-                 'rate, use Mailbox or Immediate.')
+        hint = _('Cutscenes stay at 60.')
         if refresh:
-            hint += ' ' + _('Your display runs at {} Hz.').format(refresh)
+            hint += ' ' + _('Display: {} Hz.').format(refresh)
         self.row(f, _('Game frame rate'), self.choice(f, 'frame_rate', FRAME_RATES, 34), hint)
         self.row(f, _('Frame rate cap'), self.choice(f, 'fps_limit', FPS_LIMITS, 34),
-                 _('Caps the frames shown on screen. Doesn\'t change game speed.'))
+                 _('Doesn\'t change game speed.'))
         self.section(f, _('Resolution'))
         self.row(f, _('Render resolution'), self.choice(f, 'render_height', RENDER_HEIGHTS, 34),
-                 _('Sharper on 1440p and 4K screens, but needs a faster GPU and more graphics memory. '
-                   'The games cap the largest size.'))
+                 _('Higher needs more VRAM.'))
         self.row(f, _('Aspect ratio'), self.choice(f, 'aspect', ASPECTS, 34),
-                 _('On ultrawide screens, shows more at the sides instead of stretching.'))
-        self.row(f, _('Window size'), self.choice(f, 'window_size', WINDOW_SIZES, 34),
-                 _('Not used in fullscreen.'))
-        self.row(f, _('Upscaling'), self.choice(f, 'scaler', SCALERS, 34),
-                 _('Only used when the picture is smaller than the window.'))
-        self.row(f, _('Sharpening'), self.choice(f, 'sharpening', SHARPENING, 34),
-                 _('Only used when the picture is enlarged.'))
+                 _('For ultrawide screens.'))
+        self.row(f, _('Window size'), self.choice(f, 'window_size', WINDOW_SIZES, 34))
+        self.row(f, _('Upscaling'), self.choice(f, 'scaler', SCALERS, 34))
+        self.row(f, _('Sharpening'), self.choice(f, 'sharpening', SHARPENING, 34))
         self.section(f, _('Anti-aliasing'))
         modes = ANTI_ALIASING + ([FSR411] if fsr411_assets() else []) + ([XESS] if xess_available() else [])
         self.row(f, _('Anti-aliasing'), self.choice(f, 'anti_aliasing', modes, 34),
-                 _('FSR 4 runs best on a Radeon RX 7000/9000 or a GeForce RTX 40/50.'))
+                 _('FSR 4 prefers RX 7000/9000 or RTX 40/50.'))
         self.row(f, _('Anti-aliasing sharpness'), self.choice(f, 'aa_sharpness', AA_SHARPNESS, 34))
         self.section(f, _('Frame generation'))
-        hint = _('60 FPS shows as 120, at the cost of a little input latency. Use Mailbox or Immediate and a '
-                 'display at the higher rate. Works with a game frame rate of 60 or 120; above about 165 FPS '
-                 'it pauses. Menus and cutscene videos are left alone.')
+        hint = _('Adds input latency. Pauses above about 165 FPS.')
         if refresh:
-            hint += ' ' + _('Your display runs at {} Hz.').format(refresh)
+            hint += ' ' + _('Display: {} Hz.').format(refresh)
         self.row(f, _('Frame generation'), self.choice(f, 'frame_generation', FRAME_GENERATION, 34), hint)
         self.row(f, _('Multiplier'), self.choice(f, 'frame_gen_multiplier', FRAME_GEN_MULTIPLIERS, 34),
-                 _('FSR 3 and RTX 40 only do 2×.'))
+                 _('FSR 3 and RTX 40: 2× only.'))
         self.check(f, 'show_fps', _('Show the FPS counter'))
         self.section(f, _('Audio'))
         self.row(f, _('Speakers'), self.choice(f, 'speakers', SPEAKERS, 34),
-                 _('Set 5.1 or 7.1 if the games only offer stereo.'))
+                 _('Pick 5.1 or 7.1 if you only get stereo.'))
 
     def build_controls(self):
         f = self.page('controls', _('Controls'), _('Changes apply when the game starts.'))
@@ -1254,20 +1247,19 @@ class Launcher:
         self.capturing = None
         self.section(f, _('Mouse'), top=6)
         self.check(f, 'mouse_look', _('Look around with the mouse'),
-                   _('Hold Left Alt to free the cursor. Insert opens the in-game settings menu.'))
+                   _('Left Alt frees the cursor. Insert: in-game menu.'))
         from uncharted_widgets import Slider
         self.row(f, _('Mouse sensitivity'),
                  Slider(self.tk, self.target(f), self.var('mouse_sensitivity'), MOUSE_SENS_MIN, MOUSE_SENS_MAX, 0.05,
                         COLORS, self.px, self.font_ui_md, width=300, log=True, entry=True),
-                 _('Default is 1.00 (range 0.1 to 10).'))
+                 _('Default is 1.00.'))
         self.check(f, 'mouse_invert_y', _('Invert the mouse vertically'))
 
         self.section(f, _('Button prompts'))
         self.row(f, _('Style'), self.choice(f, 'button_prompts', BUTTON_PROMPTS, 40))
 
         self.section(f, _('Keyboard and mouse buttons'))
-        self.note(f, _('Click a box, then press a key, a mouse button or scroll the wheel. ✕ clears a binding. '
-                       'Each action takes two.'), top=2)
+        self.note(f, _('Click a box, then press a key or button. ✕ clears.'), top=2)
         card = self.target(f)
         table = self.tk.Frame(card, bg=CARD)
         table.grid(row=self.next_row(card), column=0, columnspan=2, sticky='w', pady=(10, 0))
@@ -1542,8 +1534,8 @@ class Launcher:
             child.destroy()
         if not info:
             self.trophy_summary.configure(text='')
-            self.note_in(self.trophy_body, _('No trophy list for this game. Set the game folder on the Game page '
-                                             '(it needs sce_sys/trophy/trophy0N.trp).'))
+            self.note_in(self.trophy_body, _('No trophy list. Needs sce_sys/trophy/trophy0N.trp '
+                                             'in the game folder.'))
             return
         progress = trophies.progress(info, unlocked)
         grades = '   '.join(f"{_(trophies.GRADE_NAMES[g])} {progress['earned'][g]}/{progress['total'][g]}"
@@ -1599,9 +1591,9 @@ class Launcher:
         f = self.page('advanced', _('Advanced'), '')
         self.check(f, 'close_on_play', _('Close the launcher when the game starts'))
         extra = self.ttk.Entry(f, textvariable=self.var('extra_env'), width=60)
-        self.row(f, _('Environment variables'), extra, _('NAME=value, separated by spaces.'))
+        self.row(f, _('Environment variables'), extra, _('NAME=value, space-separated.'))
         self.section(f, _('Shader cache'))
-        self.note(f, _('Clear it only if the picture is broken after an update.'), top=2)
+        self.note(f, _('Only if graphics break after an update.'), top=2)
         card = self.target(f)
         holder = self.tk.Frame(card, bg=CARD)
         holder.grid(row=self.next_row(card), column=0, columnspan=2, sticky='w', pady=(12, 0))
@@ -1915,7 +1907,7 @@ class Launcher:
             webbrowser.open(page)
             return
         if not self.messagebox.askyesno(NAME, _(
-                'Install version {} now? The launcher will restart. Your saves and settings stay.').format(version)):
+                'Install version {} now? The launcher will restart.').format(version)):
             return
         self.update_button.configure(state='disabled')
 
@@ -1966,7 +1958,7 @@ class Launcher:
         except OSError as error:
             self.messagebox.showerror(NAME, _('Could not clear the shader cache: {}').format(error))
             return
-        self.messagebox.showinfo(NAME, _('Shader cache cleared. The next launch will stutter while it rebuilds.'))
+        self.messagebox.showinfo(NAME, _('Shader cache cleared. Expect stutter on the next launch.'))
 
     def shortcut(self):
         """Uncharted.lnk on the desktop."""
@@ -1993,7 +1985,7 @@ class Launcher:
         steam = bbport_steam.steam_folder()
         configs = bbport_steam.user_configs(steam) if steam else []
         if not configs:
-            self.messagebox.showerror(NAME, _("Couldn't find Steam, or nobody has signed in to it yet."))
+            self.messagebox.showerror(NAME, _('Steam not found, or nobody has signed in.'))
             return
         if FROZEN:
             exe, options = Path(sys.executable), '--play'
@@ -2003,8 +1995,7 @@ class Launcher:
         self.collect()
         restart = False
         if bbport_steam.steam_running():
-            if not self.messagebox.askyesno(NAME, _('Steam needs to close to add the game, and will '
-                                                    'reopen afterwards. Close it now?')):
+            if not self.messagebox.askyesno(NAME, _('Steam must close to add the game. Close it now?')):
                 return
             subprocess.Popen([str(steam / 'steam.exe'), '-shutdown'], creationflags=NO_WINDOW)
             for _i in range(60):
@@ -2012,7 +2003,7 @@ class Launcher:
                 if not bbport_steam.steam_running():
                     break
             else:
-                self.messagebox.showerror(NAME, _('Steam did not close. Close it yourself and try again.'))
+                self.messagebox.showerror(NAME, _("Steam didn't close. Close it and try again."))
                 return
             time.sleep(1)
             restart = True
@@ -2032,7 +2023,7 @@ class Launcher:
             return
         if restart:
             os.startfile('steam://open/games')
-        self.messagebox.showinfo(NAME, _('Added to your Steam library. It launches with the settings saved here.'))
+        self.messagebox.showinfo(NAME, _('Added to your Steam library.'))
 
     def close(self):
         try:
