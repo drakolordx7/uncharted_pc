@@ -89,6 +89,11 @@ official repository; the link goes to it.
 - Saves are written so an interrupted save can't corrupt the file: Mevlock
 - Freeze fixes: the GPU thread could hang on its list of GPU-written memory (an Uncharted 3 chapter 1 freeze, and a likely cause of Uncharted 2 freezes), and flips at deaths, cutscenes and movie changes no longer wait on the thread that raised them: Mevlock
 - Launcher: Stop reliably ends the game, a controller vibration toggle, and a frame rate cap: poncho-ajmv, Hugo Borges
+- Frame generation no longer crashes on a resized or undersized frame, closing the window no longer hangs, and Uncharted 3 no longer hangs on a first run with an empty shader cache: Mevlock
+- Less CPU time spent waiting: the draw pipe sleeps instead of spinning, ignored predication no longer drains it, and barrier and register tracking do less work: Umar-Qayyum-dev, Mevlock
+- Uncharted 2 reuses texture sets and skinning data instead of rebuilding them: Umar-Qayyum-dev
+- A shader cache's meta and binary files must come from the same version (caches rebuild once): Mevlock
+- Job workers spin briefly before sleeping, which Mevlock found reduces Uncharted 3 lighting flashes: based on Mevlock's fork
 
 Each release lists its exact changes in the [release notes](https://github.com/drakolordx7/uncharted_pc/releases).
 
