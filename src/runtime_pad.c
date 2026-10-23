@@ -287,6 +287,7 @@ static pthread_mutex_t camera_lock=PTHREAD_MUTEX_INITIALIZER;
  * cameras do not use the follow camera's direction). */
 #define CAMERA_QUEUES 4                /* 0 follow camera, 1 joypad sticks, 2 aiming / look camera, 3 cover camera */
 static volatile uint64_t cover_native_us; /* last frame the cover camera was turned by the mouse */
+static volatile float cover_dir_x, cover_dir_z; /* the cover camera's direction (x z), kept for the follow camera */
 static volatile uint64_t zoom_camera_us;  /* last frame the zoom (aiming) camera was updated */
 /* The mouse's yaw since the aim began (degrees, positive to the right): the game's message that aligns the camera with the
  * player's pose gets a pose turned by it (u1b_aim_target), or the camera is pulled back to the player's facing every
@@ -371,6 +372,13 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
     const float heading=heading_of(dir);
     float dx, dy;
     camera_take(0,&dx,&dy);
+    if (cover_native_us && now-cover_native_us<100000 && !aim_held && !look_held) {
+        /* While the cover camera has the mouse the walking camera is kept behind it (its direction is the cover camera's, reversed; measured):
+         * the game blends the cover camera out over about a second after the cover, and the walking camera, left at the direction it had
+         * before the cover, pulled the picture back to the place where the player last looked. */
+        const float cl=SDL_sqrtf(cover_dir_x*cover_dir_x+cover_dir_z*cover_dir_z), fl=SDL_sqrtf(dir[0]*dir[0]+dir[2]*dir[2]);
+        if (cl>0.5f && fl>0.01f) { dir[0]=-cover_dir_x/cl*fl; dir[2]=-cover_dir_z/cl*fl; }
+    }
     if (aim_held || look_held || (cover_native_us && now-cover_native_us<100000)) { follow_moved_us=0; follow_pending=0; follow_push=0.0f; return; } /* the aiming / look / cover camera takes the mouse */
     if (stopped) { follow_moved_us=0; follow_pending=0; follow_push=0.0f; follow_correction=0.0f; return; } /* paused */
     if (follow_pending) {
@@ -1510,6 +1518,7 @@ static void __attribute__((ms_abi)) u1b_cover_camera(uint64_t camera, uint64_t u
     }
     cover_native_us=now;
     float *dir=(float *)(uintptr_t)(camera+0x240);
+    cover_dir_x=dir[0]; cover_dir_z=dir[2];
     float *pitch=(float *)(uintptr_t)(camera+0x230);
     const uint64_t shape=*(const uint64_t *)(uintptr_t)(camera+0x1300);
     if (mouse_debug()) {
