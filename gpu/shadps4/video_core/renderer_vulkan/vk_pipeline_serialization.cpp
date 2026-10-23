@@ -24,8 +24,8 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 11u; // bbport: LDS bounds checks + shared memory size in the compute key; scalar instructions split EXEC scopes
-static constexpr u32 ShaderMetaVersion = 7u; // bbport: ImageResource::needs_native
+static constexpr u32 ShaderBinaryVersion = 12u; // bbport: LDS bounds checks, scalar EXEC scopes and GCN NaN semantics (shadPS4 PR #5257); 10: motion shaders hold address stand-ins
+static constexpr u32 ShaderMetaVersion = 8u; // bbport: RuntimeInfo::Properties::dx10_clamp; 7: ImageResource::needs_native
 static constexpr u32 PipelineKeyVersion = 6u; // bbport: Info layout (ImageResource::needs_native)
 } // namespace Serialization
 

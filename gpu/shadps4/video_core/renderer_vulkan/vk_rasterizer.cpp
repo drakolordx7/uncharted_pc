@@ -3165,7 +3165,31 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 }
                 push_data.AddOffset(binding.buffer, adjust);
                 buffer_infos.emplace_back(buffer->Handle(), offset_aligned, size + adjust);
-                bound_buffers.emplace_back(buffer, offset, size, desc.is_written);
+                // bbport: what typed writes can reach (BB_TIGHT_WRITES=0: the whole range).
+                // Through a strided view a typed store writes one element per record, so the
+                // last record ends `stride - element` before the nominal end. U3's skinning
+                // (cs 8f067540, ~108k single-group dispatches/s) writes interleaved vertices
+                // through two views 12 bytes apart: the second view's nominal end overlapped
+                // the next object's first vertex, and ~86% of those dispatches waited for the
+                // GPU to drain behind a barrier for bytes nobody writes.
+                const u64 tracked_size = [&]() -> u64 {
+                    static const bool tight = [] {
+                        const char* env = std::getenv("BB_TIGHT_WRITES");
+                        return !(env && env[0] == '0');
+                    }();
+                    const u32 stride = vsharp.GetStride();
+                    const u32 records = u32(vsharp.num_records);
+                    if (!tight || !desc.is_written || !desc.is_formatted || stride == 0 ||
+                        records == 0) {
+                        return size;
+                    }
+                    const u32 element = AmdGpu::NumBitsPerBlock(vsharp.GetDataFmt()) / 8;
+                    if (element == 0 || element > stride) {
+                        return size;
+                    }
+                    return std::min<u64>(size, u64(stride) * (records - 1) + element);
+                }();
+                bound_buffers.emplace_back(buffer, offset, tracked_size, desc.is_written);
                 if (g_gpu_checkpoints && num_checkpoint_buffers < std::size(checkpoint_buffers)) {
                     checkpoint_buffers[num_checkpoint_buffers++] = {
                         vsharp.base_address, static_cast<u32>(size), desc.is_written};
@@ -3174,7 +3198,8 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                     // Raw storage-buffer writes can also make an aliased cached image stale.
                     texture_cache.InvalidateMemoryFromGPU(vsharp.base_address, size);
                 }
-                needs_barrier |= runtime.IsBufferAccessed(buffer, offset, size, desc.is_written);
+                needs_barrier |=
+                    runtime.IsBufferAccessed(buffer, offset, tracked_size, desc.is_written);
                 if (const VAddr watch = WatchedGpuWrite();
                     watch && desc.is_written && vsharp.base_address < watch + 0x1000 &&
                     watch < vsharp.base_address + size) {
