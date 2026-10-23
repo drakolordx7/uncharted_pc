@@ -34,7 +34,7 @@ def unpack(fmt, data, offset):
 
 def parse_elf_headers(data, base):
     header = unpack('<16sHHIQQQIHHHHHH', data, base)
-    if header[0][:7] != b'ELF' or header[2] != 62:
+    if header[0][:7] != b'\x7fELF\x02\x01\x01' or header[2] != 62:
         raise ValueError("expected little-endian x86-64 ELF")
     if header[9] != 56 or not 0 < header[10] < 256:
         raise ValueError("unsupported program headers")
