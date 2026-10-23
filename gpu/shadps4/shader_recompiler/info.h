@@ -207,6 +207,16 @@ struct Info : InfoPersistent {
         return *reinterpret_cast<const T*>(&FlatUserData()[sharp_idx]);
     }
 
+    /// bbport: the table pointer in user data register ptr_index is null (see ReadUdReg).
+    bool UdPointerNull(u32 ptr_index) const noexcept {
+        if (ptr_index == IR::NumScalarRegs) {
+            return false;
+        }
+        u64 pointer;
+        std::memcpy(&pointer, &UserData()[ptr_index], sizeof(pointer));
+        return (pointer & 0xFFFFFFFFFFFFULL) < 0x10000;
+    }
+
     template <typename T>
     T ReadUdReg(u32 ptr_index, u32 dword_offset) const noexcept {
         T data;
@@ -215,6 +225,12 @@ struct Info : InfoPersistent {
         if (ptr_index != IR::NumScalarRegs) {
             std::memcpy(&base, &ud[ptr_index], sizeof(base));
             base = reinterpret_cast<const u32*>(VAddr(base) & 0xFFFFFFFFFFFFULL);
+            // bbport: some draws leave the table pointer null (the SRT walker meets the same
+            // loads at 0x0..0xc first). The GPU reads nothing there; here it crashed the game.
+            // A zero descriptor is a null buffer, which the callers skip.
+            if (VAddr(base) < 0x10000) {
+                return T{};
+            }
         }
         std::memcpy(&data, base + dword_offset, sizeof(T));
         return data;

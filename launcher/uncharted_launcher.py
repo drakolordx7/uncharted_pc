@@ -66,6 +66,8 @@ PRESENT_MODES = [('Mailbox', 'Mailbox (low latency, no tearing)'), ('Fifo', 'FIF
 # the prerecorded cutscenes keep 60 frames per second at every setting.
 FRAME_RATES = [('30', '30 FPS'), ('60', '60 FPS (as on PS4)'), ('120', '120 FPS'), ('144', '144 FPS (experimental)'),
                ('165', '165 FPS (experimental)'), ('240', '240 FPS (experimental)')]
+FPS_LIMITS = [('0', 'Default'), ('30', '30 FPS'), ('45', '45 FPS'), ('60', '60 FPS'),
+              ('90', '90 FPS'), ('120', '120 FPS'), ('240', '240 FPS')]
 # The window (or the screen in fullscreen) shows the game's picture at its size: FSR 1 (EASU) or
 # bilinear when the picture is smaller, then RCAS sharpening (BB_RCAS_ATTENUATION, lower is sharper).
 WINDOW_SIZES = [('1280x720', '1280 × 720'), ('1600x900', '1600 × 900'),
@@ -156,12 +158,12 @@ RESERVED_KEYS = {'Insert': 'Insert opens the in-game settings menu.',
                  'Alt_L': 'Left Alt frees the mouse cursor while held.'}
 
 APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'start': 'u1', 'language': '1', 'player_name': '',
-                'fullscreen': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'show_fps': False,
+                'fullscreen': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False,
                 'window_size': '1920x1080', 'render_height': '1080', 'aspect': '16:9', 'speakers': 'auto', 'scaler': 'fsr1', 'sharpening': '500',
                 'anti_aliasing': 'off', 'aa_sharpness': '0.2', 'frame_generation': 'off',
                 'frame_gen_multiplier': '2', 'extra_env': '', 'close_on_play': False,
                 'mouse_look': True, 'mouse_sensitivity': '1.0', 'mouse_invert_y': False,
-                'pad_invert_y': False, 'button_prompts': 'auto', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True,
+                'pad_invert_y': False, 'pad_vibration': True, 'pad_vibration_strength': '100', 'button_prompts': 'auto', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True,
                 'trophy_game': 'u1'}
 
 
@@ -305,6 +307,45 @@ def mouse_sensitivity(s):
         return '1.00'
 
 
+def vibration_strength(s):
+    """Saved vibration percentage, clamped at the launcher/runtime boundary."""
+    try:
+        return min(100, max(0, int(float(s.get('pad_vibration_strength', 100)))))
+    except (TypeError, ValueError):
+        return 100
+
+
+def controller_probe_path():
+    """The packaged or development loader, which also provides the lightweight controller probe."""
+    configured = os.environ.get('BB_PROBE')
+    candidates = ([Path(configured)] if configured else []) + [PORT_DIR / 'bin' / 'bb-probe.exe',
+                                                               PORT_DIR / 'out' / 'bb-probe.exe']
+    return next((path for path in candidates if path.is_file()), None)
+
+
+def controller_probe_environment(probe):
+    """Development builds find SDL beside MSYS2; packages already keep it beside bb-probe."""
+    env = dict(os.environ)
+    if not (probe.parent / 'SDL3.dll').is_file():
+        clang64 = Path(env.get('MSYS2_ROOT', r'C:\msys64')) / 'clang64' / 'bin'
+        if clang64.is_dir():
+            env['PATH'] = f'{clang64}{os.pathsep}{env.get("PATH", "")}'
+    return env
+
+
+def parse_controller_probe(text):
+    """Parse bb-probe's deliberately small key=value controller response."""
+    values = {}
+    for line in text.splitlines():
+        if '=' in line:
+            key, value = line.split('=', 1)
+            values[key.strip()] = value.strip()
+    return {'connected': values.get('connected') == '1',
+            'name': values.get('name', ''),
+            'rumble': values.get('rumble') == '1',
+            'tested': values.get('tested') == '1'}
+
+
 def side_buttons():
     """(Mouse 4, Mouse 5) held right now: the system's XBUTTON1 / XBUTTON2 (virtual keys 5 and 6)."""
     try:
@@ -359,7 +400,9 @@ def write_input_ini(s):
              f"mouse_look={1 if s.get('mouse_look', True) else 0}",
              f"mouse_sensitivity={mouse_sensitivity(s)}",
              f"mouse_invert_y={1 if s.get('mouse_invert_y') else 0}",
-             f"pad_invert_y={1 if s.get('pad_invert_y') else 0}"]
+             f"pad_invert_y={1 if s.get('pad_invert_y') else 0}",
+             f"pad_vibration={1 if s.get('pad_vibration', True) else 0}",
+             f"pad_vibration_strength={vibration_strength(s)}"]
     lines += [f'key.{action}={keys.get(action, "")}' for action in DEFAULT_KEYS]
     lines += [f'pad.{action}={pad.get(action, "none")}' for action in DEFAULT_PAD]
     path = input_ini_path()
@@ -425,6 +468,8 @@ def game_environment(s, start=None):
     env['BB_FULLSCREEN'] = '1' if s['fullscreen'] else '0'
     env['BB_PRESENT_MODE'] = s['present_mode']
     env['BB_VBLANK_HZ'] = str(s.get('frame_rate') or '60')
+    if str(s.get('fps_limit') or '0') != '0':
+        env['BB_FPS_LIMIT'] = str(s['fps_limit'])
     env['BB_WINDOW_SIZE'] = str(s.get('window_size') or '1920x1080')
     resolution = game_resolution(s, screen_size())
     if resolution:
@@ -543,6 +588,7 @@ class Launcher:
         self.show('play')
         root.protocol('WM_DELETE_WINDOW', self.close)
         root.after(100, self.drain_output)
+        root.after(150, self.detect_controller)
         if self.app.get('check_updates', True):
             threading.Thread(target=self.check_update, daemon=True).start()
 
@@ -1169,7 +1215,9 @@ class Launcher:
                  '60 FPS. Above your display\'s refresh rate use Mailbox or Immediate.')
         if refresh:
             hint += ' ' + _('Your display runs at {} Hz.').format(refresh)
-        self.row(f, _('Frame rate'), self.choice(f, 'frame_rate', FRAME_RATES, 34), hint)
+        self.row(f, _('Engine frame rate'), self.choice(f, 'frame_rate', FRAME_RATES, 34), hint)
+        self.row(f, _('Frame rate limit'), self.choice(f, 'fps_limit', FPS_LIMITS, 34),
+                 _('The engine frame rate is the highest it can go. Default keeps the port\'s normal behavior.'))
         self.section(f, _('Resolution'))
         self.row(f, _('Render resolution'), self.choice(f, 'render_height', RENDER_HEIGHTS, 34),
                  _('The size the games draw at, so a 1440p or 4K screen gets a sharper picture, not an enlarged '
@@ -1279,6 +1327,27 @@ class Launcher:
         holder = self.tk.Frame(card, bg=CARD)
         holder.grid(row=self.next_row(card), column=0, columnspan=2, sticky='w', pady=(12, 0))
         self.pill(holder, _('Default controller buttons'), self.reset_pad).pack(side='left')
+
+        self.section(f, _('Vibration'))
+        self.controller_name = self.ttk.Label(self.target(f), text=_('Detecting…'))
+        self.row(f, _('Controller'), self.controller_name)
+        self.controller_status = self.ttk.Label(self.target(f), text=_('Checking vibration support…'),
+                                                style='Muted.TLabel')
+        self.row(f, _('Status'), self.controller_status)
+        self.check(f, 'pad_vibration', _('Controller vibration'),
+                   _('The setting applies the next time the game starts.'))
+        self.row(f, _('Vibration intensity'),
+                 Slider(self.tk, self.target(f), self.var('pad_vibration_strength'), 0, 100, 5,
+                        COLORS, self.px, self.font_ui_md, fmt='{:.0f}', width=300, suffix='%'))
+        card = self.target(f)
+        holder = self.tk.Frame(card, bg=CARD)
+        holder.grid(row=self.next_row(card), column=0, columnspan=2, sticky='w', pady=(12, 0))
+        self.controller_refresh_button = self.pill(holder, _('Detect controller'), self.detect_controller)
+        self.controller_refresh_button.pack(side='left')
+        self.controller_test_button = self.pill(holder, _('Test vibration'),
+                                                lambda: self.detect_controller(test=True))
+        self.controller_test_button.pack(side='left', padx=(8, 0))
+        self.controller_test_button.configure(state='disabled')
 
     def key_list(self, action):
         value = (self.app.get('key_bindings') or {}).get(action, DEFAULT_KEYS[action])
@@ -1634,6 +1703,62 @@ class Launcher:
         except OSError:
             pass
 
+    def detect_controller(self, test=False):
+        """Detect or briefly rumble the first SDL gamepad without starting the game renderer."""
+        if self.process:
+            self.controller_status.configure(text=_('Unavailable while the game is running.'))
+            return
+        probe = controller_probe_path()
+        if not probe:
+            self.controller_name.configure(text=_('Not available'))
+            self.controller_status.configure(text=_('bb-probe.exe was not found.'))
+            return
+        self.controller_refresh_button.configure(state='disabled')
+        self.controller_test_button.configure(state='disabled')
+        self.controller_status.configure(text=_('Testing…') if test else _('Detecting…'))
+        strength = vibration_strength(self.current())
+
+        def work():
+            command = [str(probe), '--controller-test', str(strength)] if test \
+                else [str(probe), '--controller-info']
+            try:
+                result = subprocess.run(command, capture_output=True, text=True, encoding='utf-8',
+                                        errors='replace', timeout=5, env=controller_probe_environment(probe),
+                                        creationflags=NO_WINDOW)
+                if result.returncode:
+                    raise OSError(result.stderr.strip() or _('controller probe failed'))
+                info, error = parse_controller_probe(result.stdout), ''
+            except (OSError, subprocess.TimeoutExpired) as failure:
+                info, error = None, str(failure)
+            self.ui_calls.put(lambda: self.show_controller(info, error, test))
+        threading.Thread(target=work, daemon=True).start()
+
+    def show_controller(self, info, error, test):
+        if self.process:
+            self.controller_refresh_button.configure(state='disabled')
+            self.controller_test_button.configure(state='disabled')
+            self.controller_status.configure(text=_('Unavailable while the game is running.'))
+            return
+        self.controller_refresh_button.configure(state='normal')
+        if error:
+            self.controller_name.configure(text=_('Not available'))
+            self.controller_status.configure(text=_('Could not detect the controller: {}').format(error[:120]))
+            return
+        if not info['connected']:
+            self.controller_name.configure(text=_('No controller detected'))
+            self.controller_status.configure(text=_('Connect a controller, then detect again.'))
+            return
+        self.controller_name.configure(text=info['name'] or _('Game controller'))
+        self.controller_test_button.configure(state='normal' if info['rumble'] else 'disabled')
+        if not info['rumble']:
+            status = _('Connected · Vibration not supported')
+        elif test:
+            status = _('Connected · Vibration test completed') if info['tested'] \
+                else _('Connected · Vibration test failed')
+        else:
+            status = _('Connected · Vibration supported')
+        self.controller_status.configure(text=status)
+
     def play(self):
         if self.process:
             return
@@ -1666,6 +1791,8 @@ class Launcher:
         threading.Thread(target=self.read_output, args=(self.process,), daemon=True).start()
         self.play_button.configure(state='disabled')
         self.stop_button.configure(state='normal')
+        self.controller_refresh_button.configure(state='disabled')
+        self.controller_test_button.configure(state='disabled')
         self.status.configure(text=_('Preparing the game; it opens in its own window…'), fg=GOLD)
         if self.app.get('close_on_play'):
             self.root.after(5000, self.root.destroy)
@@ -1703,6 +1830,7 @@ class Launcher:
                     self.play_button.configure(state='normal')
                     self.stop_button.configure(state='disabled')
                     self.refresh()
+                    self.detect_controller()
                     # It failed to start or crashed (not Stop, not closing the window): say why.
                     if not self.stopping and (code != 0 or not self.entered):
                         reason = self.last_problem or _('see the Log page')
@@ -1723,9 +1851,18 @@ class Launcher:
         self.root.after(100, self.drain_output)
 
     def stop(self):
-        if self.job:
-            self.stopping = True
-            self.job.terminate()
+        if not self.process:
+            return
+        self.stop_button.configure(state='disabled')
+        try:
+            if not self.job or not self.job.terminate():
+                terminate_process_tree(self.process)
+        except (OSError, subprocess.SubprocessError) as error:
+            self.stop_button.configure(state='normal')
+            self.messagebox.showerror(NAME, _('Could not stop the game: {}').format(error))
+            return
+        self.stopping = True
+        self.status.configure(text=_('Stopping the game…'), fg=GOLD)
 
     def append(self, text):
         self.log.configure(state='normal')
@@ -1935,20 +2072,36 @@ class GameJob:
     collection, an in-game restart), so Stop ends all of them."""
 
     def __init__(self, process):
-        kernel32 = ctypes.windll.kernel32
-        kernel32.CreateJobObjectW.restype = ctypes.c_void_p
-        self.handle = kernel32.CreateJobObjectW(None, None)
+        self.kernel32 = ctypes.windll.kernel32
+        self.kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+        self.handle = self.kernel32.CreateJobObjectW(None, None)
         if self.handle:
-            kernel32.AssignProcessToJobObject(ctypes.c_void_p(self.handle), ctypes.c_void_p(int(process._handle)))
+            assigned = self.kernel32.AssignProcessToJobObject(
+                ctypes.c_void_p(self.handle), ctypes.c_void_p(int(process._handle)))
+            if not assigned:
+                self.kernel32.CloseHandle(ctypes.c_void_p(self.handle))
+                self.handle = None
 
     def terminate(self):
-        if self.handle:
-            ctypes.windll.kernel32.TerminateJobObject(ctypes.c_void_p(self.handle), 1)
+        return bool(self.handle and self.kernel32.TerminateJobObject(ctypes.c_void_p(self.handle), 1))
 
     def close(self):
         if self.handle:
-            ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(self.handle))
+            self.kernel32.CloseHandle(ctypes.c_void_p(self.handle))
             self.handle = None
+
+
+def terminate_process_tree(process):
+    """Stop a launcher process and every child when its Windows job is unavailable."""
+    if process.poll() is not None:
+        return
+    taskkill = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32/taskkill.exe'
+    result = subprocess.run([str(taskkill), '/PID', str(process.pid), '/T', '/F'],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, creationflags=NO_WINDOW, timeout=10)
+    if result.returncode and process.poll() is None:
+        detail = result.stdout.decode(errors='replace').strip()
+        raise OSError(detail or _('taskkill exited with code {}').format(result.returncode))
 
 
 def version_tuple(text):

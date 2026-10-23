@@ -1067,12 +1067,19 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
 
         switch (type) {
         default:
-            UNREACHABLE_MSG("Wrong PM4 type {}", type);
-            break;
         case 0:
-            UNREACHABLE_MSG("Unimplemented PM4 type 0, base reg: {}, size: {}",
-                            header->type0.base.Value(), header->type0.NumWords());
-            break;
+            // bbport: a garbage dword read as a packet header (a command buffer the game was
+            // already reusing: "Unimplemented PM4 type 0 ... size: 15810") stopped the whole
+            // game. The rest of this buffer is dropped instead; the loop ends normally, so the
+            // submission's cleanup below still runs. Idea from parsifal295 (PR #57).
+            if (static int reported = 0; reported < 16) {
+                ++reported;
+                LOG_WARNING(Render, "PM4 header {:#010x} (type {}) at +{:#x}: rest of the buffer "
+                                    "dropped",
+                            header->raw, type, reinterpret_cast<uintptr_t>(dcb.data()) - base_addr);
+            }
+            dcb = {};
+            continue;
         case 2:
             // Type-2 packet are used for padding purposes
             dcb = NextPacket(dcb, 1);

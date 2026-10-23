@@ -612,10 +612,15 @@ void PipelineCache::EnsureWorkerPipeline(PipelineSelection& worker_sel) {
         auto pipeline = std::make_unique<GraphicsPipeline>(
             instance, scheduler, desc_heap, profile, key, *pipeline_cache, worker_sel.infos,
             worker_sel.runtime_infos, worker_sel.fetch_shader, worker_sel.modules, sdata, false);
-        pipeline->RebindStages(program_infos);
-        RegisterPipelineData(key, pipeline_hash, sdata);
-        num_new_pipelines.fetch_add(1, std::memory_order_relaxed);
-        driver_cache_dirty.fetch_add(1, std::memory_order_relaxed);
+        // bbport: a pipeline the driver could not create is kept as a null entry, not saved.
+        if (pipeline->IsValid()) {
+            pipeline->RebindStages(program_infos);
+            RegisterPipelineData(key, pipeline_hash, sdata);
+            num_new_pipelines.fetch_add(1, std::memory_order_relaxed);
+            driver_cache_dirty.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            pipeline.reset();
+        }
         std::unique_lock lock{pipelines_mutex};
         if (EmulatorSettings.IsShaderCollect()) {
             for (auto stage = 0; stage < MaxShaderStages; ++stage) {
@@ -705,10 +710,16 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     auto pipeline = std::make_unique<GraphicsPipeline>(
         instance, scheduler, desc_heap, profile, sel.graphics_key, *pipeline_cache, sel.infos,
         sel.runtime_infos, sel.fetch_shader, sel.modules, sdata, false);
-
-    RegisterPipelineData(sel.graphics_key, pipeline_hash, sdata);
-    num_new_pipelines.fetch_add(1, std::memory_order_relaxed);
-    driver_cache_dirty.fetch_add(1, std::memory_order_relaxed);
+    // bbport: the driver could not create it. A null entry keeps the key from being compiled
+    // again on every draw; it is not saved, so the next start does not load it.
+    const bool pipeline_valid = pipeline->IsValid();
+    if (pipeline_valid) {
+        RegisterPipelineData(sel.graphics_key, pipeline_hash, sdata);
+        num_new_pipelines.fetch_add(1, std::memory_order_relaxed);
+        driver_cache_dirty.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        pipeline.reset();
+    }
 
     const GraphicsPipeline* result = nullptr;
     {
@@ -762,9 +773,14 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
     auto pipeline = std::make_unique<ComputePipeline>(instance, scheduler, desc_heap, profile,
                                                       *pipeline_cache, compute_key, *sel.infos[0],
                                                       sel.modules[0], sdata, false);
-    RegisterPipelineData(compute_key, sdata);
-    num_new_pipelines.fetch_add(1, std::memory_order_relaxed);
-    driver_cache_dirty.fetch_add(1, std::memory_order_relaxed);
+    // bbport: as for graphics pipelines, kept null and not saved.
+    if (pipeline->IsValid()) {
+        RegisterPipelineData(compute_key, sdata);
+        num_new_pipelines.fetch_add(1, std::memory_order_relaxed);
+        driver_cache_dirty.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        pipeline.reset();
+    }
 
     const ComputePipeline* result = nullptr;
     {
@@ -846,10 +862,14 @@ void PipelineCache::PrepareComputePipeline(PipelineSelection& worker_sel) {
         auto pipeline = std::make_unique<ComputePipeline>(
             instance, scheduler, desc_heap, profile, *pipeline_cache, key, *worker_sel.infos[0],
             worker_sel.modules[0], sdata, false);
-        pipeline->RebindStage(&program->info);
-        RegisterPipelineData(key, sdata);
-        num_new_pipelines.fetch_add(1, std::memory_order_relaxed);
-        driver_cache_dirty.fetch_add(1, std::memory_order_relaxed);
+        if (pipeline->IsValid()) {
+            pipeline->RebindStage(&program->info);
+            RegisterPipelineData(key, sdata);
+            num_new_pipelines.fetch_add(1, std::memory_order_relaxed);
+            driver_cache_dirty.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            pipeline.reset();
+        }
         std::unique_lock lock{pipelines_mutex};
         if (EmulatorSettings.IsShaderCollect()) {
             module_related_pipelines[worker_sel.modules[0]].emplace_back(key);
@@ -1148,6 +1168,19 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
     }
 
     const auto* vs_info = sel.infos[static_cast<u32>(SwStage::Vertex)];
+    // bbport: a draw whose vertex buffer table pointer is null (reported before a crash at the
+    // cutscene after Rom and in normal play) has no vertex input to build: skipped.
+    if (vs_info && sel.fetch_shader) {
+        for (const auto& attrib : sel.fetch_shader->attributes) {
+            if (vs_info->UdPointerNull(attrib.sgpr_base)) {
+                static std::atomic<u32> reported{0};
+                if (reported.fetch_add(1, std::memory_order_relaxed) < 5) {
+                    std::printf("GPU: draw skipped: its vertex buffer table pointer is null\n");
+                }
+                return false;
+            }
+        }
+    }
     if (vs_info && sel.fetch_shader && !instance.IsVertexInputDynamicState()) {
         // Without vertex input dynamic state, the pipeline needs to specialize on format.
         // Stride will still be handled outside the pipeline using dynamic state.

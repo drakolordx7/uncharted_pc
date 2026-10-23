@@ -942,6 +942,45 @@ static void patch_job_sleep(uint64_t image_size) {
         return;
     }
 }
+/* The shader resource binding loop (U1 0x63e260) calls a handler per bound input through a
+ * pointer-to-member table indexed by the input's type; only a few types have handlers and the rest
+ * are null. An input of an unhandled type (a zeroed entry) called address 0 and stopped the game in
+ * the jungle chapters. The call now skips a null handler. Same code in all three games:
+ *   test cl,1; je +8; mov rdx,[rdi]; mov rcx,[rcx+rdx-1]; movzx esi,byte [rax+2]; <set rdx>; call rcx
+ * where <set rdx> is `mov rdx, r15` (1.02, 3 bytes) or `lea rdx,[rbp-0x60]` (1.00, 4 bytes).
+ * Found by soni424; the 1.00 variant is ours (same loop, checked in all three 1.00 images). */
+static void patch_null_binding_handler(uint64_t image_size) {
+    static const unsigned char head[]={0xf6,0xc1,0x01,0x74,0x08,0x48,0x8b,0x17,0x48,0x8b,0x4c,0x11,0xff,
+                                       0x0f,0xb6,0x70,0x02};      /* 17 bytes, common to both */
+    struct Variant { unsigned char tail[6]; unsigned tail_len; unsigned char guard[16]; unsigned guard_len; };
+    static const struct Variant variants[]={
+        /* 1.02: mov rdx, r15; call rcx -> call thunk (thunk: mov rdx, r15; test rcx, rcx; je ret;
+         * jmp rcx (returns to the game's call site); ret) */
+        {{0x4c,0x89,0xfa,0xff,0xd1},5,{0x4c,0x89,0xfa,0x48,0x85,0xc9,0x74,0x02,0xff,0xe1,0xc3},11},
+        /* 1.00: lea rdx,[rbp-0x60]; call rcx -> call thunk + nop */
+        {{0x48,0x8d,0x55,0xa0,0xff,0xd1},6,{0x48,0x8d,0x55,0xa0,0x48,0x85,0xc9,0x74,0x02,0xff,0xe1,0xc3},12},
+    };
+    unsigned char *thunk=NULL;
+    int patched=0;
+    for (uint64_t at=0;at+sizeof(head)+6<=image_size;++at) {
+        if (image[at]!=0xf6 || memcmp(image+at,head,sizeof(head))) continue;
+        for (size_t v=0;v<sizeof(variants)/sizeof(variants[0]);++v) {
+            const struct Variant *var=&variants[v];
+            if (memcmp(image+at+sizeof(head),var->tail,var->tail_len)) continue;
+            if (!thunk && !(thunk=near_image_memory(4096))) { printf("Shader bindings: no thunk memory\n"); return; }
+            if (16*(patched+1)>4096) return;
+            unsigned char *t=thunk+16*patched, *f=image+at+sizeof(head);
+            memcpy(t,var->guard,var->guard_len);
+            int32_t to=(int32_t)((int64_t)(uintptr_t)t-(int64_t)(uintptr_t)(f+5));
+            f[0]=0xe8; memcpy(f+1,&to,4);                        /* call thunk */
+            if (var->tail_len>5) f[5]=0x90;
+            printf("Shader bindings: null handler guard at %#" PRIx64 "\n",(uint64_t)(f-image));
+            ++patched;
+            break;
+        }
+    }
+    if (!patched) printf("Shader bindings: null handler call site not found\n");
+}
 /* Restarts the game through run.sh (the settings menu: a new render resolution is a patch
  * applied at start). Descriptors are closed first so the old GPU device and its memory are
  * released before the new process opens its own. */
@@ -982,6 +1021,9 @@ int main(int argc, char **argv) {
     mallopt(M_MMAP_THRESHOLD,32*1024*1024);
 #endif
     if (argc == 2 && !strcmp(argv[1], "--vulkan-only")) return vulkan_smoke();
+    if (argc == 2 && !strcmp(argv[1], "--controller-info")) return runtime_pad_tool(0,100);
+    if (argc == 3 && !strcmp(argv[1], "--controller-test"))
+        return runtime_pad_tool(1,atoi(argv[2]));
     check_cpu();
 #ifdef _WIN32
     /* The PS4 user range must stay free of host allocations (GPU driver, heaps), and the guest
@@ -1006,7 +1048,7 @@ int main(int argc, char **argv) {
         else { fprintf(stderr, "Unknown option: %s\n", argv[i]); return 1; }
     }
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s boot.bin [--cpu-only] [--strict-imports] [--list-missing] [--content-profile file] [--app0 dir] [--user dir] [--patches file] [--guest-argv file] [--trophies dir] [--timeout seconds] | --vulkan-only\n", argv[0]);
+        fprintf(stderr, "Usage: %s boot.bin [--cpu-only] [--strict-imports] [--list-missing] [--content-profile file] [--app0 dir] [--user dir] [--patches file] [--guest-argv file] [--trophies dir] [--timeout seconds] | --vulkan-only | --controller-info | --controller-test 0..100\n", argv[0]);
         return 1;
     }
     if (content_profile) {
@@ -1228,6 +1270,7 @@ int main(int argc, char **argv) {
         runtime_display_patch(image, image_end);
         patch_eop_tick_wait(image_end);
         patch_job_sleep(image_end);
+        patch_null_binding_handler(image_end);
     }
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
