@@ -913,90 +913,22 @@ static int64_t find_masked(const char *hex, uint64_t size) {
     return found;
 }
 /* Render command contexts (ndgi): Begin and End are hooked to keep a per-thread flag, set while a
- * job worker has a context open (runtime_ndgi_open), used by the job mutex patch below.
- * bbport diagnosis: BB_NDGI_TRACE=1 also reports. With 4 cores U2 failed "cmdBuf.m_bInUse ==
- * false" in a command context's Begin together with "m_workerThreadIndex ==
- * GetCurrentWorkerThreadIndex()" in End: the context recorded one job worker at Begin
- * (+0xe810) and found another at End. At End's index check (r14 = the context) this asks the
- * game's own GetCurrentWorkerThreadIndex (0x650600, from the thread's TLS) and notes the host
- * thread: one index on two host threads is a TLS fault of ours; a context ending on another
- * worker's thread moved between workers (a job fiber resumed elsewhere). */
+ * job worker has a context open (runtime_ndgi_open, cleared too when a fiber leaves the thread,
+ * runtime_fiber.c), used by the job wait patch below. A context records its worker at Begin
+ * (+0xe810) and asserts the same one at End ("m_workerThreadIndex == GetCurrentWorkerThreadIndex()"). */
 #ifdef _WIN32
-static uint64_t ndgi_index_fn; /* GetCurrentWorkerThreadIndex, from the call after the site */
 extern _Thread_local int runtime_ndgi_open; /* runtime_fiber.c */
-static volatile LONG ndgi_owner[6];
-static volatile LONG ndgi_reports, ndgi_ends, ndgi_moved, ndgi_shared;
-static int ndgi_tracing;
-static void __attribute__((ms_abi)) ndgi_end_trace(uint64_t rdi, uint64_t rsi, uint64_t base, uint64_t r14) {
-    (void)rdi; (void)rsi;
-    const uint64_t stored=*(const uint64_t *)(uintptr_t)(r14+0xe810);
-    (void)base;
+static void __attribute__((ms_abi)) ndgi_end(uint64_t rdi, uint64_t rsi, uint64_t base, uint64_t r14) {
+    (void)rdi; (void)rsi; (void)base; (void)r14;
     runtime_ndgi_open=0;
-    if (!ndgi_tracing) return;
-    const uint64_t index=((uint64_t (__attribute__((sysv_abi)) *)(void))(uintptr_t)ndgi_index_fn)();
-    const LONG tid=(LONG)GetCurrentThreadId();
-    const LONG ends=InterlockedIncrement(&ndgi_ends);
-    if (index<6) {
-        const LONG owner=InterlockedCompareExchange(&ndgi_owner[index],tid,0);
-        if (owner && owner!=tid) {
-            InterlockedIncrement(&ndgi_shared);
-            if (InterlockedIncrement(&ndgi_reports)<=40)
-                printf("NDGI: worker index %llu on host thread %ld, first seen on thread %ld (end %ld)\n",
-                       (unsigned long long)index,tid,owner,ends);
-        }
-    }
-    if (stored!=index) {
-        InterlockedIncrement(&ndgi_moved);
-        if (InterlockedIncrement(&ndgi_reports)<=40)
-            printf("NDGI: context %#llx began on worker %llu (thread %ld) and ends on worker %llu (thread %ld), end %ld\n",
-                   (unsigned long long)r14,(unsigned long long)stored,
-                   stored<6 ? ndgi_owner[stored] : 0L,(unsigned long long)index,tid,ends);
-    }
-    if ((ends & 0xfffff)==0)
-        printf("NDGI: %ld ends, %ld moved between workers, %ld on a second thread for one index; threads %ld %ld %ld %ld %ld %ld\n",
-               ends,ndgi_moved,ndgi_shared,ndgi_owner[0],ndgi_owner[1],ndgi_owner[2],ndgi_owner[3],
-               ndgi_owner[4],ndgi_owner[5]);
-    fflush(stdout);
 }
-/* Begin (mov [r12+0xe810], rax: the worker index stored) marks the thread; a fiber switched out
- * while it is marked clears it (the job left the thread) and, tracing, is reported with the guest
- * return addresses (runtime_fiber.c). */
-static void __attribute__((ms_abi)) ndgi_begin_trace(uint64_t rdi, uint64_t rsi, uint64_t base, uint64_t r14) {
+static void __attribute__((ms_abi)) ndgi_begin(uint64_t rdi, uint64_t rsi, uint64_t base, uint64_t r14) {
     (void)rdi; (void)rsi; (void)base; (void)r14;
     runtime_ndgi_open=1;
 }
-void runtime_ndgi_yield(const char *how, uint64_t ret, uint64_t guest_rbp) {
-    static volatile LONG yields;
-    if (!ndgi_tracing) return;
-    const LONG n=InterlockedIncrement(&yields);
-    if (n>60) return;
-    char where[MAX_PATH+64], line[1024];
-    describe_address(where,sizeof(where),(uintptr_t)ret);
-    int k=snprintf(line,sizeof(line),"NDGI: fiber %s with a command context open (thread %lu, #%ld): %s",how,
-                   GetCurrentThreadId(),n,where);
-    /* The stack above the host frame: values that point into the guest image just after a call
-     * (e8 rel32, or ff /2 of 2-7 bytes) are return addresses of the yielding job's callers. */
-    const uint64_t lo=(uint64_t)(uintptr_t)image, hi=lo+guest_image_size;
-    int found=0;
-    for (uint64_t at=guest_rbp & ~7ull; found<12 && at<(guest_rbp & ~7ull)+0x2000 && k<(int)sizeof(line)-80; at+=8) {
-        if (IsBadReadPtr((const void *)(uintptr_t)at,8)) break;
-        const uint64_t v=*(const uint64_t *)(uintptr_t)at;
-        if (v<lo+16 || v>=hi) continue;
-        const unsigned char *c=(const unsigned char *)(uintptr_t)v;
-        const int call=c[-5]==0xe8 || (c[-2]==0xff && (c[-1]&0x38)==0x10) || (c[-3]==0xff && (c[-2]&0x38)==0x10) ||
-                       (c[-6]==0xff && (c[-5]&0x38)==0x10);
-        if (!call) continue;
-        describe_address(where,sizeof(where),(uintptr_t)v);
-        k+=snprintf(line+k,sizeof(line)-k," < %s",where);
-        ++found;
-    }
-    printf("%s\n",line);
-    fflush(stdout);
-}
-static void install_ndgi_trace(uint64_t image_size) {
-    ndgi_tracing=getenv("BB_NDGI_TRACE")!=NULL;
+static void install_ndgi_hooks(uint64_t image_size) {
     const char *wait=getenv("BB_JOB_LOCK_WAIT_MS");
-    if (!ndgi_tracing && wait && wait[0]=='0' && !wait[1]) return; /* nothing uses the flag */
+    if (wait && wait[0]=='0' && !wait[1]) return; /* nothing uses the flag */
     static const unsigned char begin[]={0x49,0x89,0x84,0x24,0x10,0xe8,0x00,0x00}; /* mov [r12+0xe810], rax */
     int64_t begin_at=-1;
     for (uint64_t at=0;at+16<=image_size;++at) {
@@ -1004,7 +936,7 @@ static void install_ndgi_trace(uint64_t image_size) {
         if (begin_at>=0) { begin_at=-2; break; }
         begin_at=(int64_t)at;
     }
-    if (begin_at>=0 && callback_thunk(image+begin_at,8,(const void *)ndgi_begin_trace))
+    if (begin_at>=0 && callback_thunk(image+begin_at,8,(const void *)ndgi_begin))
         printf("Render contexts: begin hooked at %#" PRIx64 "\n",(uint64_t)begin_at);
     else
         printf("Render contexts: begin site %s\n",begin_at==-2 ? "not unique" : "not found");
@@ -1018,11 +950,8 @@ static void install_ndgi_trace(uint64_t image_size) {
         found=(int64_t)at;
     }
     if (found<0) { printf("Render contexts: end site not found\n"); return; }
-    int32_t rel; memcpy(&rel,image+found+8,4);
-    ndgi_index_fn=(uint64_t)(uintptr_t)(image+found+12+rel);
-    if (callback_thunk(image+found,7,(const void *)ndgi_end_trace))
-        printf("Render contexts: end hooked at %#" PRIx64 " (worker index from %#" PRIx64 ")%s\n",
-               (uint64_t)found,(uint64_t)(found+12+rel),ndgi_tracing ? ", tracing (BB_NDGI_TRACE)" : "");
+    if (callback_thunk(image+found,7,(const void *)ndgi_end))
+        printf("Render contexts: end hooked at %#" PRIx64 "\n",(uint64_t)found);
 }
 #endif
 /* Naughty Dog's FrameBegin (ndlib/render/fg-draw-mgr.cpp) asserts that the frame it recycles,
@@ -1652,7 +1581,7 @@ int main(int argc, char **argv) {
         install_game_callbacks(segments, ns, image_end);
         runtime_display_patch(image, image_end);
 #ifdef _WIN32
-        install_ndgi_trace(image_end);
+        install_ndgi_hooks(image_end);
 #endif
         patch_eop_tick_wait(image_end);
         patch_job_sleep(image_end);
