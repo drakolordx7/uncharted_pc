@@ -32,6 +32,8 @@ PORT_DIR = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).r
 sys.path.insert(0, str(PORT_DIR / 'scripts'))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import trophies  # noqa: E402  (scripts/trophies.py: the games' trophy lists)
+import uncharted_i18n
+
 DATA_DIR = Path(os.environ.get('BB_DATA_DIR', PORT_DIR))
 CONFIG_DIR = Path(os.environ.get('APPDATA', Path.home())) / 'uncharted-launcher'
 CONFIG_FILE = CONFIG_DIR / 'settings.json'
@@ -39,7 +41,7 @@ NAME = 'Uncharted'
 AUTHOR = 'SuperMedo'
 COMMUNITY_AUTHOR = 'drakolord'
 # This build; GitHub release tags are v<VERSION> (their digits are compared).
-VERSION = '0.3.7'
+VERSION = '0.3.8'
 RELEASES_API = 'https://api.github.com/repos/drakolordx7/uncharted_pc/releases/latest'
 RELEASES_PAGE = 'https://github.com/drakolordx7/uncharted_pc/releases/latest'
 UPDATE_DIR = Path(tempfile.gettempdir()) / 'uncharted-update'
@@ -153,23 +155,68 @@ TK_KEYS = {'space': 'Space', 'Return': 'Return', 'Escape': 'Escape', 'Tab': 'Tab
 WIN_NUMPAD = {**{0x60 + n: f'Keypad {n}' for n in range(10)},
               0x6A: 'Keypad *', 0x6B: 'Keypad +', 0x6D: 'Keypad -', 0x6E: 'Keypad .', 0x6F: 'Keypad /'}
 MOUSE_SENS_MIN, MOUSE_SENS_MAX = 0.1, 10.0  # the Controls page slider (the game's default pace is 1)
+# Fixes page: fixes that cost speed, so they run only where they help unless the player picks.
+# key -> (title, hint, {choice: {variable: value}}); 'auto' sets nothing (the game's own default).
+FIXES = {
+    'fix_u2_gpu_results': (
+        'Exact GPU results (Uncharted 2)',
+        'Explosions, vehicle damage and the convoy of chapter 21 read results of GPU work back. '
+        'Automatic: on in Uncharted 2 only. Costs speed in busy scenes.',
+        {'on': {'BB_GPU_MERGE': '0'}, 'off': {'BB_GPU_MERGE': '1'}}),
+    'fix_u2_mesh': (
+        'Mesh raycaster copies (Uncharted 2)',
+        'Fixes "iSubMesh < m_numSubMeshInstances" after checkpoints. Automatic: on in Uncharted 2 only. '
+        'In Uncharted 3\'s Cartagena square it cost 94 to 54 FPS.',
+        {'on': {'BB_SCALAR_COPY64_SYNC': '2', 'BB_SCALAR_COPY64_DEFER': '1'},
+         'off': {'BB_SCALAR_COPY64_SYNC': '0', 'BB_SCALAR_COPY64_DEFER': '0'}}),
+    'fix_tiny_readback': (
+        'Aim and turret focus (Uncharted 2)',
+        'Enemies stay in focus when aiming. Automatic: on in Uncharted 2 only; elsewhere it costs about 13%.',
+        {'on': {'BB_TINY_READBACK': '1'}, 'off': {'BB_TINY_READBACK': '0'}}),
+    'fix_small_buffers': (
+        'Brightness flicker fix',
+        'Copies small GPU results back every frame (auto exposure). Automatic: off; it halved the frame '
+        'rate in Uncharted 3\'s Cartagena square.',
+        {'on': {'BB_READBACK_SMALL_BUFFERS': '1'}, 'off': {'BB_READBACK_SMALL_BUFFERS': '0'}}),
+    'fix_vram': (
+        'Small video memory mode',
+        'Keeps 4-8 GB graphics cards inside their video memory. Automatic: on for cards up to 8 GB.',
+        {'on': {'BB_VRAM_LEGACY': '0'}, 'off': {'BB_VRAM_LEGACY': '1'}}),
+    'fix_job_sleep': (
+        'Idle game workers sleep',
+        'Frees CPU cores while the game\'s workers wait. Automatic: on for CPUs with up to 8 threads; '
+        'on bigger CPUs it cost about 8%.',
+        {'on': {'BB_JOB_SLEEP': '1'}, 'off': {'BB_JOB_SLEEP': '0'}}),
+    'fix_thread_prio': (
+        'PS4 thread priorities',
+        'Game threads get the priorities they have on PS4. Automatic: on.',
+        {'on': {'BB_THREAD_PRIO': '1'}, 'off': {'BB_THREAD_PRIO': '0'}}),
+}
+FIX_CHOICES = [('auto', 'Automatic'), ('on', 'On'), ('off', 'Off')]
+
 # Insert opens the in-game settings menu; Left Alt frees the mouse cursor.
 RESERVED_KEYS = {'Insert': 'Insert is reserved for the in-game settings menu.',
                  'Alt_L': 'Left Alt is reserved for freeing the mouse cursor.'}
 
-APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'start': 'u1', 'language': '1', 'player_name': '',
+APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'start': 'u1', 'language': '1', 'ui_language': '', 'player_name': '',
                 'fullscreen': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False,
                 'window_size': '1920x1080', 'render_height': '1080', 'aspect': '16:9', 'speakers': 'auto', 'scaler': 'fsr1', 'sharpening': '500',
                 'anti_aliasing': 'off', 'aa_sharpness': '0.2', 'frame_generation': 'off',
                 'frame_gen_multiplier': '2', 'extra_env': '', 'close_on_play': False,
                 'mouse_look': True, 'mouse_sensitivity': '1.0', 'mouse_invert_y': False,
-                'pad_invert_y': False, 'pad_vibration': True, 'pad_vibration_strength': '100', 'button_prompts': 'auto', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True,
-                'trophy_game': 'u1'}
+                'pad_invert_y': False, 'art_banner': '', 'art_u1': '', 'art_u2': '', 'art_u3': '', 'steam_art': '', 'art_crops': {},
+                'shortcut_name': 'Uncharted: The Nathan Drake Collection', 'shortcut_icon': '', 'trophy_game': 'u1',
+                'pad_vibration': True, 'pad_vibration_strength': '100', 'button_prompts': 'auto', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True,
+                **{key: 'auto' for key in FIXES},
+                **{f'{game}_infinite_{cheat}': False for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')}}
+
+
+UI_LANGUAGE = 'en'
 
 
 def _(text):
-    """Translations come later; every text goes through here."""
-    return text
+    """Translate launcher text, keeping English as the fallback."""
+    return uncharted_i18n.translate(UI_LANGUAGE, text)
 
 
 def _run_problem_priority(line):
@@ -490,7 +537,11 @@ def game_environment(s, start=None):
     env['BB_FSR_SHARPNESS'] = str(s.get('aa_sharpness') or '0')
     env['BB_FRAME_GEN'] = str(s.get('frame_generation') or 'off')
     env['BB_FRAME_GEN_MULTIPLIER'] = str(s.get('frame_gen_multiplier') or '2')
+    for key, (_title, _hint, choices) in FIXES.items():
+        env.update(choices.get(str(s.get(key) or 'auto'), {}))
     env['BB_BUTTON_PROMPTS'] = str(s.get('button_prompts') or 'auto')
+    env['BB_CHEATS'] = ','.join(f'{game}:{cheat}' for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')
+                                if s.get(f'{game}_infinite_{cheat}'))
     for item in str(s['extra_env']).split():
         if '=' in item:
             key, value = item.split('=', 1)
@@ -512,7 +563,7 @@ COLORS = {'surface': SURFACE, 'card': CARD, 'card_hi': CARD_HI, 'line': LINE, 't
           'button': '#25272b', 'button_hi': '#30333a'}
 # Sidebar icons (Segoe Fluent Icons on Windows 11, Segoe MDL2 Assets on Windows 10).
 NAV_ICONS = {'play': '\ue768', 'game': '\ue7fc', 'display': '\ue7f4', 'controls': '\ue765',
-             'trophies': '\ue734', 'advanced': '\ue713', 'log': '\ue8a5'}
+             'cheats': '\ue945', 'fixes': '\ue90f', 'trophies': '\ue734', 'advanced': '\ue713', 'log': '\ue8a5'}
 # Trophy grades as the console colours them (the platinum cool white-blue, the rest metal).
 TROPHY_COLORS = {'P': '#9fd0f5', 'G': GOLD, 'S': '#cfd3da', 'B': '#cf8548'}
 RUST, RUST_HI = GOLD, GOLD_HI
@@ -563,9 +614,12 @@ def set_dark_title_bar(window):
 
 class Launcher:
     def __init__(self, root, tk, ttk, filedialog, messagebox):
+        global UI_LANGUAGE
         self.tk, self.ttk, self.filedialog, self.messagebox = tk, ttk, filedialog, messagebox
         self.root = root
         self.app = {**APP_DEFAULTS, **load_json(CONFIG_FILE, {})}
+        UI_LANGUAGE = uncharted_i18n.language_code(self.app.get('ui_language', ''))
+        self.configure_art()
         self.vars = {}
         self.process = self.job = None
         self.entered, self.last_problem, self.stopping = False, '', False
@@ -716,7 +770,7 @@ class Launcher:
             self.vars[key] = v
         return self.vars[key]
 
-    def choice(self, parent, key, options, width=36):
+    def choice(self, parent, key, options, width=36, on_change=None):
         var = self.var(key)
         values = [v for v, _t in options]
         box = self.ttk.Combobox(parent, values=[_(t) for _v, t in options], state='readonly', width=width)
@@ -726,7 +780,11 @@ class Launcher:
         def show(*_args):
             box.current(values.index(var.get()) if var.get() in values else 0)
         show()
-        box.bind('<<ComboboxSelected>>', lambda _e: var.set(values[box.current()]))
+        def selected(_event):
+            var.set(values[box.current()])
+            if on_change:
+                on_change()
+        box.bind('<<ComboboxSelected>>', selected)
         var.trace_add('write', show)
         return box
 
@@ -811,6 +869,137 @@ class Launcher:
             var.trace_add('write', lambda *_a: on_change())
         return self.row(parent, title, holder, hint)
 
+    def image_path(self, title, current=''):
+        """Choose and validate a local image."""
+        chosen = self.filedialog.askopenfilename(
+            title=title, initialdir=str(Path(current).parent) if current else str(PORT_DIR),
+            filetypes=[(_('Image files'), '*.png *.jpg *.jpeg *.webp *.ico'), (_('All files'), '*.*')])
+        if not chosen:
+            return ''
+        try:
+            from PIL import Image
+            with Image.open(chosen) as image:
+                image.verify()
+        except (OSError, ValueError) as error:
+            self.messagebox.showerror(NAME, _('This image could not be opened: {}').format(error))
+            return ''
+        return str(Path(chosen))
+
+    def enable_image_drop(self, widget, callback):
+        """Accept Explorer file drops when tkinterdnd2 is bundled; clicking always remains available."""
+        try:
+            from tkinterdnd2 import DND_FILES
+            widget.drop_target_register(DND_FILES)
+            widget.dnd_bind('<<Drop>>', lambda event: callback(self.root.tk.splitlist(event.data)[0]))
+        except (ImportError, self.tk.TclError, AttributeError, IndexError):
+            pass
+
+    def edit_art(self, key, title, size, crop_key, initial_path=None, initial_crop=None):
+        """Preview, position and save one local image without copying it into the project."""
+        from PIL import Image, ImageTk
+        import uncharted_art
+
+        window = self.tk.Toplevel(self.root)
+        window.title(title)
+        window.configure(bg=PANEL)
+        window.transient(self.root)
+        window.grab_set()
+        window.resizable(False, False)
+        path = self.tk.StringVar(value=self.app.get(key, '') if initial_path is None else initial_path)
+        saved = (self.app.setdefault('art_crops', {}).get(crop_key, {})
+                 if initial_crop is None else initial_crop)
+        result = {'value': None}
+        zoom = self.tk.DoubleVar(value=float(saved.get('zoom', 1.0)))
+        focus_x = self.tk.DoubleVar(value=float(saved.get('x', 0.5)))
+        focus_y = self.tk.DoubleVar(value=float(saved.get('y', 0.5)))
+        preview_w = self.px(560)
+        preview_h = max(self.px(180), round(preview_w * size[1] / size[0]))
+        if preview_h > self.px(390):
+            preview_h = self.px(390)
+            preview_w = round(preview_h * size[0] / size[1])
+        shell = self.tk.Frame(window, bg=PANEL)
+        shell.pack(padx=self.px(24), pady=self.px(22))
+        self.tk.Label(shell, text=title, bg=PANEL, fg=TEXT, font=self.font_title).pack(anchor='w')
+        self.tk.Label(shell, text=_('Drag an image here or click Choose image.'), bg=PANEL, fg=MUTED,
+                      font=self.font_ui).pack(anchor='w', pady=(2, self.px(12)))
+        canvas = self.tk.Canvas(shell, width=preview_w, height=preview_h, bg=BG, highlightthickness=2,
+                                highlightbackground=GOLD_DIM, bd=0, cursor='hand2')
+        canvas.pack()
+        preview = {'photo': None}
+
+        def redraw(*_args):
+            canvas.delete('all')
+            try:
+                with Image.open(path.get()) as source:
+                    crop = {'zoom': zoom.get(), 'x': focus_x.get(), 'y': focus_y.get()}
+                    image = uncharted_art.crop_image(source.convert('RGB'), (preview_w, preview_h), crop)
+                preview['photo'] = ImageTk.PhotoImage(image)
+                canvas.create_image(0, 0, image=preview['photo'], anchor='nw')
+            except (OSError, ValueError, self.tk.TclError):
+                preview['photo'] = None
+                canvas.create_text(preview_w // 2, preview_h // 2, text=_('Choose image'), fill=MUTED,
+                                   font=self.font_ui_md)
+            canvas.create_rectangle(1, 1, preview_w - 2, preview_h - 2, outline=GOLD, width=2)
+
+        def choose(candidate=''):
+            chosen = candidate or self.image_path(title, path.get())
+            if chosen:
+                try:
+                    with Image.open(chosen) as image:
+                        image.verify()
+                except (OSError, ValueError) as error:
+                    self.messagebox.showerror(NAME, _('This image could not be opened: {}').format(error))
+                    return
+                path.set(str(Path(chosen)))
+                redraw()
+
+        controls = self.tk.Frame(shell, bg=PANEL)
+        controls.pack(fill='x', pady=(self.px(14), 0))
+        for row, (label, variable, start, end, step) in enumerate((
+                (_('Zoom'), zoom, 1.0, 3.0, 0.01), (_('Horizontal position'), focus_x, 0.0, 1.0, 0.01),
+                (_('Vertical position'), focus_y, 0.0, 1.0, 0.01))):
+            self.tk.Label(controls, text=label, bg=PANEL, fg=TEXT, font=self.font_ui,
+                          width=20, anchor='w').grid(row=row, column=0, sticky='w', pady=2)
+            scale = self.tk.Scale(controls, variable=variable, from_=start, to=end, resolution=step,
+                                  orient='horizontal', showvalue=False, length=self.px(380), bg=PANEL,
+                                  fg=TEXT, troughcolor=CARD_HI, activebackground=GOLD, highlightthickness=0,
+                                  command=redraw)
+            scale.grid(row=row, column=1, sticky='ew', pady=2)
+        buttons = self.tk.Frame(shell, bg=PANEL)
+        buttons.pack(fill='x', pady=(self.px(16), 0))
+        self.pill(buttons, _('Choose image'), choose, background=PANEL).pack(side='left')
+
+        def restore():
+            path.set('')
+            zoom.set(1.0)
+            focus_x.set(0.5)
+            focus_y.set(0.5)
+            redraw()
+
+        self.pill(buttons, _('Restore'), restore, kind='ghost', background=PANEL).pack(side='left', padx=(6, 0))
+        self.pill(buttons, _('Cancel'), window.destroy, kind='ghost', background=PANEL).pack(side='right')
+
+        def save():
+            result['value'] = (path.get(), {'zoom': zoom.get(), 'x': focus_x.get(), 'y': focus_y.get()})
+            window.destroy()
+
+        self.pill(buttons, _('Save changes'), save, kind='primary', background=PANEL).pack(side='right', padx=(0, 6))
+        canvas.bind('<Button-1>', lambda _event: choose())
+        self.enable_image_drop(canvas, choose)
+        for variable in (path, zoom, focus_x, focus_y):
+            variable.trace_add('write', redraw)
+        redraw()
+        window.bind('<Escape>', lambda _event: window.destroy())
+        window.wait_window()
+        return result['value']
+
+    def edit_launcher_art(self, key, title, size, crop_key, initial_path=None):
+        result = self.edit_art(key, title, size, crop_key, initial_path=initial_path)
+        if not result:
+            return
+        self.app[key], self.app.setdefault('art_crops', {})[crop_key] = result
+        self.change_art()
+
     def page(self, name, title, subtitle):
         tk = self.tk
         outer = tk.Frame(self.content, bg=SURFACE)
@@ -883,11 +1072,11 @@ class Launcher:
                  font=self.font_ui_md, anchor='w', wraplength=brand_wrap, justify='left').pack(
             anchor='w', padx=18, pady=(2, 0))
         tk.Label(side, text=_('version {}').format(VERSION), bg=BG, fg='#5c564c', font=self.font_ui_sm,
-                 anchor='w').pack(anchor='w', padx=18, pady=(1, 16))
-        tk.Frame(side, bg=LINE, height=1).pack(fill='x', padx=18, pady=(0, 14))
+                 anchor='w').pack(anchor='w', padx=18, pady=(1, 0))
+        tk.Frame(side, bg=LINE, height=1).pack(fill='x', padx=18, pady=(16, 14))
         self.nav, self.nav_pills, self.nav_icons, self.nav_marks, self.current_page = {}, {}, {}, {}, None
-        for name, title in (('play', _('Play')), ('game', _('Game')), ('display', _('Display')),
-                            ('controls', _('Controls')), ('trophies', _('Trophies')), ('advanced', _('Advanced')),
+        for name, title in (('play', _('Play')), ('game', _('Game')), ('cheats', _('Cheats')), ('display', _('Display')),
+                            ('controls', _('Controls')), ('fixes', _('Fixes')), ('trophies', _('Trophies')), ('advanced', _('Advanced')),
                             ('log', _('Log'))):
             row = tk.Frame(side, bg=BG, cursor='hand2')
             row.pack(fill='x', padx=(0, 12), pady=2)
@@ -946,7 +1135,9 @@ class Launcher:
         self.build_game()
         self.build_display()
         self.build_controls()
+        self.build_fixes()
         self.build_trophies()
+        self.build_cheats()
         self.build_advanced()
         self.build_log()
         self.refresh()
@@ -997,6 +1188,9 @@ class Launcher:
         self.hero = tk.Canvas(page, height=self.px(260), bg=SURFACE, highlightthickness=0, bd=0)
         self.hero.pack(fill='x')
         self.hero.bind('<Configure>', self._sync_hero_height)
+        self.hero.bind('<Button-1>', lambda _e: self.edit_launcher_art(
+            'art_banner', _('Collection banner'), (1600, 450), 'banner'))
+        self.enable_image_drop(self.hero, lambda path: self.quick_art('art_banner', 'banner', path))
         shell = tk.Frame(page, bg=SURFACE)
         shell.pack(fill='both', expand=True, padx=self.px(22), pady=(self.px(6), self.px(10)))
         head = tk.Frame(shell, bg=SURFACE)
@@ -1017,6 +1211,7 @@ class Launcher:
             card.bind('<Double-Button-1>', lambda _e, k=key: (self.var('start').set(k), self.play()))
             card.bind('<Enter>', lambda _e, k=key: self._card_hover(k))
             card.bind('<Leave>', lambda _e, k=key: self._card_hover(None))
+            self.enable_image_drop(card, lambda path, k=key: self.quick_art(f'art_{k}', k, path))
             self.cards[key] = card
         cards.bind('<Configure>', self.fit_posters)
         tk.Frame(shell, bg=SURFACE, height=1).pack(fill='x', padx=self.px(22), pady=(self.px(4), self.px(8)))
@@ -1096,12 +1291,21 @@ class Launcher:
             card.create_image(x, 0, image=image, anchor='nw')
         else:
             card.create_rectangle(0, 0, w, h, fill=CARD, outline=LINE)
+        if hot:
+            label = _('Change image')
+            box_w = max(self.px(108), len(label) * self.px(7))
+            card.create_rectangle(w - box_w - self.px(12), self.px(12), w - self.px(12), self.px(42),
+                                  fill='#111214', outline=GOLD_DIM, tags='edit_art')
+            card.create_text(w - box_w // 2 - self.px(12), self.px(27), text=label, fill=TEXT,
+                             font=self.font_ui_sm, tags='edit_art')
+            card.tag_bind('edit_art', '<Button-1>', lambda _e, k=key: self.edit_launcher_art(
+                f'art_{k}', _('Change image'), (600, 900), k))
 
     def _sync_hero_height(self, _event=None):
         """Keep the header at the banner's 16:9 aspect ratio."""
         c = self.hero
         w = max(c.winfo_width(), 400)
-        h = max(self.px(180), min(self.px(280), int(w * 576 / 1024)))
+        h = max(self.px(160), min(self.px(230), int(w * 450 / 1600)))
         if int(c['height']) != h:
             c.configure(height=h)
         self.draw_hero()
@@ -1114,13 +1318,14 @@ class Launcher:
         start = self.var('start').get()
         title, subtitle = next((t, sub) for k, t, sub, _e in GAMES if k == start)
         game_dir = game_folder(self.current(), start)
-        key = (w, h, start, game_dir)
+        key = (w, h, start, game_dir, self.app.get('art_banner', ''))
         if self.banner_key != key:
             self.banner_key = key
             # The collection banner when this machine has it (launcher art is not distributed),
             # otherwise the background art of the player's own dump.
             self.banner_scaled = self.photo_collection_banner(w, h) or \
-                self.scaled_art(Path(game_dir or '.') / 'sce_sys' / 'pic1.png', w)
+                self.scaled_art(Path(game_dir or '.') / 'sce_sys' / 'pic1.png', w) or \
+                self.photo_hero(start, w, h)
             self.cover_image = None
         if self.banner_scaled:
             c.create_image(w // 2, h // 2, image=self.banner_scaled)
@@ -1132,6 +1337,9 @@ class Launcher:
                       font=self.font_brand_sm)
         c.create_text(w - self.px(24), h - self.px(14), text=f'{_(title)}  ·  {_(subtitle)}',
                       anchor='se', fill='#f6f1e6', font=self.font_brand_md)
+        label = _('Change image')
+        c.create_text(w - self.px(24), self.px(18), text=label, anchor='ne', fill='#d6c9ae',
+                      font=self.font_ui_sm)
 
     def photo_collection_banner(self, width, height):
         try:
@@ -1429,6 +1637,12 @@ class Launcher:
         for action, var in self.pad_vars.items():
             var.set(DEFAULT_PAD[action])
 
+    def build_fixes(self):
+        f = self.page('fixes', _('Fixes'), _('Fixes that cost speed. Automatic turns each one on only where it '
+                                             'helps; change one only when you see its problem.'))
+        for key, (title, hint, _choices) in FIXES.items():
+            self.row(f, _(title), self.choice(f, key, FIX_CHOICES, 16), _(hint))
+
     # ---- trophies ----------------------------------------------------------------------------
     def build_trophies(self):
         tk = self.tk
@@ -1587,8 +1801,19 @@ class Launcher:
                 pass
         self.root.after(1500, self.poll_trophies)
 
+    def build_cheats(self):
+        f = self.page('cheats', _('Cheats'), _('Each cheat only affects its own game; changes apply when the game starts.'))
+        for game, title, subtitle, _exe in GAMES:
+            self.section(f, f'{title} · {subtitle}')
+            self.check(f, f'{game}_infinite_health', _('Infinite Health'))
+            self.check(f, f'{game}_infinite_ammo', _('Infinite Ammo'))
+
     def build_advanced(self):
         f = self.page('advanced', _('Advanced'), '')
+        self.section(f, _('Launcher language'), top=2)
+        self.row(f, _('Interface language'),
+                 self.choice(f, 'ui_language', uncharted_i18n.LANGUAGES, 24, self.change_ui_language),
+                 _('This changes only the launcher. The game language is selected on the Game page.'))
         self.check(f, 'close_on_play', _('Close the launcher when the game starts'))
         extra = self.ttk.Entry(f, textvariable=self.var('extra_env'), width=60)
         self.row(f, _('Environment variables'), extra, _('NAME=value, space-separated.'))
@@ -1660,6 +1885,57 @@ class Launcher:
         self.draw_hero()
 
     # ---- actions -----------------------------------------------------------------------------
+    def change_ui_language(self):
+        """Save and rebuild every label as soon as the interface language changes."""
+        global UI_LANGUAGE
+        page = self.current_page or 'advanced'
+        self.collect()
+        UI_LANGUAGE = uncharted_i18n.language_code(self.app['ui_language'])
+        for child in self.root.winfo_children():
+            child.destroy()
+        self.vars = {}
+        self.build()
+        self.show(page)
+        self.refresh()
+        if self.process:
+            self.play_button.configure(state='disabled')
+            self.stop_button.configure(state='normal')
+
+    def configure_art(self):
+        import uncharted_art
+        uncharted_art.set_custom_art({
+            'collection_banner.jpg': self.app.get('art_banner', ''),
+            'u1.jpg': self.app.get('art_u1', ''),
+            'u2.jpg': self.app.get('art_u2', ''),
+            'u3.jpg': self.app.get('art_u3', ''),
+        }, {
+            'collection_banner.jpg': self.app.get('art_crops', {}).get('banner', {}),
+            'u1.jpg': self.app.get('art_crops', {}).get('u1', {}),
+            'u2.jpg': self.app.get('art_crops', {}).get('u2', {}),
+            'u3.jpg': self.app.get('art_crops', {}).get('u3', {}),
+        })
+
+    def quick_art(self, key, crop_key, path):
+        """Open a dropped image in the same crop editor used by click selection."""
+        try:
+            from PIL import Image
+            with Image.open(path) as image:
+                image.verify()
+        except (OSError, ValueError) as error:
+            self.messagebox.showerror(NAME, _('This image could not be opened: {}').format(error))
+            return
+        size = (1600, 450) if key == 'art_banner' else (600, 900)
+        title = _('Collection banner') if key == 'art_banner' else _('Change image')
+        self.edit_launcher_art(key, title, size, crop_key, str(Path(path)))
+
+    def change_art(self):
+        """Apply local artwork immediately while keeping the original as fallback."""
+        self.collect()
+        self.configure_art()
+        self.banner_key = self.banner_scaled = None
+        self.card_images = {}
+        self.refresh()
+
     def collect(self):
         for key, v in self.vars.items():
             self.app[key] = v.get()
@@ -1961,17 +2237,104 @@ class Launcher:
         self.messagebox.showinfo(NAME, _('Shader cache cleared. Expect stutter on the next launch.'))
 
     def shortcut(self):
-        """Uncharted.lnk on the desktop."""
+        """Configure the collection shortcut where the action happens."""
+        from PIL import Image, ImageTk
+
+        window = self.tk.Toplevel(self.root)
+        window.title(_('Desktop shortcut'))
+        window.configure(bg=PANEL)
+        window.transient(self.root)
+        window.grab_set()
+        window.resizable(False, False)
+        shell = self.tk.Frame(window, bg=PANEL)
+        shell.pack(padx=self.px(24), pady=self.px(22))
+        self.tk.Label(shell, text=_('Desktop shortcut'), bg=PANEL, fg=TEXT,
+                      font=self.font_title).grid(row=0, column=0, columnspan=2, sticky='w')
+        self.tk.Label(shell, text=_('Shortcut name'), bg=PANEL, fg=TEXT,
+                      font=self.font_ui).grid(row=1, column=0, sticky='w', pady=(18, 4))
+        name = self.tk.StringVar(value=self.app.get('shortcut_name', APP_DEFAULTS['shortcut_name']))
+        self.ttk.Entry(shell, textvariable=name, width=48).grid(row=2, column=0, columnspan=2, sticky='ew')
+        self.tk.Label(shell, text=_('Shortcut icon'), bg=PANEL, fg=TEXT,
+                      font=self.font_ui).grid(row=3, column=0, sticky='w', pady=(16, 4))
+        icon = self.tk.StringVar(value=self.app.get('shortcut_icon', ''))
+        preview = self.tk.Canvas(shell, width=self.px(112), height=self.px(112), bg=BG,
+                                 highlightthickness=2, highlightbackground=GOLD_DIM, cursor='hand2')
+        preview.grid(row=4, column=0, sticky='w')
+        photo = {'image': None}
+
+        def draw_icon(*_args):
+            preview.delete('all')
+            try:
+                with Image.open(icon.get()) as source:
+                    image = source.convert('RGBA')
+                    image.thumbnail((self.px(96), self.px(96)), Image.LANCZOS)
+                photo['image'] = ImageTk.PhotoImage(image)
+                preview.create_image(self.px(56), self.px(56), image=photo['image'])
+            except (OSError, ValueError, self.tk.TclError):
+                photo['image'] = None
+                preview.create_text(self.px(56), self.px(56), text=_('Original icon'), fill=MUTED,
+                                    font=self.font_ui_sm, width=self.px(86))
+
+        def choose_icon(candidate=''):
+            chosen = candidate or self.image_path(_('Shortcut icon'), icon.get())
+            if chosen:
+                try:
+                    with Image.open(chosen) as image:
+                        image.verify()
+                except (OSError, ValueError) as error:
+                    self.messagebox.showerror(NAME, _('This image could not be opened: {}').format(error))
+                    return
+                icon.set(chosen)
+
+        actions = self.tk.Frame(shell, bg=PANEL)
+        actions.grid(row=4, column=1, sticky='w', padx=(16, 0))
+        self.pill(actions, _('Choose image'), choose_icon, background=PANEL).pack(anchor='w')
+        self.pill(actions, _('Restore'), lambda: icon.set(''), kind='ghost', background=PANEL).pack(
+            anchor='w', pady=(6, 0))
+        buttons = self.tk.Frame(shell, bg=PANEL)
+        buttons.grid(row=5, column=0, columnspan=2, sticky='ew', pady=(18, 0))
+        self.pill(buttons, _('Cancel'), window.destroy, kind='ghost', background=PANEL).pack(side='right')
+
+        def create():
+            self.app['shortcut_name'] = name.get().strip() or APP_DEFAULTS['shortcut_name']
+            self.app['shortcut_icon'] = icon.get()
+            self.collect()
+            window.destroy()
+            self.create_shortcut()
+
+        self.pill(buttons, _('Create shortcut'), create, kind='primary', background=PANEL).pack(
+            side='right', padx=(0, 6))
+        preview.bind('<Button-1>', lambda _event: choose_icon())
+        self.enable_image_drop(preview, choose_icon)
+        icon.trace_add('write', draw_icon)
+        draw_icon()
+        window.bind('<Escape>', lambda _event: window.destroy())
+
+    def create_shortcut(self):
+        """Create the configured .lnk on the desktop."""
         if FROZEN:
             target, arguments, icon = sys.executable, '', f'{sys.executable},0'
         else:
             pythonw = Path(sys.executable).with_name('pythonw.exe')
             target = str(pythonw if pythonw.exists() else sys.executable)
             arguments, icon = Path(__file__).resolve(), PORT_DIR / 'launcher' / 'uncharted.ico'
-        script = ('$s=(New-Object -ComObject WScript.Shell).CreateShortcut([Environment]::GetFolderPath("Desktop")'
-                  '+"\\Uncharted.lnk");'
-                  f'$s.TargetPath="{target}";$s.WorkingDirectory="{PORT_DIR}";$s.IconLocation="{icon}";'
-                  + (f"$s.Arguments='\"{arguments}\"';" if arguments else '') + '$s.Save()')
+        custom_icon = self.app.get('shortcut_icon', '')
+        if custom_icon:
+            try:
+                from PIL import Image
+                CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+                icon = CONFIG_DIR / 'custom-shortcut.ico'
+                with Image.open(custom_icon) as image:
+                    image.convert('RGBA').save(icon, sizes=[(16, 16), (32, 32), (48, 48), (256, 256)])
+            except OSError as error:
+                self.messagebox.showerror(NAME, _('This image could not be opened: {}').format(error))
+                return
+        name = re.sub(r'[<>:"/\\|?*]', '', self.app.get('shortcut_name', '')).strip() or 'Uncharted'
+        ps = lambda value: "'" + str(value).replace("'", "''") + "'"
+        script = ('$desktop=[Environment]::GetFolderPath("Desktop");'
+                  f'$s=(New-Object -ComObject WScript.Shell).CreateShortcut($desktop+{ps(chr(92) + name + ".lnk")});'
+                  f'$s.TargetPath={ps(target)};$s.WorkingDirectory={ps(PORT_DIR)};$s.IconLocation={ps(icon)};'
+                  + (f'$s.Arguments={ps(chr(34) + str(arguments) + chr(34))};' if arguments else '') + '$s.Save()')
         result = subprocess.run(['powershell', '-NoProfile', '-Command', script], capture_output=True,
                                 creationflags=NO_WINDOW)
         if result.returncode == 0:
@@ -1980,7 +2343,97 @@ class Launcher:
             self.messagebox.showerror(NAME, result.stderr.decode(errors='replace')[:400])
 
     def add_to_steam(self):
-        """The collection in the Steam library (a non-Steam game that starts Uncharted.exe --play)."""
+        """Preview the collection art before writing the non-Steam shortcut."""
+        from PIL import Image, ImageTk
+        import uncharted_art
+
+        window = self.tk.Toplevel(self.root)
+        window.title(_('Add to Steam'))
+        window.configure(bg=PANEL)
+        window.transient(self.root)
+        window.grab_set()
+        window.resizable(False, False)
+        shell = self.tk.Frame(window, bg=PANEL)
+        shell.pack(padx=self.px(24), pady=self.px(22))
+        self.tk.Label(shell, text=_('Add collection to Steam'), bg=PANEL, fg=TEXT,
+                      font=self.font_title).grid(row=0, column=0, columnspan=3, sticky='w')
+        self.tk.Label(shell, text=_('Use one image and adjust each Steam format separately.'), bg=PANEL,
+                      fg=MUTED, font=self.font_ui).grid(row=1, column=0, columnspan=3, sticky='w', pady=(2, 14))
+        formats = [('portrait', _('Portrait'), (600, 900), (150, 225)),
+                   ('header', _('Header'), (920, 430), (230, 108)),
+                   ('hero', _('Hero'), (1920, 620), (300, 97))]
+        previews = {}
+        photos = {}
+        selected = {'path': self.app.get('steam_art', ''),
+                    'crops': {name: dict(self.app.get('art_crops', {}).get(f'steam_{name}', {}))
+                              for name, _label, _size, _preview in formats}}
+
+        def redraw():
+            for column, (name, label, size, preview_size) in enumerate(formats):
+                canvas = previews[name]
+                canvas.delete('all')
+                try:
+                    with Image.open(selected['path']) as source:
+                        image = uncharted_art.crop_image(
+                            source.convert('RGB'), preview_size, selected['crops'][name])
+                    photos[name] = ImageTk.PhotoImage(image)
+                    canvas.create_image(0, 0, image=photos[name], anchor='nw')
+                except (OSError, ValueError, self.tk.TclError):
+                    canvas.create_text(preview_size[0] // 2, preview_size[1] // 2,
+                                       text=_('Choose image'), fill=MUTED, font=self.font_ui_sm)
+                canvas.create_rectangle(1, 1, preview_size[0] - 2, preview_size[1] - 2,
+                                        outline=GOLD_DIM, width=2)
+
+        def choose(candidate=''):
+            chosen = candidate or self.image_path(_('Collection image'), selected['path'])
+            if chosen:
+                try:
+                    with Image.open(chosen) as image:
+                        image.verify()
+                except (OSError, ValueError) as error:
+                    self.messagebox.showerror(NAME, _('This image could not be opened: {}').format(error))
+                    return
+                selected['path'] = chosen
+                redraw()
+
+        def adjust(name, label, size):
+            result = self.edit_art('steam_art', label, size, f'steam_{name}',
+                                   initial_path=selected['path'], initial_crop=selected['crops'][name])
+            if result:
+                selected['path'], selected['crops'][name] = result
+                redraw()
+
+        for column, (name, label, size, preview_size) in enumerate(formats):
+            cell = self.tk.Frame(shell, bg=PANEL)
+            cell.grid(row=2, column=column, sticky='n', padx=(0 if column == 0 else 16, 0))
+            self.tk.Label(cell, text=label, bg=PANEL, fg=TEXT, font=self.font_ui_md).pack(anchor='w')
+            canvas = self.tk.Canvas(cell, width=preview_size[0], height=preview_size[1], bg=BG,
+                                    highlightthickness=0, cursor='hand2')
+            canvas.pack(pady=(6, 8))
+            previews[name] = canvas
+            canvas.bind('<Button-1>', lambda _e, n=name, l=label, s=size: adjust(n, l, s))
+            self.enable_image_drop(canvas, choose)
+            self.pill(cell, _('Adjust crop'), lambda n=name, l=label, s=size: adjust(n, l, s),
+                      background=PANEL, padding=(12, 6)).pack(anchor='w')
+        footer = self.tk.Frame(shell, bg=PANEL)
+        footer.grid(row=3, column=0, columnspan=3, sticky='ew', pady=(18, 0))
+        self.pill(footer, _('Choose image'), choose, background=PANEL).pack(side='left')
+        self.pill(footer, _('Cancel'), window.destroy, kind='ghost', background=PANEL).pack(side='right')
+
+        def add():
+            self.app['steam_art'] = selected['path']
+            self.app.setdefault('art_crops', {}).update(
+                {f'steam_{name}': crop for name, crop in selected['crops'].items()})
+            self.collect()
+            window.destroy()
+            self.perform_add_to_steam()
+
+        self.pill(footer, _('Add to Steam'), add, kind='primary', background=PANEL).pack(side='right', padx=(0, 6))
+        redraw()
+        window.bind('<Escape>', lambda _event: window.destroy())
+
+    def perform_add_to_steam(self):
+        """Write the collection shortcut and its user-selected artwork to Steam."""
         import bbport_steam
         steam = bbport_steam.steam_folder()
         configs = bbport_steam.user_configs(steam) if steam else []
@@ -2014,8 +2467,11 @@ class Launcher:
                 # Library pictures (cover, header, hero) from the box art of the player's game folder.
                 try:
                     import uncharted_art
-                    uncharted_art.steam_artwork(game_folder(self.app, 'u1') or game_folder(self.app, 'u2'), config / 'grid',
-                                                bbport_steam.shortcut_id(f'"{exe}"', title))
+                    uncharted_art.steam_artwork(
+                        game_folder(self.app, 'u1') or game_folder(self.app, 'u2'), config / 'grid',
+                        bbport_steam.shortcut_id(f'"{exe}"', title), self.app.get('steam_art', ''), {
+                            name: self.app.get('art_crops', {}).get(f'steam_{name}', {})
+                            for name in ('portrait', 'header', 'hero')})
                 except Exception:  # pictures are a nicety: the shortcut works without them
                     pass
         except (OSError, ValueError) as error:
@@ -2179,7 +2635,11 @@ def main():
         pass
     import tkinter as tk
     from tkinter import filedialog, messagebox, ttk
-    root = tk.Tk()
+    try:
+        from tkinterdnd2 import TkinterDnD
+        root = TkinterDnD.Tk()
+    except (ImportError, tk.TclError):
+        root = tk.Tk()
     Launcher(root, tk, ttk, filedialog, messagebox)
     root.mainloop()
 

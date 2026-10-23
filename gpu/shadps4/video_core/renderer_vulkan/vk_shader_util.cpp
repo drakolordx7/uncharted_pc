@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <utility>
-#include <cstdlib>
 #include <vector>
 #include "common/assert.h"
 #include "shader_recompiler/runtime_info.h"
@@ -118,6 +118,7 @@ vk::ShaderModule CompileSPV(std::span<const u32> code, vk::Device device) {
             code = patched;
         }
     }
+    std::vector<u32> movie_patched;
     if (code.size() > 5 && std::getenv("BB_GAME_RES")) {
         // Cheap pre-check before copying: the 1 / 1920 constant.
         float inv = 1.0f / 1920.0f;
@@ -130,8 +131,8 @@ vk::ShaderModule CompileSPV(std::span<const u32> code, vk::Device device) {
         if (has) {
             std::vector<u32> scaled(code.begin(), code.end());
             if (PatchMovieScale(scaled)) {
-                patched = std::move(scaled);
-                code = patched;
+                movie_patched = std::move(scaled);
+                code = movie_patched;
             }
         }
     }
