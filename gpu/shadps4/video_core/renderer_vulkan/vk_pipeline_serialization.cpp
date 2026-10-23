@@ -32,8 +32,8 @@ static constexpr u32 PipelineKeyVersion = 6u; // bbport: Info layout (ImageResou
 // bbport: translator options that change the shaders it produces are part of the stored version,
 // so switching one retranslates the shaders instead of reusing the cached ones.
 static u32 TranslatedBinaryVersion() {
-    // BB_WAVE_LDS_BARRIERS=0 changes the compute shaders of workgroups larger than one wave.
-    return ShaderBinaryVersion | (Shader::WaveLdsBarriers() ? 0u : 0x40000u);
+    // BB_WAVE_LDS_BARRIERS=1 changes the compute shaders of workgroups larger than one wave.
+    return ShaderBinaryVersion | (Shader::WaveLdsBarriers() ? 0x40000u : 0u);
 }
 } // namespace Serialization
 
