@@ -16,6 +16,7 @@ int runtime_memory_region(uintptr_t, uintptr_t*, uintptr_t*, int*) { std::abort(
 void runtime_memory_set_gpu_hooks(void (*)(uintptr_t, uint64_t),
     void (*)(uintptr_t, uint64_t), void (*)(uintptr_t, uint64_t)) { std::abort(); }
 void runtime_thread_attach_host(const char*) {}
+int runtime_thread_is_guest() { return 1; }
 void runtime_memory_gpu_protect(uintptr_t, uint64_t, int, int) { std::abort(); }
 void runtime_restart() { std::abort(); }
 uint64_t runtime_process_time_counter() { return runtime_process_time_us() * 1000; }

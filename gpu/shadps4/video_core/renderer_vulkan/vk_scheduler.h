@@ -912,6 +912,13 @@ private:
 
     void RecorderThread(std::stop_token stoken);
 
+public:
+    /// bbport: the calling thread is a scheduler's Vulkan recording thread (deferred fences and
+    /// their interrupts run there; nothing it calls may wait for that thread to go idle).
+    static bool OnRecorderThread();
+
+private:
+
     void SubmitExecution(SubmitInfo& info);
 
     void PriorityPendingOpsThread(std::stop_token stoken);

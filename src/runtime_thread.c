@@ -116,6 +116,9 @@ static GuestThread *new_thread(void) {
 static void publish(GuestThread *t) {
     pthread_mutex_lock(&lock); t->next=threads; threads=t; pthread_mutex_unlock(&lock);
 }
+/* Nonzero on a thread that runs guest code (created by the guest, or a host thread that has called
+ * into it); the port's own worker threads (GPU, Vulkan recording, copies) have no record. */
+int runtime_thread_is_guest(void) { return current!=NULL; }
 /* Host threads that call into guest code without being created by the guest
  * (the main thread, test threads) get a record on first use. */
 GuestThread *runtime_thread_current(void) {
