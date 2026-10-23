@@ -923,6 +923,13 @@ static int64_t find_unique_pattern(uint64_t image_size, const char *pattern) {
 static void patch_job_sleep(uint64_t image_size) {
     const char *env=getenv("BB_JOB_SLEEP");
     if (env && env[0]=='0') { printf("Job workers: spin while idle (BB_JOB_SLEEP=0)\n"); return; }
+#ifdef _WIN32
+    /* Sleeping workers free the cores of small CPUs, but cost ~8% in busy scenes on a 16-thread
+     * one (U3 Cartagena square: 87 vs 94 FPS). By default only up to 8 hardware threads;
+     * BB_JOB_SLEEP=1 forces it. */
+    const DWORD threads=GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+    if (!env && threads>8) { printf("Job workers: spin while idle (%lu hardware threads)\n",(unsigned long)threads); return; }
+#endif
     struct Patch {
         const char *name, *pattern;
         unsigned offset, original_size, size;

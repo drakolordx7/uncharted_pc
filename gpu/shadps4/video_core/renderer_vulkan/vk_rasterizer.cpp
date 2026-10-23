@@ -1776,8 +1776,9 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
 
 void Rasterizer::NoteSmallWrittenBuffers(const Shader::Info& stage) {
     static const bool enabled = [] {
+        // Off by default: in U3's Cartagena square it halved the frame rate (94 -> 46 FPS).
         const char* env = std::getenv("BB_READBACK_SMALL_BUFFERS");
-        return !(env && env[0] == '0');
+        return env && env[0] == '1';
     }();
     if (!enabled) {
         return;
