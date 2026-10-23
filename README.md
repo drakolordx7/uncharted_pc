@@ -60,7 +60,7 @@ request on the official repository.
 - Less CPU time spent waiting: the draw pipe sleeps instead of spinning, ignored predication no longer drains it, and barrier and register tracking do less work: Umar-Qayyum-dev, Mevlock
 - Uncharted 2 reuses texture sets and skinning data instead of rebuilding them: Umar-Qayyum-dev
 - A shader cache's meta and binary files must come from the same version (caches rebuild once): Mevlock
-- Job workers spin briefly before sleeping, which Mevlock found reduces Uncharted 3 lighting flashes: based on Mevlock's fork
+- Optional longer job-worker spin before sleeping, which Mevlock found reduces Uncharted 3 lighting flashes but costs FPS (`BB_JOB_SLEEP_SPINS=50000 BB_JOB_SLEEP_MS=1`): based on Mevlock's fork
 
 Each release lists its exact changes in the [release notes](https://github.com/drakolordx7/uncharted_pc/releases).
 
