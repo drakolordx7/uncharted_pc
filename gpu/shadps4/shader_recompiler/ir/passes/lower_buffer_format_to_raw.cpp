@@ -189,6 +189,36 @@ static void StoreBufferFormat(IR::IREmitter& ir, const IR::Value handle, const I
     }
 }
 
+/// bbport: the data and number format pairs LoadBufferFormat/StoreBufferFormat can convert
+/// (the IREmitter's unpack/pack helpers stop the game on any other).
+static bool SupportedBufferFormat(AmdGpu::DataFormat data, AmdGpu::NumberFormat num) {
+    using DF = AmdGpu::DataFormat;
+    using NF = AmdGpu::NumberFormat;
+    const bool integer_or_norm = num == NF::Unorm || num == NF::Snorm || num == NF::Uint ||
+                                 num == NF::Sint;
+    switch (data) {
+    case DF::Format8:
+    case DF::Format8_8:
+    case DF::Format8_8_8_8:
+        return integer_or_norm;
+    case DF::Format16:
+    case DF::Format16_16:
+    case DF::Format16_16_16_16:
+        return integer_or_norm || num == NF::Float;
+    case DF::Format10_11_11:
+        return num == NF::Float;
+    case DF::Format2_10_10_10:
+        return true; // other number formats fall back to unorm (IREmitter)
+    case DF::Format32:
+    case DF::Format32_32:
+    case DF::Format32_32_32:
+    case DF::Format32_32_32_32:
+        return num == NF::Uint || num == NF::Sint || num == NF::Float;
+    default:
+        return false;
+    }
+}
+
 static void LowerBufferFormatInst(IR::Block& block, IR::Inst& inst, Info& info) {
     IR::IREmitter ir{block, IR::Block::InstructionList::s_iterator_to(inst)};
     const auto flags = inst.Flags<IR::BufferInstInfo>();
@@ -212,8 +242,25 @@ static void LowerBufferFormatInst(IR::Block& block, IR::Inst& inst, Info& info) 
         .num_components = AmdGpu::NumComponents(data_format),
     };
 
-    if (data_format == AmdGpu::DataFormat::FormatInvalid) {
-        LOG_WARNING(Render_Recompiler, "Skipping lowering for null buffer sharp");
+    // bbport: a garbage buffer descriptor (U2 museum, a shader reading a resource table of
+    // nonsense: sizes in the billions, then "10_11_11 Sint") stopped the game in the shader
+    // compiler. The PS4 reads junk through it and goes on; such a binding is handled like a null
+    // one: loads read zero, stores are dropped.
+    const bool unsupported = data_format != AmdGpu::DataFormat::FormatInvalid &&
+                             !SupportedBufferFormat(data_format, format_info.num_format);
+    if (unsupported) {
+        static int reported = 0;
+        if (reported < 16) {
+            ++reported;
+            LOG_WARNING(Render_Recompiler,
+                        "Buffer format {} with number format {} unsupported: read as zero",
+                        data_format, format_info.num_format);
+        }
+    }
+    if (data_format == AmdGpu::DataFormat::FormatInvalid || unsupported) {
+        if (!unsupported) {
+            LOG_WARNING(Render_Recompiler, "Skipping lowering for null buffer sharp");
+        }
         if (IsBufferFormatLoad(inst)) {
             inst.ReplaceUsesWithAndRemove(
                 ir.CompositeConstruct(ir.Imm32(0.f), ir.Imm32(0.f), ir.Imm32(0.f), ir.Imm32(0.f)));
