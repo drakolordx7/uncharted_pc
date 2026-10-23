@@ -294,6 +294,10 @@ static volatile uint64_t zoom_camera_us;  /* last frame the zoom (aiming) camera
  * frame while the aim blends in (about 0.5 s), which cancelled the mouse. */
 static volatile float aim_target_total;
 static volatile uint64_t aim_target_us;
+/* The walking camera (last seen by follow_camera): it is not updated while the aim is held (the manager drops it from the stack), so the aiming camera hands its turns
+ * on to it directly, and it is where the aim looked when the game blends the aim out (it was left where it was before the aim, and pulled the picture back). */
+static volatile uint64_t follow_obj, follow_obj_us, follow_dir_off, follow_arc_off;
+static volatile float follow_arc_deg;
 static float camera_dx[CAMERA_QUEUES], camera_dy[CAMERA_QUEUES];
 /* U1: the camera time step (seconds, image+0xa4cb10 in CUSA02320 / CUSA02344 1.02) the cameras multiply
  * their speeds with; it is 0 while the game is paused, and the mouse must not turn anything then. */
@@ -348,6 +352,7 @@ static volatile int follow_direct=1;
 static float follow_kept=1.0f;            /* average fraction of a turn still there the next frame */
 static float follow_before, follow_after; /* heading before and after the last turn */
 static int follow_pending;
+static volatile uint64_t aim_blend_until_us; /* the aim is blended out for about a second after L2 is released: the zoom camera keeps the mouse until then */
 static volatile int aim_held;             /* L2 is held: the aiming camera (also while it blends in) */
 static volatile int look_held;            /* R3 is held: first-person look around, which turns like the aim */
 static float follow_target;               /* wanted heading (degrees) */
@@ -368,6 +373,7 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
         follow_moved_us=0;
     }
     camera_hook_us=now;
+    follow_obj=camera; follow_obj_us=now; follow_dir_off=dir_offset; follow_arc_off=arc_offset; follow_arc_deg=arc_degrees;
     float *dir=(float *)(uintptr_t)(camera+dir_offset);
     const float heading=heading_of(dir);
     float dx, dy;
@@ -1317,7 +1323,10 @@ static void __attribute__((ms_abi)) u1b_aim_camera(uint64_t unused0, uint64_t un
     if (vtable<0x10000 || ((const uint64_t *)(uintptr_t)vtable)[0x98/8]!=image+0xc43b0) return;
     const uint64_t now=now_us();
     zoom_camera_us=now;   /* the zoom camera runs: L1 (grenade) counts as an aim, see sample() */
-    if (!aim_held) return;
+    /* After the aim the game blends the zoom camera out for about a second (the picture = w x walking camera + (1-w) x zoom camera): it keeps
+     * the mouse's turns meanwhile, or it holds the picture where the player last looked while the walking camera, which has the mouse, turns. */
+    const int fading=!aim_held && now<aim_blend_until_us;
+    if (!aim_held && !fading) return;
     const uint64_t entry=*(const uint64_t *)(uintptr_t)(guest_callback_rsp-72);
     /* The picture while the aim blends in (about 0.5 s) is w x zoom camera + (1-w) x the cameras below it (w = the stack
      * entry's weight, float at entry+0x34, 0 -> 1 linearly; the manager's angle interpolation image+0xb2f00), and the
@@ -1358,6 +1367,20 @@ static void __attribute__((ms_abi)) u1b_aim_camera(uint64_t unused0, uint64_t un
         frame_turn=fade ? 0.0f : total_yaw-embedded_yaw;
         frame_turn_pitch=fade ? 0.0f : total_pitch-embedded_pitch;
         aim_target_total=wrap_degrees(aim_target_total+step); aim_target_us=now;
+        if (aim_held && follow_obj && now-follow_obj_us<60000000 && (step!=0.0f || step_pitch!=0.0f)) {   /* (the walking camera is not in the stack: it is turned here) */
+            float d[3]; float arc;
+            if (step!=0.0f && safe_read(d,follow_obj+follow_dir_off,12)) {
+                const float a=step*0.017453293f, c=SDL_cosf(a), s=SDL_sinf(a);
+                const float x=d[0], z=d[2];
+                d[0]=x*c-z*s; d[2]=x*s+z*c;
+                safe_write(follow_obj+follow_dir_off,d,12);
+            }
+            if (step_pitch!=0.0f && follow_arc_off && safe_read(&arc,follow_obj+follow_arc_off,4)) {
+                arc+=step_pitch/follow_arc_deg;
+                arc=arc<0.0f ? 0.0f : arc>1.0f ? 1.0f : arc;
+                safe_write(follow_obj+follow_arc_off,&arc,4);
+            }
+        }
     }
     aim_native_us=now;
     float *aim=(float *)(uintptr_t)(camera+0x1830);
@@ -1648,7 +1671,7 @@ static void __attribute__((ms_abi)) u1_joypad_sticks(uint64_t unused0, uint64_t 
     if (camera_stopped(image,u1_camera_dt_offset)) return; /* paused */
     if (aim_test<0.0f) { const char *t=getenv("BB_MOUSE_AIM_TEST"); aim_test=t ? (float)atof(t) : 0.0f; }
     float *pad=(float *)(uintptr_t)joypad_state;
-    if (!aim_held && !look_held) { float ix, iy; camera_take(2,&ix,&iy); }
+    if (!aim_held && !look_held && now_us()>=aim_blend_until_us) { float ix, iy; camera_take(2,&ix,&iy); }   /* (the zoom camera keeps the queue while the aim is blended out) */
     const int cover_native=cover_native_us && now-cover_native_us<100000;
     if (!cover_native) { float ix, iy; camera_take(3,&ix,&iy); } /* the cover camera's queue fills outside of the cover too */ /* the aiming camera's queue fills in free look too */
     if (mouse_debug() && getenv("BB_BUTTON_WATCH")) { /* TEMPORARY: who reads the persistent pad's button words (pressed +0x94, held +0x9c) */
@@ -4982,7 +5005,7 @@ static void sample_host(PadData *d) {
     const int native=u2_native_us && now-u2_native_us<100000; /* U2: the cover / look-around camera turns with the mouse */
     for (int q=0;q<CAMERA_QUEUES;++q) {
         /* queue 2 is the zoom camera's (U1 aiming): nothing else reads it, so it stays empty outside the aim */
-        if (captured && (following || joypad || native) && (q!=2 || aim_held || look_held)) { camera_dx[q]+=mdx; camera_dy[q]+=mdy; }
+        if (captured && (following || joypad || native) && (q!=2 || aim_held || look_held || now_us()<aim_blend_until_us)) { camera_dx[q]+=mdx; camera_dy[q]+=mdy; }
         else { camera_dx[q]=camera_dy[q]=0; }
     }
     /* gyro aiming: kept while aiming (at low frame rates the aim controller runs only every 100-200 ms) */
@@ -5167,6 +5190,7 @@ static void sample(PadData *d) {
     d->buttons|=injected.buttons;
     /* L2 aims; L1 (grenade) aims with the same zoom camera, but only once that camera runs (L1 without a grenade does nothing) */
     aim_held=(d->buttons & BTN_L2)!=0 || ((d->buttons & BTN_L1) && zoom_camera_us && now_us()-zoom_camera_us<100000);
+    if (aim_held) aim_blend_until_us=now_us()+1300000;
     look_held=(d->buttons & (BTN_R3|BTN_UP))!=0; /* U1: the d-pad up (V) looks around */
     if (!aim_held) { aim_target_total=0.0f; aim_session_reset=1; }
     if (mouse_debug()) { /* the pad the game gets, when it changes (jetski: which buttons stop it) */
