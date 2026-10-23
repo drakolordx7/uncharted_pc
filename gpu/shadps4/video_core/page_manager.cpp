@@ -15,6 +15,9 @@
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
+extern "C" void runtime_memory_gpu_protect(uintptr_t address, uint64_t size, int read, int write);
+extern "C" int runtime_thread_is_guest(void); // runtime_thread.c
+
 #ifndef _WIN64
 #include <sys/mman.h>
 #include "common/adaptive_mutex.h"
@@ -119,6 +122,20 @@ struct PageManager::Impl {
             return rasterizer->OnWriteFault(addr, is_gpu_thread);
         } else {
             BbStats::read_faults.fetch_add(1, std::memory_order_relaxed);
+            // bbport: with precise read-backs (BB_READBACKS=2) the port's own worker threads read
+            // guest memory too (the Vulkan recording thread's small guest copies): a read-back
+            // there waited for the GPU command thread, which was draining the draw pipe, whose
+            // recording thread waited for those copies (U2 froze). They read guest memory as it
+            // is, as without precise read-backs; the game's threads get the GPU data.
+            if (!is_gpu_thread && !runtime_thread_is_guest()) {
+                if (!rasterizer->IsMapped(addr, 8)) {
+                    return false;
+                }
+                const VAddr page = addr & ~VAddr{4095};
+                const bool writable = rasterizer->GetBufferCache().IsRegionCpuModified(page, 4096);
+                runtime_memory_gpu_protect(page, 4096, 1, writable ? 1 : 0);
+                return true;
+            }
             BbStats::Timer timer{BbStats::t_read_faults};
             return rasterizer->ReadMemory(addr, 8, is_gpu_thread);
         }
