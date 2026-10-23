@@ -3,10 +3,14 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
+#include <deque>
+#include <functional>
+#include <mutex>
 #include <thread>
-
 #include "common/assert.h"
+#include "common/thread.h"
 #include "common/elf_info.h"
 #include "common/logging/log.h"
 #include "core/emulator_settings.h"
@@ -17,6 +21,7 @@
 #include "core/libraries/videoout/videoout_error.h"
 #include "core/platform.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
+#include "video_core/renderer_vulkan/vk_scheduler.h"
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
 
@@ -347,6 +352,50 @@ s32 PS4_SYSV_ABI sceVideoOutGetBufferLabelAddress(s32 handle, uintptr_t* label_a
     return 16;
 }
 
+namespace {
+/// bbport: submits end-of-pipe flips raised on the Vulkan recording thread (see below), in the
+/// order they were raised. Started on first use.
+class EopFlipWorker {
+public:
+    static void Post(std::function<void()> work) {
+        static EopFlipWorker worker;
+        static std::atomic<u32> posted{0};
+        if (posted.fetch_add(1, std::memory_order_relaxed) == 0) {
+            std::printf("VideoOut: an end-of-pipe flip was raised on the Vulkan recording thread: "
+                        "submitted by its own thread\n");
+        }
+        {
+            std::scoped_lock lock{worker.mutex};
+            worker.queue.push_back(std::move(work));
+        }
+        worker.cv.notify_one();
+    }
+
+private:
+    EopFlipWorker() {
+        thread = std::jthread([this](std::stop_token token) {
+            Common::SetCurrentThreadName("bb:EopFlip");
+            while (true) {
+                std::function<void()> work;
+                {
+                    std::unique_lock lock{mutex};
+                    if (!cv.wait(lock, token, [this] { return !queue.empty(); })) {
+                        return;
+                    }
+                    work = std::move(queue.front());
+                    queue.pop_front();
+                }
+                work();
+            }
+        });
+    }
+    std::mutex mutex;
+    std::condition_variable_any cv;
+    std::deque<std::function<void()>> queue;
+    std::jthread thread;
+};
+} // namespace
+
 s32 sceVideoOutSubmitEopFlip(s32 handle, u32 buf_id, u32 mode, s64 flip_arg, void** unk) {
     auto* port = driver->GetPort(handle);
     if (!port) {
@@ -361,26 +410,39 @@ s32 sceVideoOutSubmitEopFlip(s32 handle, u32 buf_id, u32 mode, s64 flip_arg, voi
     Platform::IrqC::Instance()->RegisterOnce(
         Platform::InterruptId::GfxFlip, [=](Platform::InterruptId irq) {
             ASSERT_MSG(irq == Platform::InterruptId::GfxFlip, "An unexpected IRQ occured");
-            // bbport: the label write and this IRQ can arrive out of order (the write may still
-            // be on its way from the draw recording thread). This stopped the game ("Out of order
-            // flip IRQ"). Wait briefly for the label, then flip anyway: at worst a frame is shown
-            // twice, and the game still gets its flip event. From Awaken's port.
-            if (port->buffer_labels[buf_id] != 1) {
-                const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(20);
-                while (reinterpret_cast<volatile u64&>(port->buffer_labels[buf_id]) != 1 &&
-                       std::chrono::steady_clock::now() < deadline) {
-                    std::this_thread::yield();
-                }
+            const auto submit = [=] {
+                // bbport: the label write and this IRQ can arrive out of order (the write may still
+                // be on its way from the draw recording thread). This stopped the game ("Out of order
+                // flip IRQ"). Wait briefly for the label, then flip anyway: at worst a frame is shown
+                // twice, and the game still gets its flip event. From Awaken's port.
                 if (port->buffer_labels[buf_id] != 1) {
-                    static std::atomic<u32> reported{0};
-                    if (reported.fetch_add(1, std::memory_order_relaxed) < 5) {
-                        std::printf("VideoOut: flip IRQ for buffer %u before its label was set; "
-                                    "flipping anyway\n", buf_id);
+                    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(20);
+                    while (reinterpret_cast<volatile u64&>(port->buffer_labels[buf_id]) != 1 &&
+                           std::chrono::steady_clock::now() < deadline) {
+                        std::this_thread::yield();
+                    }
+                    if (port->buffer_labels[buf_id] != 1) {
+                        static std::atomic<u32> reported{0};
+                        if (reported.fetch_add(1, std::memory_order_relaxed) < 5) {
+                            std::printf("VideoOut: flip IRQ for buffer %u before its label was set; "
+                                        "flipping anyway\n", buf_id);
+                        }
                     }
                 }
+                const auto result = driver->SubmitFlip(port, buf_id, flip_arg, true);
+                ASSERT_MSG(result, "EOP flip submission failed");
+            };
+            // bbport: end-of-pipe fences (and this interrupt) may be signalled on the Vulkan
+            // recording thread (RecorderFences). The flip prepares a frame there, which waits
+            // for that same thread to go idle: it waited for itself and the game froze (players'
+            // U2 freezes on death and at cutscene/movie changes; stall report stacks). Such
+            // flips are submitted, in order, by a thread of their own, as the game's own
+            // sceVideoOutSubmitFlip calls are.
+            if (Vulkan::Scheduler::OnRecorderThread()) {
+                EopFlipWorker::Post(submit);
+            } else {
+                submit();
             }
-            const auto result = driver->SubmitFlip(port, buf_id, flip_arg, true);
-            ASSERT_MSG(result, "EOP flip submission failed");
         });
 
     return ORBIS_OK;
