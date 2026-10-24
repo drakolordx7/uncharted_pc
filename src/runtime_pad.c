@@ -287,6 +287,7 @@ static pthread_mutex_t camera_lock=PTHREAD_MUTEX_INITIALIZER;
  * cameras do not use the follow camera's direction). */
 #define CAMERA_QUEUES 4                /* 0 follow camera, 1 joypad sticks, 2 aiming / look camera, 3 cover camera */
 static volatile uint64_t cover_native_us; /* last frame the cover camera was turned by the mouse */
+#define COVER_RECENT_US 30000 /* the cover camera counts as running for this long after its last frame (a few frames: when its blend-out ends the mouse goes back to the walking camera at once) */
 static volatile float cover_dir_x, cover_dir_z; /* the cover camera's direction (x z), kept for the follow camera */
 static volatile float cover_last_step;          /* the turn (degrees) the cover camera was given this frame, and when: the camera manager's hook adds the rest while it blends in */
 static volatile uint64_t cover_last_us;
@@ -382,7 +383,7 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
     const float heading=heading_of(dir);
     float dx, dy;
     camera_take(0,&dx,&dy);
-    if (cover_native_us && now-cover_native_us<100000 && !aim_held && !look_held) {
+    if (cover_native_us && now-cover_native_us<COVER_RECENT_US && !aim_held && !look_held) {
         /* While the cover camera has the mouse the walking camera is kept behind it (its direction is the cover camera's, reversed; measured):
          * the game blends the cover camera out over about a second after the cover, and the walking camera, left at the direction it had
          * before the cover, pulled the picture back to the place where the player last looked. */
@@ -391,7 +392,7 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
         if (mouse_debug()) { static unsigned n; if (n++<400) printf("Mouse: coversync t=%.4f before=%.2f lastwritten=%.2f\n",now*1e-6,heading,written); }
         if (cl>0.5f && fl>0.01f) { dir[0]=-cover_dir_x/cl*fl; dir[2]=-cover_dir_z/cl*fl; written=heading_of(dir); }
     }
-    if (aim_held || look_held || (cover_native_us && now-cover_native_us<100000)) { follow_moved_us=0; follow_pending=0; follow_push=0.0f; return; } /* the aiming / look / cover camera takes the mouse */
+    if (aim_held || look_held || (cover_native_us && now-cover_native_us<COVER_RECENT_US)) { follow_moved_us=0; follow_pending=0; follow_push=0.0f; return; } /* the aiming / look / cover camera takes the mouse */
     if (stopped) { follow_moved_us=0; follow_pending=0; follow_push=0.0f; follow_correction=0.0f; return; } /* paused */
     if (follow_pending) {
         float kept=wrap_degrees(heading-follow_before)/wrap_degrees(follow_after-follow_before);
@@ -1695,7 +1696,7 @@ static void __attribute__((ms_abi)) u1_joypad_sticks(uint64_t unused0, uint64_t 
     if (aim_test<0.0f) { const char *t=getenv("BB_MOUSE_AIM_TEST"); aim_test=t ? (float)atof(t) : 0.0f; }
     float *pad=(float *)(uintptr_t)joypad_state;
     if (!aim_held && !look_held && now_us()>=aim_blend_until_us) { float ix, iy; camera_take(2,&ix,&iy); }   /* (the zoom camera keeps the queue while the aim is blended out) */
-    const int cover_native=cover_native_us && now-cover_native_us<100000;
+    const int cover_native=cover_native_us && now-cover_native_us<COVER_RECENT_US;
     if (!cover_native) { float ix, iy; camera_take(3,&ix,&iy); } /* the cover camera's queue fills outside of the cover too */ /* the aiming camera's queue fills in free look too */
     if (mouse_debug() && getenv("BB_BUTTON_WATCH")) { /* TEMPORARY: who reads the persistent pad's button words (pressed +0x94, held +0x9c) */
         static uint64_t t0, last_summary;
