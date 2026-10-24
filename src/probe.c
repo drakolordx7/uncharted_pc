@@ -934,10 +934,11 @@ static void patch_job_sleep(uint64_t image_size) {
     if (env && env[0]=='0') { printf("Job workers: spin while idle (BB_JOB_SLEEP=0)\n"); return; }
 #ifdef _WIN32
     /* Sleeping workers free the cores of small CPUs, but cost ~8% in busy scenes on a 16-thread
-     * one (U3 Cartagena square: 87 vs 94 FPS). By default only up to 8 hardware threads;
+     * one (U3 Cartagena square: 87 vs 94 FPS). By default up to 12 hardware threads (6-core CPUs
+     * such as the i5-10400 doubled their CPU load without it, fork issue #3);
      * BB_JOB_SLEEP=1 forces it. */
     const DWORD threads=GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
-    if (!env && threads>8) { printf("Job workers: spin while idle (%lu hardware threads)\n",(unsigned long)threads); return; }
+    if (!env && threads>12) { printf("Job workers: spin while idle (%lu hardware threads)\n",(unsigned long)threads); return; }
 #endif
     struct Patch {
         const char *name, *pattern;
