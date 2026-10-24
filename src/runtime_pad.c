@@ -4862,8 +4862,10 @@ static void u2_data_snapshot(void) {
 #define U2_HINT_W 250.0f
 #define U2_HINT_H 46.0f
 /* The game's language for the bindings window and the row label: 0 English, 1 French, 2 Spanish, 3 Portuguese (BB_LANGUAGE is the console's number). */
+static int u2_text_lang=-1;   /* set from the game's own text of the Commandes row (the language is chosen in the game's Options > Language, live): 0 English, 1 French, 2 Spanish, 3 Portuguese */
 static int u2_ui_language(void) {
     static int language=-1;
+    if (u2_text_lang>=0) { if (language!=u2_text_lang) { language=u2_text_lang; bbgpu_set_language(language); } return language; }
     if (language<0) {
         const char *e=getenv("BB_LANGUAGE");
         const int id=e && *e ? atoi(e) : 1;
@@ -4923,9 +4925,9 @@ static void u2_keys_label_patch(uint64_t now) {
         if (enabled<0) { const char *e=getenv("BB_U2_KEYS_ROW"); enabled=e && e[0]=='1'; }
         if (!enabled && !u2_row_inserted) { u2_keys_patched=0; return; }
     }
-    const int lang=u2_ui_language();
-    const char *label=lang==1 ? "Touches clavier / souris" : lang>=2 ? "Teclado / Mouse" : "Keyboard / Mouse";
     int ok=0;
+    int lang=u2_ui_language();
+    const char *label=NULL;
     for (int ti=0;ti<8;++ti) {
         uint64_t t=u2_keys_tables[ti];
         for (int depth=0;t && depth<6;++depth) {
@@ -4951,6 +4953,18 @@ static void u2_keys_label_patch(uint64_t now) {
                         }
                     }
                     for (uint32_t i=0;i<count;++i) if (arr[2*i]==U2_KEYS_TEXT_ID) {
+                        {   /* the game's own text of the row tells whether the menus are in English, whatever BB_LANGUAGE says */
+                            char orig[48]={0};
+                            size_t on=sizeof(orig)-1;
+                            while (on>0 && !safe_read(orig,base+arr[2*i+1],on)) --on;
+                            orig[on]=0;
+                            if (on>=4) {
+                                const int found=!strncmp(orig,"Controller Layout",17) ? 0 : strstr(orig,"ommandes") ? 1 : !strncmp(orig,"Layout do",9) ? 3 : 2;   /* (the dump has four languages) */
+                                if (found!=u2_text_lang) { u2_text_lang=found; printf("Runtime: U2 menu text \"%s\": language %d\n",orig,found); }
+                                lang=u2_ui_language();
+                            }
+                        }
+                        label=lang==1 ? "Touches clavier / souris" : lang>=2 ? "Teclado / Mouse" : "Keyboard / Mouse";
                         /* No memory of ours can be reached by a 32-bit offset from the table (the emulator owns the whole range around it): the label
                          * is written over the text of another id, one that is never shown here (the PlayStation Network chat restriction message, long
                          * enough in the four languages), and the entry of our id is pointed at it. */
