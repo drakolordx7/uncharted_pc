@@ -231,7 +231,8 @@ def main():
     # Uncharted 2 reads the results of GPU work (grenade explosions, vehicle damage, the convoy
     # of chapter 21) from memory it also writes: merging leaves them on the GPU, so it runs with
     # accurate GPU memory (BB_GPU_MERGE=0) unless the player chose otherwise.
-    # Its aim and turret blur reads tiny render results back (BB_TINY_READBACK, ~13% elsewhere).
+    # Aim and turret blur: the game reads a tiny render result (focus depth) on the CPU, so it is read back
+    # (BB_TINY_READBACK). On for U2 and U3: no measurable cost in U3 (square and chateau fight). U1 unchanged.
     player_merge = env.get('BB_GPU_MERGE')
     player_tiny = env.get('BB_TINY_READBACK')
     player_small = env.get('BB_READBACK_SMALL_BUFFERS')
@@ -244,10 +245,10 @@ def main():
             else:
                 env.pop('BB_GPU_MERGE', None)
         if player_tiny is None:
-            env['BB_TINY_READBACK'] = '1' if exe == EXECUTABLES['u2'] else '0'
-        # Its weapons need the small results the GPU writes (a few bytes the CPU reads back) to reach
-        # guest memory: without it guns draw black and untextured. Off elsewhere (it halves U3's
-        # frame rate in Cartagena square).
+            env['BB_TINY_READBACK'] = '1' if exe in (EXECUTABLES['u2'], EXECUTABLES['u3']) else '0'
+        # Weapons need the small results the GPU writes (a few bytes the CPU reads back) to reach
+        # guest memory: without it guns draw black and untextured. On for U2 only: in U3 it costs 30-37%
+        # (Cartagena square 72 -> 45 FPS, chateau fight 87 -> 62), so U3 players turn it on in the launcher.
         if player_small is None:
             env['BB_READBACK_SMALL_BUFFERS'] = '1' if exe == EXECUTABLES['u2'] else '0'
         # Its mesh raycaster copies land in guest memory too (iSubMesh after checkpoints).
