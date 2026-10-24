@@ -299,6 +299,7 @@ static float orbit_r=3.0f, orbit_s=1.0f;              /* the walking camera's di
 static volatile uint64_t zoom_camera_us;  /* last frame the zoom (aiming) camera was updated */
 static volatile uint64_t u2_zoom_top_us;   /* U2: the zoom camera runs on top of the stack (the aim, but also the whole of the truck turret sequence, with the aim button released) */
 static volatile uint64_t u2_zoom_below_cover_us;
+static volatile uint64_t u2_look_seen_us, u2_zoom_below_look_us;
 static volatile uint64_t u2_follow_seen_us, u2_zoom_under_us; /* U2: the walking camera was updated just before the zoom camera = the zoom camera is under it, blending out (L2 held in a roll): not an aim */
 #define U2_FOLLOW_RESYNC_US 150000u /* the walking camera away for longer than this = an animation held the picture: no catch-up afterwards (its normal call interval measured 30 to 60 ms in the climbing sequences) */
 /* The mouse's yaw since the aim began (degrees, positive to the right): the game's message that aligns the camera with the
@@ -811,6 +812,7 @@ static void u2_zoom_camera(uint64_t camera, uint64_t image) {
     { const uint64_t t=now_us(); first_frame=t-last_frame_us>300000; last_frame_us=t; }
     /* (after the aim the game blends the zoom camera out for about a second: it keeps the mouse meanwhile, or the picture holds still) */
     if ((!aim_held && now_us()>=aim_blend_until_us) || look_held) return;
+    if (!aim_held && u2_zoom_below_look_us && now_us()-u2_zoom_below_look_us<100000) return;   /* hidden under the shield's look camera: the emulated stick turns the picture */
     float step, step_pitch;
     if (!u2_mouse_turn(&u2_zoom_turn,2,1,u2_frame_dt(image),input.mouse_aim_sensitivity,-1.0f,&step,&step_pitch)) return;
     u2_native_us=now_us();
@@ -1156,7 +1158,7 @@ static void __attribute__((ms_abi)) u2b_camera_hook(uint64_t unused0, uint64_t u
     }
     switch (update-image) {
     case U2B_UPDATE_COVER: u2_cover_camera(camera,image); break;
-    case U2B_UPDATE_LOOK: u2_look_camera(camera,image); break;
+    case U2B_UPDATE_LOOK: u2_look_seen_us=now_us(); u2_look_camera(camera,image); break;
     case 0x4496b0: u2_chase_camera(camera,image); break;
     case U2B_UPDATE_FOLLOW: /* walking: the follow camera's direction (+0x9ec0) and vertical arc (+0x9e60), as in the earlier U2 build */
     {
@@ -1250,6 +1252,7 @@ static void __attribute__((ms_abi)) u2b_camera_hook(uint64_t unused0, uint64_t u
         zoom_camera_us=now_us();
         if (u2_follow_seen_us && zoom_camera_us-u2_follow_seen_us<3000) u2_zoom_under_us=zoom_camera_us;
         else if (u2_cover_seen_us && zoom_camera_us-u2_cover_seen_us<3000) u2_zoom_below_cover_us=zoom_camera_us;   /* (aim released in cover: the cover camera is on top, the zoom camera blends out beneath it) */
+        else if (u2_look_seen_us && zoom_camera_us-u2_look_seen_us<3000) { u2_zoom_below_cover_us=zoom_camera_us; u2_zoom_below_look_us=zoom_camera_us; }   /* (aim released while holding a shield: the look camera 0x432450 is on top; it takes no native mouse, so the hidden zoom camera must not keep it either) */
         else u2_zoom_top_us=zoom_camera_us;
         u2_zoom_camera(camera,image);
         break;
