@@ -220,13 +220,14 @@ def main():
         if player_tiny is None:
             env['BB_TINY_READBACK'] = '1' if exe in (EXECUTABLES['u2'], EXECUTABLES['u3']) else '0'
         # Weapons need the small results the GPU writes (a few bytes the CPU reads back) to reach
-        # guest memory: without it guns draw black and untextured. On for U2 only: in U3 it costs 30-37%
-        # (Cartagena square 72 -> 45 FPS, chateau fight 87 -> 62), so U3 players turn it on in the launcher.
+        # guest memory: without it guns draw black and untextured (and, reported for U3, characters
+        # sink into the ground: #601, #590). On for U2 and U3: the bytes land on the landing thread
+        # once the GPU is done with them, so nothing waits (U3 Cartagena square: 60 FPS with and without).
         if player_small is None:
-            env['BB_READBACK_SMALL_BUFFERS'] = '1' if exe == EXECUTABLES['u2'] else '0'
-        # Its mesh raycaster copies land in guest memory too (iSubMesh after checkpoints).
-        # U1 needs them as well (iSubMesh crashes in the Customs House and cutscenes, jet ski
-        # grenades). Off in U3: it cost 94 -> 54 FPS in the Cartagena square.
+            env['BB_READBACK_SMALL_BUFFERS'] = '1' if exe in (EXECUTABLES['u2'], EXECUTABLES['u3']) else '0'
+        # The mesh raycaster copies land in guest memory too (iSubMesh after checkpoints; U1 crashes
+        # in the Customs House and cutscenes without it). On for U1 and U2: -9 to -16% at 110-130 FPS
+        # in U1, so none at 60. Off in U3: it cost 94 -> 54 FPS in Cartagena square.
         if player_copy is None:
             copy_on = exe in (EXECUTABLES['u1'], EXECUTABLES['u2'])
             env['BB_SCALAR_COPY64_SYNC'] = '2' if copy_on else '0'
