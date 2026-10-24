@@ -189,7 +189,7 @@ FIXES = {
         {'on': {'BB_VRAM_LEGACY': '0'}, 'off': {'BB_VRAM_LEGACY': '1'}}),
     'fix_job_sleep': (
         'Idle game workers sleep',
-        'Frees CPU cores while the game\'s workers wait. Automatic: on for CPUs with up to 8 threads; '
+        'Frees CPU cores while the game\'s workers wait. Automatic: on for CPUs with up to 12 threads; '
         'on bigger CPUs it cost about 8%.',
         {'on': {'BB_JOB_SLEEP': '1'}, 'off': {'BB_JOB_SLEEP': '0'}}),
     'fix_thread_prio': (
