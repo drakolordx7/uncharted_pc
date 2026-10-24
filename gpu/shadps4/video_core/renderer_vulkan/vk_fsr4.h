@@ -50,6 +50,12 @@ public:
     /// Assets or device features are missing: FSR 4 will not run in this session.
     [[nodiscard]] bool Fatal() const noexcept;
 
+    /// The FSR 4 v07 assets (fsr4_shaders/ or BB_FSR4_DIR, from
+    /// tools/fetch_fsr4_assets.sh) are present. Checked at startup so the menu never offers FSR 4
+    /// without them: switching to it then failed and fell back to FSR 3.1, destroying and
+    /// recreating the FSR 3 context and frame generation in the middle of a game.
+    [[nodiscard]] static bool AssetsPresent();
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl;

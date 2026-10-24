@@ -36,6 +36,11 @@ bool ReadFile(const std::string& path, std::vector<u8>& data) {
     return bool(file.read(reinterpret_cast<char*>(data.data()), std::streamsize(data.size())));
 }
 
+bool FileExists(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    return bool(file);
+}
+
 FfxFsr4ModelPreset ModelPreset(int preset) {
     switch (preset) {
     case 0:
@@ -52,6 +57,14 @@ FfxFsr4ModelPreset ModelPreset(int preset) {
 }
 
 } // namespace
+
+bool Fsr4Upscaler::AssetsPresent() {
+    // The native model's manifest and the shared post passes: fetch_fsr4_assets.sh writes every
+    // model; a partial set still falls back per preset in Record.
+    const std::string dir = AssetDir() + "/";
+    return FileExists(dir + "fsr4_model_v07_i8_native_shader_manifest.json") &&
+           FileExists(dir + "rcas.spv");
+}
 
 struct Fsr4Upscaler::Impl {
     const Instance& instance;
