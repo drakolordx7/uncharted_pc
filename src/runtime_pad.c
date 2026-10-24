@@ -600,7 +600,15 @@ static void quat_mul(const float *a, const float *b, float *o) { /* quaternions 
  * that ramps up (camera+0x1f0), and lowers its pitch (degrees, camera+0x1b0, limits -[shape+0xc]..[shape+8], shape = *(camera+0x1290))
  * by stick y; the mouse turns the two values directly just before, as in U1. */
 static U2Turn u2_cover_turn;
+static uint64_t u2_cover_seen_us, u2_cover_seen_camera;   /* (debug) the last cover camera update and its direction, to compare with where an aim starts */
+static float u2_cover_seen_dir[3], u2_cover_seen_pitch;
 static void u2_cover_camera(uint64_t camera, uint64_t image) {
+    {
+        const float *sd=(const float *)(uintptr_t)(camera+0x1c0);
+        u2_cover_seen_us=now_us(); u2_cover_seen_camera=camera;
+        u2_cover_seen_dir[0]=sd[0]; u2_cover_seen_dir[1]=sd[1]; u2_cover_seen_dir[2]=sd[2];
+        u2_cover_seen_pitch=*(const float *)(uintptr_t)(camera+0x1b0);
+    }
     if (aim_native || look_held) return;   /* (L2 held without the aiming camera running, in a roll or between two covers, is not an aim) */
     float step, step_pitch;
     if (!u2_mouse_turn(&u2_cover_turn,3,camera,u2_frame_dt(image),1.0f,0.0f,&step,&step_pitch)) return;
@@ -735,11 +743,31 @@ static void u2_chase_camera(uint64_t camera, uint64_t image) {
  * directly just before the update. Two zoom cameras (one per shoulder) are updated while the shoulder switches: both get the same turn. */
 static U2Turn u2_zoom_turn;
 static void u2_zoom_camera(uint64_t camera, uint64_t image) {
+    if (mouse_debug()) { /* the first frame of an aim: the game's aim vector, the previous output's orientation, and the last cover camera's direction */
+        static uint64_t last_us; const uint64_t t=now_us();
+        if (t-last_us>300000) {
+            const float *d0=(const float *)(uintptr_t)(camera+0x1f30), *q0=(const float *)(uintptr_t)(guest_callback_rsp+0xe0+0x10);
+            const float *p0=(const float *)(uintptr_t)(guest_callback_rsp+0xe0);
+            printf("Mouse: u2 AIMSTART cam %#llx d=(%.3f %.3f %.3f) angle=%.1f q=(%.3f %.3f %.3f %.3f) pos=(%.2f %.2f %.2f) cover age=%.3fs cam %#llx dir=(%.3f %.3f %.3f) angle=%.1f pitch=%.2f\n",
+                   (unsigned long long)camera,d0[0],d0[1],d0[2],SDL_atan2f(d0[2],d0[0])*57.29578f,q0[0],q0[1],q0[2],q0[3],p0[0],p0[1],p0[2],
+                   u2_cover_seen_us ? (t-u2_cover_seen_us)*1e-6 : -1.0,(unsigned long long)u2_cover_seen_camera,
+                   u2_cover_seen_dir[0],u2_cover_seen_dir[1],u2_cover_seen_dir[2],SDL_atan2f(u2_cover_seen_dir[2],u2_cover_seen_dir[0])*57.29578f,u2_cover_seen_pitch);
+        }
+        last_us=t;
+    }
+    /* The first frame of an aim: the mouse motion queued meanwhile (the queue 2 is only emptied by an aiming or looking camera, so it held every turn made
+     * in the cover just before: steps of 30 to 70 degrees measured) is thrown away, or the aim leaps away from where the picture was. */
+    static uint64_t last_frame_us; int first_frame=0;
+    { const uint64_t t=now_us(); first_frame=t-last_frame_us>300000; last_frame_us=t; }
     /* (after the aim the game blends the zoom camera out for about a second: it keeps the mouse meanwhile, or the picture holds still) */
     if ((!aim_held && now_us()>=aim_blend_until_us) || look_held) return;
     float step, step_pitch;
     if (!u2_mouse_turn(&u2_zoom_turn,2,1,u2_frame_dt(image),input.mouse_aim_sensitivity,-1.0f,&step,&step_pitch)) return;
     u2_native_us=now_us();
+    if (first_frame) {
+        step=step_pitch=0.0f;
+        u2_zoom_turn.pending_yaw=u2_zoom_turn.pending_pitch=u2_zoom_turn.frame_yaw=u2_zoom_turn.frame_pitch=0.0f;   /* (the second shoulder camera of the frame reads these too) */
+    }
     if (step==0.0f && step_pitch==0.0f) return;
     float *d=(float *)(uintptr_t)(camera+0x1f30);
     if (!(d[0]>-1.5f && d[0]<1.5f && d[1]>-1.5f && d[1]<1.5f && d[2]>-1.5f && d[2]<1.5f)) return; /* a new camera: not set yet */
