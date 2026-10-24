@@ -395,6 +395,15 @@ void PipelineCache::WarmUpThread() {
         } else {
             entry.gkey.Deserialize(ar);
             entry.gsdata.Deserialize(ar);
+            // Motion-vector pipelines are not preloaded: the shader meta is stored once per program,
+            // not per permutation, so the meta found for a motion pipeline's stages can be the plain
+            // permutation and the preload would build the 8-attachment motion key with plain
+            // shaders (the AMD driver refused some: "Failed to create graphics pipeline:
+            // ErrorUnknown" at start; the accepted ones drew without motion output). They are built
+            // at first use. Based on a fix by Joao Pedro Valadares (spacepepperoni/uncharted_Linux 7b366f7).
+            if (entry.gkey.motion_vectors) {
+                return;
+            }
         }
         entry.parsed = true;
     });
