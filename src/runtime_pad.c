@@ -288,6 +288,10 @@ static pthread_mutex_t camera_lock=PTHREAD_MUTEX_INITIALIZER;
 #define CAMERA_QUEUES 4                /* 0 follow camera, 1 joypad sticks, 2 aiming / look camera, 3 cover camera */
 static volatile uint64_t cover_native_us; /* last frame the cover camera was turned by the mouse */
 static volatile float cover_dir_x, cover_dir_z; /* the cover camera's direction (x z), kept for the follow camera */
+static volatile float cover_last_step;          /* the turn (degrees) the cover camera was given this frame, and when: the camera manager's hook adds the rest while it blends in */
+static volatile uint64_t cover_last_us;
+static volatile float cover_out_yaw;          /* the cover camera's output yaw (degrees) of this frame, and when: the walking camera's output is made the same */
+static volatile uint64_t cover_out_us;
 static volatile uint64_t zoom_camera_us;  /* last frame the zoom (aiming) camera was updated */
 /* The mouse's yaw since the aim began (degrees, positive to the right): the game's message that aligns the camera with the
  * player's pose gets a pose turned by it (u1b_aim_target), or the camera is pulled back to the player's facing every
@@ -383,7 +387,9 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
          * the game blends the cover camera out over about a second after the cover, and the walking camera, left at the direction it had
          * before the cover, pulled the picture back to the place where the player last looked. */
         const float cl=SDL_sqrtf(cover_dir_x*cover_dir_x+cover_dir_z*cover_dir_z), fl=SDL_sqrtf(dir[0]*dir[0]+dir[2]*dir[2]);
-        if (cl>0.5f && fl>0.01f) { dir[0]=-cover_dir_x/cl*fl; dir[2]=-cover_dir_z/cl*fl; }
+        static float written=1000.0f;
+        if (mouse_debug()) { static unsigned n; if (n++<400) printf("Mouse: coversync t=%.4f before=%.2f lastwritten=%.2f\n",now*1e-6,heading,written); }
+        if (cl>0.5f && fl>0.01f) { dir[0]=-cover_dir_x/cl*fl; dir[2]=-cover_dir_z/cl*fl; written=heading_of(dir); }
     }
     if (aim_held || look_held || (cover_native_us && now-cover_native_us<100000)) { follow_moved_us=0; follow_pending=0; follow_push=0.0f; return; } /* the aiming / look / cover camera takes the mouse */
     if (stopped) { follow_moved_us=0; follow_pending=0; follow_push=0.0f; follow_correction=0.0f; return; } /* paused */
@@ -1320,7 +1326,22 @@ static void __attribute__((ms_abi)) u1b_aim_camera(uint64_t unused0, uint64_t un
     }
     if (camera<0x10000) return;
     const uint64_t vtable=*(const uint64_t *)(uintptr_t)camera;
-    if (vtable<0x10000 || ((const uint64_t *)(uintptr_t)vtable)[0x98/8]!=image+0xc43b0) return;
+    if (vtable<0x10000) return;
+    if (((const uint64_t *)(uintptr_t)vtable)[0x98/8]==image+0xaff80) {   /* the walking camera, right after its update */
+        /* While a cover camera runs (and is blended in or out, about a second) the walking camera's output stood still: the picture is
+         * w x the cover camera + (1-w) x the walking camera, whose weight w is 0 at first, so the picture did not turn at the start of a cover.
+         * Its output yaw is made the cover camera's: both layers agree, whatever the weight. */
+        const uint64_t at=now_us();
+        if (!cover_out_us || at-cover_out_us>20000) return;
+        *(float *)(uintptr_t)(guest_callback_rsp+0x140)=cover_out_yaw;
+        return;
+    }
+    if (((const uint64_t *)(uintptr_t)vtable)[0x98/8]==image+0xa4670) {   /* the cover camera, right after its update */
+        cover_out_yaw=*(const float *)(uintptr_t)(guest_callback_rsp+0x140);
+        cover_out_us=now_us();
+        return;
+    }
+    if (((const uint64_t *)(uintptr_t)vtable)[0x98/8]!=image+0xc43b0) return;
     const uint64_t now=now_us();
     zoom_camera_us=now;   /* the zoom camera runs: L1 (grenade) counts as an aim, see sample() */
     /* After the aim the game blends the zoom camera out for about a second (the picture = w x walking camera + (1-w) x zoom camera): it keeps
@@ -1540,6 +1561,7 @@ static void __attribute__((ms_abi)) u1b_cover_camera(uint64_t camera, uint64_t u
         frame_us=now; frame_camera=camera; frame_yaw=step; frame_pitch=step_pitch;
     }
     cover_native_us=now;
+    cover_last_step=step; cover_last_us=now;
     float *dir=(float *)(uintptr_t)(camera+0x240);
     cover_dir_x=dir[0]; cover_dir_z=dir[2];
     float *pitch=(float *)(uintptr_t)(camera+0x230);
@@ -1579,7 +1601,7 @@ static void __attribute__((ms_abi)) u1b_cover_camera(uint64_t camera, uint64_t u
         const float lo=-*(const float *)(uintptr_t)(shape+0xc), hi=*(const float *)(uintptr_t)(shape+8);
         *pitch=v<lo ? lo : v>hi ? hi : v;
     }
-    if (mouse_debug()) printf("Mouse: coverturn t=%.4f step=%.3f pitch step=%.3f pitch=%.3f\n",now*1e-6,step,step_pitch,*pitch);
+    if (mouse_debug()) { float shown=0.0f; double age=0.0; const int have=bbgpu_camera_yaw(&shown,&age); const float dd[3]={-dir[0],0.0f,-dir[2]}; printf("Mouse: coverturn t=%.4f step=%.3f pitch step=%.3f pitch=%.3f shown=%.2f%s coverheading=%.2f\n",now*1e-6,step,step_pitch,*pitch,shown,have ? "" : "?",heading_of(dd)); }
 }
 /* U1 1.02: the gun turret of the rail vehicle (chapter 7): the camera's update (image+0x2a7530) calls image+0x2a9690
  * (rdi the camera, rsi the angle state, rdx the input) which does state[1] = (state[1] * K1 - stick x * speed * dt) * K2
@@ -1611,6 +1633,7 @@ static void __attribute__((ms_abi)) u1b_turret_camera(uint64_t camera, uint64_t 
         frame_us=now; frame_camera=camera; frame_yaw=step; frame_pitch=step_pitch;
     }
     cover_native_us=now;
+    cover_last_step=step; cover_last_us=now;
     const float k2=*(const float *)(uintptr_t)(image+0x7c9df4);
     const int flip_x=*(const int *)(uintptr_t)(image+0x95ca28)!=0, flip_y=*(const int *)(uintptr_t)(image+0x95ca2c)!=0;
     float *angles=(float *)(uintptr_t)state;
