@@ -73,6 +73,63 @@ int main(void) {
     inject(path,"");
     assert(pad_read_state(1,&data)==0 && data.buttons==0 && data.touch_count==0);
 
+    /* Rotate keys (scripted as rot_ccw / rot_cw): the left stick circles at full deflection, a quarter
+     * turn well inside the games' 0.31 s window, counter-clockwise first to the left. */
+    for (int dir=-1; dir<=1; dir+=2) {
+        inject(path,dir<0 ? "rot_ccw" : "rot_cw");
+        int min_x=255, max_x=0, min_y=255, max_y=0, first_x=128;
+        uint64_t quarter_us[4]={0,0,0,0}, last_q=0;
+        for (int i=0;i<150;++i) {
+            assert(pad_read_state(1,&data)==0);
+            if (i==3) first_x=data.left_x;
+            const int x=data.left_x, y=data.left_y;
+            if (x<min_x) min_x=x;
+            if (x>max_x) max_x=x;
+            if (y<min_y) min_y=y;
+            if (y>max_y) max_y=y;
+            const int q=y<20 ? 0 : x>235 ? 1 : y>235 ? 2 : x<20 ? 3 : -1; /* up right down left */
+            if (q>=0) {
+                if (quarter_us[q]==0 || data.timestamp-quarter_us[q]>200000) {
+                    if (last_q) assert(data.timestamp-last_q<312500);
+                    last_q=data.timestamp;
+                }
+                quarter_us[q]=data.timestamp;
+            }
+            usleep(10000);
+        }
+        assert(min_x<=4 && max_x>=251 && min_y<=4 && max_y>=251);
+        assert(dir<0 ? first_x<128 : first_x>128);
+        assert(quarter_us[0] && quarter_us[1] && quarter_us[2] && quarter_us[3]);
+    }
+    inject(path,"");
+    assert(pad_read_state(1,&data)==0 && data.left_x==128 && data.left_y==128);
+    /* The real keys: T held (default rotate_cw), the left stick circles; W alone is still plain
+     * forward, and R (rotate_ccw) turns the other way. */
+    {
+        bool *keys=(bool *)SDL_GetKeyboardState(NULL);
+        assert(keys);
+        keys[SDL_SCANCODE_W]=true;
+        assert(pad_read_state(1,&data)==0 && data.left_x==128 && data.left_y==0);
+        keys[SDL_SCANCODE_W]=false;
+        for (int dir=-1; dir<=1; dir+=2) {
+            keys[dir<0 ? SDL_SCANCODE_R : SDL_SCANCODE_T]=true;
+            int min_x=255, max_x=0, min_y=255, max_y=0, first_x=128;
+            for (int i=0;i<150;++i) {
+                assert(pad_read_state(1,&data)==0);
+                if (i==3) first_x=data.left_x;
+                if (data.left_x<min_x) min_x=data.left_x;
+                if (data.left_x>max_x) max_x=data.left_x;
+                if (data.left_y<min_y) min_y=data.left_y;
+                if (data.left_y>max_y) max_y=data.left_y;
+                usleep(10000);
+            }
+            keys[SDL_SCANCODE_R]=keys[SDL_SCANCODE_T]=false;
+            assert(min_x<=4 && max_x>=251 && min_y<=4 && max_y>=251);
+            assert(dir<0 ? first_x<128 : first_x>128);
+        }
+        assert(pad_read_state(1,&data)==0 && data.left_x==128 && data.left_y==128);
+    }
+
     SDL_VirtualJoystickTouchpadDesc touch={.nfingers=2};
     SDL_VirtualJoystickDesc desc;
     SDL_INIT_INTERFACE(&desc);
@@ -123,5 +180,5 @@ int main(void) {
     SDL_Quit();
     unlink(path);
     unlink(config);
-    puts("PASS: pad ABI, debug camera chord, left/right clicks, SDL touch, vibration controls, overlay capture");
+    puts("PASS: pad ABI, debug camera chord, left/right clicks, rotate keys, SDL touch, vibration controls, overlay capture");
 }
