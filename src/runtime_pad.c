@@ -355,6 +355,7 @@ static float follow_kept=1.0f;            /* average fraction of a turn still th
 static float follow_before, follow_after; /* heading before and after the last turn */
 static int follow_pending;
 static volatile uint64_t aim_blend_until_us; /* the aim is blended out for about a second after L2 is released: the zoom camera keeps the mouse until then */
+static volatile int aim_native;   /* aim_held and the zoom (aiming) camera runs: L2 held during a roll aims nothing yet, and the mouse must keep turning the free view then */
 static volatile int aim_held;             /* L2 is held: the aiming camera (also while it blends in) */
 static volatile int look_held;            /* R3 is held: first-person look around, which turns like the aim */
 static float follow_target;               /* wanted heading (degrees) */
@@ -379,7 +380,7 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
     const float heading=heading_of(dir);
     float dx, dy;
     camera_take(0,&dx,&dy);
-    if (cover_native_us && now-cover_native_us<COVER_RECENT_US && !aim_held && !look_held) {
+    if (cover_native_us && now-cover_native_us<COVER_RECENT_US && !aim_native && !look_held) {
         /* While the cover camera has the mouse the walking camera is kept behind it (its direction is the cover camera's, reversed; measured):
          * the game blends the cover camera out over about a second after the cover, and the walking camera, left at the direction it had
          * before the cover, pulled the picture back to the place where the player last looked. */
@@ -388,7 +389,7 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
         if (mouse_debug()) { static unsigned n; if (n++<400) printf("Mouse: coversync t=%.4f before=%.2f lastwritten=%.2f\n",now*1e-6,heading,written); }
         if (cl>0.5f && fl>0.01f) { dir[0]=-cover_dir_x/cl*fl; dir[2]=-cover_dir_z/cl*fl; written=heading_of(dir); }
     }
-    if (aim_held || look_held || (cover_native_us && now-cover_native_us<COVER_RECENT_US)) { follow_moved_us=0; follow_pending=0; follow_push=0.0f; return; } /* the aiming / look / cover camera takes the mouse */
+    if (aim_native || look_held || (cover_native_us && now-cover_native_us<COVER_RECENT_US)) { follow_moved_us=0; follow_pending=0; follow_push=0.0f; return; } /* the aiming / look / cover camera takes the mouse */
     if (stopped) { follow_moved_us=0; follow_pending=0; follow_push=0.0f; follow_correction=0.0f; return; } /* paused */
     if (follow_pending) {
         float kept=wrap_degrees(heading-follow_before)/wrap_degrees(follow_after-follow_before);
@@ -5045,8 +5046,8 @@ static void sample_host(PadData *d) {
     if (captured && raw_aiming) { aim_dx+=mdx; aim_dy+=mdy; }
     else { aim_dx=aim_dy=0.0f; }
     pthread_mutex_unlock(&camera_lock);
-    const int direct_x=joypad || native || (following && !aim_held && !look_held && follow_direct);
-    const int direct_y=joypad || native || (following && !aim_held && !look_held && follow_direct && follow_has_arc);
+    const int direct_x=joypad || native || (following && !aim_native && !look_held && follow_direct);
+    const int direct_y=joypad || native || (following && !aim_native && !look_held && follow_direct && follow_has_arc);
     if (captured && direct_x && direct_y) {
         mouse_vx=mouse_vy=0; mouse_last_us=0;
     } else if (captured) {
@@ -5223,6 +5224,7 @@ static void sample(PadData *d) {
     /* L2 aims; L1 (grenade) aims with the same zoom camera, but only once that camera runs (L1 without a grenade does nothing) */
     aim_held=(d->buttons & BTN_L2)!=0 || ((d->buttons & BTN_L1) && zoom_camera_us && now_us()-zoom_camera_us<100000);
     if (aim_held) aim_blend_until_us=now_us()+1300000;
+    aim_native=aim_held && zoom_camera_us && now_us()-zoom_camera_us<100000;
     look_held=(d->buttons & (BTN_R3|BTN_UP))!=0; /* U1: the d-pad up (V) looks around */
     if (!aim_held) { aim_target_total=0.0f; aim_session_reset=1; }
     if (mouse_debug()) { /* the pad the game gets, when it changes (jetski: which buttons stop it) */
