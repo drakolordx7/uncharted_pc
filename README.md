@@ -1,6 +1,6 @@
 # Uncharted: The Nathan Drake Collection for Windows (community build)
 
-Community build of [SuperMedo's Uncharted PC port](https://github.com/Supermedo/uncharted_pc), with fixes from players and other forks. Runs Uncharted 1, 2 and 3 from the PS4 collection on Windows.
+Community build by [drakolordx7](https://github.com/drakolordx7) of [SuperMedo's Uncharted PC port](https://github.com/Supermedo/uncharted_pc), with fixes from players and other forks. Runs Uncharted 1, 2 and 3 from the PS4 collection on Windows.
 
 [Download the latest build](https://github.com/drakolordx7/uncharted_pc/releases/latest)
 
