@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "shader_recompiler/ir/passes/ir_passes.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -27,6 +28,13 @@ namespace Serialization {
 static constexpr u32 ShaderBinaryVersion = 11u; // bbport: motion shaders hold address stand-ins (10); scalar instructions split EXEC scopes (11)
 static constexpr u32 ShaderMetaVersion = 7u; // bbport: ImageResource::needs_native
 static constexpr u32 PipelineKeyVersion = 5u; // bbport: Info layout (ImageResource::needs_native)
+/// bbport (BilalReloaded): the cache name of a shader's SPIR-V. Shaders that gained multi-wave
+/// LDS barriers get a new name, so their binaries cached before the fix are not found and only
+/// those shaders recompile.
+static std::string ShaderBinaryName(u64 pgm_hash, size_t perm_idx) {
+    return fmt::format("{:#018x}_{}{}", pgm_hash, perm_idx,
+                       Shader::Optimization::MultiwaveLdsBarriers(pgm_hash) ? "_lds4" : "");
+}
 } // namespace Serialization
 
 namespace Vulkan {
@@ -99,7 +107,7 @@ void RegisterShaderBinary(std::vector<u32>&& spv, u64 pgm_hash, size_t perm_idx)
     }
 
     Storage::DataBase::Instance().Save(Storage::BlobType::ShaderBinary,
-                                       fmt::format("{:#018x}_{}", pgm_hash, perm_idx),
+                                       Serialization::ShaderBinaryName(pgm_hash, perm_idx),
                                        std::move(spv));
 }
 
@@ -414,7 +422,7 @@ void PipelineCache::WarmUpThread() {
         }
         std::vector<u32> spv{};
         db.Load(Storage::BlobType::ShaderBinary,
-                fmt::format("{:#018x}_{}", info.pgm_hash, stage.perm_idx), spv);
+                Serialization::ShaderBinaryName(info.pgm_hash, stage.perm_idx), spv);
         if (spv.empty()) {
             return;
         }

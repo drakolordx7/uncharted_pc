@@ -273,12 +273,38 @@ static int host_protect(uintptr_t address, uint64_t size, int prot) {
 }
 /* Released pages read as zero when reused, like the memfd's punched holes. */
 static void host_discard(uint64_t phys, uint64_t size) { memset(backing_base+phys,0,size); }
+/* bbport (from BilalReloaded's Uncharted port, GPL v2): the section is only reserved; pages are
+ * committed when the game allocates them (direct allocations, flexible maps), so Windows charges
+ * the commit limit for the ~4.8 GB a game uses, not the whole 6+ GB pool at start. A full commit
+ * made PCs with 16 GB and a small page file fail at start (error 1450) whenever other programs
+ * were open. When the commit limit is reached, Windows grows a system-managed page file a moment
+ * later: retry for up to 10 s. Committed pages stay committed (a section's cannot be decommitted). */
+static int host_commit(uint64_t phys, uint64_t size) {
+    for (int attempt=0;;++attempt) {
+        if (VirtualAlloc(backing_base+phys,size,MEM_COMMIT,PAGE_READWRITE)) {
+            if (attempt) printf("Runtime: committed %" PRIu64 " MiB of guest memory after %d retries (page file grew)\n",size>>20,attempt);
+            return 0;
+        }
+        DWORD error=GetLastError();
+        if (attempt==40 || (error!=ERROR_COMMITMENT_LIMIT && error!=ERROR_NOT_ENOUGH_MEMORY && error!=ERROR_NO_SYSTEM_RESOURCES && error!=ERROR_COMMITMENT_MINIMUM)) {
+            fprintf(stderr,"Runtime: cannot commit %" PRIu64 " MiB of guest memory (error %lu); is the page file large enough?\n",size>>20,error);
+            return -1;
+        }
+        if (!attempt) printf("Runtime: commit limit reached (%" PRIu64 " MiB of guest memory, error %lu): waiting for the page file to grow\n",size>>20,error);
+        /* Not while holding the region table: every GPU upload and tracked-page fault waits on
+         * it. The caller's range is claimed already (block or flexible bits). */
+        int held=exclusive_depth==1;
+        if (held) write_unlock();
+        Sleep(250);
+        if (held) write_lock();
+    }
+}
 /* Direct memory occupies [0,POOL_SIZE) of the section, flexible memory [POOL_SIZE,+FLEX_SPAN). */
 static int pool(void) {
     if (backing_base) return 0;
     runtime_memory_reserve();
     uint64_t bytes=POOL_SIZE+FLEX_SPAN;
-    section=CreateFileMapping2(INVALID_HANDLE_VALUE,NULL,FILE_MAP_ALL_ACCESS,PAGE_EXECUTE_READWRITE,SEC_COMMIT,bytes,NULL,NULL,0);
+    section=CreateFileMapping2(INVALID_HANDLE_VALUE,NULL,FILE_MAP_ALL_ACCESS,PAGE_EXECUTE_READWRITE,SEC_RESERVE,bytes,NULL,NULL,0);
     if (!section) { fprintf(stderr,"Runtime: cannot create %" PRIu64 " MiB of guest memory (error %lu); is the page file large enough?\n",bytes>>20,GetLastError()); return -1; }
     backing_base=MapViewOfFile3(section,GetCurrentProcess(),NULL,0,bytes,0,PAGE_READWRITE,NULL,0);
     return backing_base ? 0 : -1;
@@ -295,6 +321,7 @@ static int pool(void) {
     return 0;
 }
 void runtime_memory_reserve(void) {}
+static int host_commit(uint64_t phys, uint64_t size) { (void)phys; (void)size; return 0; }
 static int host_map(uintptr_t address, uint64_t size, int prot, int reserved, uint64_t phys) {
     void *mapped = !reserved
         ? mmap((void *)address,size,prot,MAP_SHARED|MAP_FIXED,pool_fd,(off_t)phys)
@@ -479,7 +506,10 @@ static ABI int32_t direct_allocate(int64_t low, int64_t high, uint64_t size,
         }
         if (!overlap) break;
     }
-    blocks[slot] = (Block){start, size, type, 1}; *out = (int64_t)start;
+    /* Claimed before the commit: host_commit may drop the lock while the page file grows. */
+    blocks[slot] = (Block){start, size, type, 1};
+    if (host_commit(start, size)) { blocks[slot].used = 0; write_unlock(); return NO_MEMORY; }
+    *out = (int64_t)start;
     ++allocations; live_bytes += size;
     write_unlock();
     printf("Runtime: direct allocation offset=0x%" PRIx64 ", size=%" PRIu64 " bytes, type=%d\n", start, size, type);
@@ -581,6 +611,7 @@ static int32_t map_flexible_locked(void **inout, uint64_t size, int prot, int fl
     if (flexible_bytes+size>FLEXIBLE_SIZE || pool()) return NO_MEMORY;
     uint64_t phys=flex_alloc(size);
     if (phys==UINT64_MAX) return NO_MEMORY;
+    if (host_commit(phys,size)) { flex_set((phys-POOL_SIZE)/PAGE,size/PAGE,0); return NO_MEMORY; }
     int32_t result=place(inout,size,prot,flags,PAGE,KIND_FLEXIBLE,0,phys);
     if (result) flex_free(phys,size); else ++flexible_maps;
     return result;

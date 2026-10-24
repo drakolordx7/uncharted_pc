@@ -598,6 +598,29 @@ _Static_assert(sizeof(u2_focus_reset_100)==56 && sizeof(u2_focus_reset_102)==58,
 static const unsigned char u2_leg_ik_zero_100[]={U2_LEG_IK_ZERO(0x2d),CC8,CC8,CC8,CC8,CC8};
 static const unsigned char u2_leg_ik_zero_102[]={U2_LEG_IK_ZERO(0x2f),CC8,CC8,CC8,CC8,CC8,0xcc,0xcc};
 _Static_assert(sizeof(u2_leg_ik_zero_100)==51 && sizeof(u2_leg_ik_zero_102)==53,"patch sizes");
+/* U3 Player::UpdateFocus (player.cpp:1897, assertion m_lookAt.X() == m_lookAt.X(): the crash
+ * climbing the fort in chapter 8). The point Nate looks at ([player+0xef0], velocity +0xf00)
+ * springs towards a target; once NaN it stays NaN, and the function's own reset (taken when the
+ * point is far off) never runs for it: NaN compares false. The assertion's path now takes that
+ * reset when the target is a number (the velocity register zeroed first, as on the reset's usual
+ * way in); a NaN target still stops the game. BilalReloaded's fix for 1.02 (his Uncharted port,
+ * GPL v2, GitHub #13 there), and the same for 1.00 (reset at 0x390779, target at rbp-0xa0, zero in
+ * xmm4). */
+static const unsigned char u3_focus_reset_100[]={
+    0xc5,0xd8,0x57,0xe4,                          /* vxorps xmm4, xmm4, xmm4 */
+    0xc5,0xf8,0x28,0x85,0x60,0xff,0xff,0xff,      /* vmovaps xmm0, [rbp-0xa0] (the target) */
+    0xc5,0xf8,0xc2,0xc8,0x00,                     /* vcmpeqps xmm1, xmm0, xmm0 */
+    0xc5,0xf8,0x50,0xc1,                          /* vmovmskps eax, xmm1 */
+    0x83,0xf8,0x0f,                               /* cmp eax, 15 */
+    0x0f,0x84,0xa3,0xfe,0xff,0xff,                /* je the reset (0x390779) */
+    0xcd,0x41,                                    /* the target is NaN too: trap as before */
+    CC8,CC8,0xcc,0xcc,0xcc,
+};
+static const unsigned char u3_focus_reset_102[]={
+    0xc5,0xd0,0x57,0xed,0xc5,0xf8,0x28,0x45,0x80,0xc5,0xf8,0xc2,0xc8,0x00,0xc5,0xf8,0x50,0xc1,
+    0x83,0xf8,0x0f,0x0f,0x84,0xa5,0xfe,0xff,0xff,0xcd,0x41,CC8,CC8,CC8,
+};
+_Static_assert(sizeof(u3_focus_reset_100)==51 && sizeof(u3_focus_reset_102)==53,"patch sizes");
 /* The camera code, the pad code and the assertion are found by their instructions, so a build of the
  * game that has them works (version 1.00 and 1.02 are known; "build" below). RIP-relative
  * displacements and call targets are wildcards. Entries with one name are variants for the builds. */
@@ -740,6 +763,20 @@ static const RuntimeGuestCallback guest_callbacks[]={
       "8d 35 ?? ?? ?? ?? 48 8d 15 ?? ?? ?? ?? 48 8d 0d ?? ?? ?? ?? "
       "41 b8 87 01 00 00 45 31 c9 ff d0 cd 41 c4 c1 78 28 07 c4 e3 79 04 c0 01",
       0x0, 53, NULL, u2_leg_ik_zero_102},
+    /* U3 player focus NaN reset, build 100 */
+    {"U3 player focus NaN reset",
+      "c4 e3 79 04 cb 00 c5 f0 c2 c9 00 c5 f8 50 c1 83 f8 0f 74 38 "
+      "e8 ?? ?? ?? ?? 48 85 c0 74 27 48 8d 3d ?? ?? ?? ?? 48 8d 35 "
+      "?? ?? ?? ?? 48 8d 15 ?? ?? ?? ?? 48 8d 0d ?? ?? ?? ?? 41 b8 "
+      "69 07 00 00 45 31 c9 ff d0 cd 41 c5 f8 28 45 c0",
+      0x14, 51, NULL, u3_focus_reset_100},
+    /* U3 player focus NaN reset, build 102 (BilalReloaded) */
+    {"U3 player focus NaN reset",
+      "c4 e3 79 04 cb 00 c5 f0 c2 c9 00 c5 f8 50 c1 83 f8 0f 74 3a "
+      "48 8b 05 ?? ?? ?? ?? 48 85 c0 74 27 48 8d 3d ?? ?? ?? ?? 48 "
+      "8d 35 ?? ?? ?? ?? 48 8d 15 ?? ?? ?? ?? 48 8d 0d ?? ?? ?? ?? "
+      "41 b8 6a 07 00 00 45 31 c9 ff d0 cd 41",
+      0x14, 53, NULL, u3_focus_reset_102},
     /* U2 camera focus NaN reset, build 100 */
     {"U2 camera focus NaN reset",
       "e8 ?? ?? ?? ?? 48 85 c0 74 27 48 8d 3d ?? ?? ?? ?? 48 8d 35 "
