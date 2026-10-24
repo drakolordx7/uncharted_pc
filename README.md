@@ -88,7 +88,7 @@ If you'd rather your change didn't come in, open an issue and we'll take it out.
 - Anti-aliasing with TAA, AMD FSR 3.1, AMD FSR 4, NVIDIA DLSS (DLAA) or Intel XeSS (any GPU).
 - Frame generation: AMD FSR 3 (any GPU) or NVIDIA DLSS (RTX 40 2x, RTX 50 up to 4x).
 - Keyboard, mouse and controller together, all remappable. Mouse look in all three games, aiming included (game versions 1.00 and 1.02; in Among Thieves 1.00 only checked up to the opening scene).
-- Valves and wheels that ask you to turn the left stick in circles (the submarine hatches in Drake's Fortune) work from the keyboard: hold R to turn counter-clockwise or T to turn clockwise (both remappable on the Controls page).
+- Valves and wheels that ask you to turn the left stick in circles (the submarine hatches in Drake's Fortune) work from the keyboard: hold R to turn counter-clockwise or T to turn clockwise (both remappable on the Controls page), and the prompt on screen shows that key.
 - Button prompts show your keyboard and mouse keys while you play with them, Xbox buttons after
   input from an Xbox (or other) controller, and the PlayStation buttons after a PlayStation
   controller. Keys follow your keyboard layout (AZERTY...).
