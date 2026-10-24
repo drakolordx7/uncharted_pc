@@ -4335,15 +4335,15 @@ static void u2_sd_step(uint64_t now, int row_ok) {
  * A click on the rail, or a drag, puts the selection on the row under the cursor by the game's own call (u2_widget_hook, set(value) on the data source of the
  * list: the way the game moves a selection), so the thumb jumps to the cursor as in U1. */
 #define U2_LIST_ROW 29.2f
-static const struct { float x, w; int vis; } u2_lists[]={{270.0f,768.0f,12},{334.2f,378.8f,12},{320.0f,628.8f,8},{359.2f,589.6f,8},{245.0f,418.0f,11},{342.0f,386.0f,5}};   /* x, width, rows seen; the last two: Bonus > Cinématiques (11 rows from y 199.4), Récompenses > Catégories (5 rows from y 306.8, a value column at x 732; all rows seen, no scroll) (measured 2026-10-23); Récompenses: rows 320 / 628.8 or 359.2 / 589.6 wide, same right edge */
+static const struct { float x, w; int vis; } u2_lists[]={{270.0f,768.0f,12},{334.2f,378.8f,12},{320.0f,628.8f,8},{359.2f,589.6f,8},{245.0f,418.0f,11},{342.0f,386.0f,5},{292.0f,656.8f,8}};   /* x, width, rows seen; the last two: Bonus > Cinématiques (11 rows from y 199.4), Récompenses > Catégories (5 rows from y 306.8, a value column at x 732; all rows seen, no scroll) (measured 2026-10-23); Récompenses: rows 320 / 628.8 or 359.2 / 589.6 wide, same right edge */
 static int u2_list_rows_on(uint64_t now) {
-    int n[6]={0,0,0,0,0,0};
+    int n[7]={0,0,0,0,0,0,0};
     for (int i=0;i<U2_ROWS;++i) {
         const U2Row *r=&u2_rows[i];
         if (!r->us || now-r->us>=150000 || fabsf(r->h-U2_LIST_ROW)>=0.3f) continue;
-        for (int q=0;q<6;++q) if ((fabsf(r->x-u2_lists[q].x)<1.0f && fabsf(r->w-u2_lists[q].w)<1.0f) || (q==2 && fabsf(r->x-359.2f)<1.0f && fabsf(r->w-589.6f)<1.0f) || (q==0 && fabsf(r->x-270.0f)<1.0f && fabsf(r->w-497.8f)<1.0f)) ++n[q];   /* (the same rows as the count of u2_menu_buttons: Statistiques has narrower rows where there is a value) */
+        for (int q=0;q<7;++q) if ((fabsf(r->x-u2_lists[q].x)<1.0f && fabsf(r->w-u2_lists[q].w)<1.0f) || (q==2 && fabsf(r->x-359.2f)<1.0f && fabsf(r->w-589.6f)<1.0f) || (q==0 && fabsf(r->x-270.0f)<1.0f && fabsf(r->w-497.8f)<1.0f)) ++n[q];   /* (the same rows as the count of u2_menu_buttons: Statistiques has narrower rows where there is a value) */
     }
-    for (int q=0;q<6;++q) if (n[q]>=u2_lists[q].vis-3) return 1;
+    for (int q=0;q<7;++q) if (n[q]>=(q==6 ? 3 : u2_lists[q].vis-3)) return 1;
     return 0;
 }
 static int u2_ls_drag;
@@ -4533,8 +4533,8 @@ static uint32_t u2_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
         else if (!pend_since) pend_since=now;
         else if (now-pend_since>500000) { u2_jump_pending=0; u2_jump_keep=0; pend_since=0; if (mouse_debug()) printf("Mouse: U2 stale jump request dropped\n"); }
     }
-    int have_hov=0, have_sel=0, hi_n=0, have_slid=0, wide_n=0, ls_wide_n=0, on_cmd=0, ls_n[6]={0,0,0,0,0,0}, ls_sel[6]={0,0,0,0,0,0};
-    float ls_miny[6]={1e9f,1e9f,1e9f,1e9f,1e9f,1e9f};
+    int have_hov=0, have_sel=0, hi_n=0, have_slid=0, wide_n=0, ls_wide_n=0, on_cmd=0, ls_n[7]={0,0,0,0,0,0,0}, ls_sel[7]={0,0,0,0,0,0,0};
+    float ls_miny[7]={1e9f,1e9f,1e9f,1e9f,1e9f,1e9f,1e9f};
     float hi_cy[16], wide_min=1e9f, wide_ys[16]; int wide_ys_n=0;
     pthread_mutex_lock(&menu_text_lock);
     for (int i=0;i<8;++i) {
@@ -4547,7 +4547,7 @@ static uint32_t u2_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
         if (!r->us || now-r->us>=100000) continue;
         if (r->x>300.0f && r->x<500.0f && r->h>=33.0f && r->h<=33.9f)   /* (the section titles are 34.2 tall and as wide) */ { ++wide_n; if (r->y<wide_min) wide_min=r->y; { int dup=0; for (int q=0;q<wide_ys_n;++q) if (fabsf(wide_ys[q]-r->y)<0.5f) dup=1; if (!dup && wide_ys_n<16) wide_ys[wide_ys_n++]=r->y; } }   /* the two last rows of Commandes (three with ours) */
         if (fabsf(r->h-U2_LIST_ROW)<0.3f && fabsf(r->x-270.0f)<1.0f && fabsf(r->w-497.8f)<1.0f) ++ls_wide_n;   /* (a Statistiques row with a value) */
-        if (fabsf(r->h-U2_LIST_ROW)<0.3f) for (int q=0;q<6;++q) if ((fabsf(r->x-u2_lists[q].x)<1.0f && fabsf(r->w-u2_lists[q].w)<1.0f) || (q==2 && fabsf(r->x-359.2f)<1.0f && fabsf(r->w-589.6f)<1.0f) || (q==0 && fabsf(r->x-270.0f)<1.0f && fabsf(r->w-497.8f)<1.0f))   /* (Statistiques has the rows of Trésors; those with a value are narrower, the value being in a second column) */ {   /* (Récompenses: the same list, its rows are 320 / 628.8 or 359.2 / 589.6 wide, same right edge) */ ++ls_n[q]; if (r->s5>=2.5f) ls_sel[q]=1; if (r->y<ls_miny[q]) ls_miny[q]=r->y; }   /* the rows of a long list */
+        if (fabsf(r->h-U2_LIST_ROW)<0.3f) for (int q=0;q<7;++q) if ((fabsf(r->x-u2_lists[q].x)<1.0f && fabsf(r->w-u2_lists[q].w)<1.0f) || (q==2 && fabsf(r->x-359.2f)<1.0f && fabsf(r->w-589.6f)<1.0f) || (q==0 && fabsf(r->x-270.0f)<1.0f && fabsf(r->w-497.8f)<1.0f))   /* (Statistiques has the rows of Trésors; those with a value are narrower, the value being in a second column) */ {   /* (Récompenses: the same list, its rows are 320 / 628.8 or 359.2 / 589.6 wide, same right edge) */ ++ls_n[q]; if (r->s5>=2.5f) ls_sel[q]=1; if (r->y<ls_miny[q]) ls_miny[q]=r->y; }   /* the rows of a long list */
         if (fabsf(r->h-34.2f)<0.2f) continue;   /* the section titles (Visée, Caméra...) and their bars: never selected */
         if (r->s5>=2.5f && (!have_sel || r->s5>sel.s5)) { sel=*r; have_sel=1; }
         if (r->s5>=2.5f && hi_n<16) hi_cy[hi_n++]=r->y+r->h*0.5f;
@@ -4582,10 +4582,24 @@ static uint32_t u2_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
         have_slid=0; hi_n=0;
     }
     int ls_q=-1;   /* two lists can be drawn at once (Récompenses): the one with the highlighted row is the one on screen */
-    for (int q=0;q<6 && ls_q<0;++q) if (ls_n[q]>=u2_lists[q].vis-3 && ls_sel[q]) ls_q=q;
-    for (int q=0;q<6 && ls_q<0;++q) if (ls_n[q]>=u2_lists[q].vis-3) ls_q=q;   /* (a row or two may not have been drawn in the last 100 ms) */
+    for (int q=0;q<7 && ls_q<0;++q) if (ls_n[q]>=(q==6 ? 3 : u2_lists[q].vis-3) && ls_sel[q]) ls_q=q;
+    for (int q=0;q<7 && ls_q<0;++q) if (ls_n[q]>=(q==6 ? 3 : u2_lists[q].vis-3)) ls_q=q;   /* (a row or two may not have been drawn in the last 100 ms) */
     /* Trésors: the 3D model is drawn over the right of the rows (they are 768 wide). Over it the selection stays where it is and a click selects nothing:
      * the mouse turns the model while the left button is held (Statistiques has the same rows, but narrower ones with a value and no model). */
+    if (ls_q>=0 && !dlg) {   /* a text outside the rows of the list (the title bar above it, the description bar under it): never the selected row nor the one under the cursor */
+        const float bottom=ls_miny[ls_q]+(float)u2_lists[ls_q].vis*U2_LIST_ROW;
+        if (have_sel && (sel.y>bottom-U2_LIST_ROW*0.5f || sel.y<ls_miny[ls_q]-U2_LIST_ROW*0.5f)) {
+            have_sel=0;
+            pthread_mutex_lock(&menu_text_lock);
+            for (int i=0;i<U2_ROWS;++i) {
+                const U2Row *r=&u2_rows[i];
+                if (!r->us || now-r->us>=100000 || fabsf(r->h-U2_LIST_ROW)>=0.3f || r->s5<2.5f || r->y>bottom-U2_LIST_ROW*0.5f || r->y<ls_miny[ls_q]-U2_LIST_ROW*0.5f) continue;
+                if (!have_sel || r->s5>sel.s5) { sel=*r; have_sel=1; }
+            }
+            pthread_mutex_unlock(&menu_text_lock);
+        }
+        if (have_hov && (hov.y>bottom-U2_LIST_ROW*0.5f || hov.y<ls_miny[ls_q]-U2_LIST_ROW*0.5f)) have_hov=0;
+    }
     const int in_model=(u2_model_drag && left) || (ls_q==0 && !dlg && !(ls_wide_n>0) && ux>=712.0f && uy>=130.0f && uy<=600.0f);   /* (while it is held the cursor is hidden and locked, yet its position drifts with the motion: the press decides; the zone is right of the longest names, over the whole height of the panel) */
     if (!left) u2_model_drag=0; else if (clicked && in_model) u2_model_drag=1;
     if (in_model) { have_hov=0; hi_n=0; }
@@ -4600,7 +4614,9 @@ static uint32_t u2_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
         }
     }
     u2_hover=have_hov;
-    const int ls_hover=u2_ls_update(now,!dlg && ls_q>=0 && !u2_sd.phase,ls_q>=0 ? ls_miny[ls_q] : 0.0f,ls_q>=0 ? u2_lists[ls_q].x : 0.0f,ls_q>=0 ? u2_lists[ls_q].w : 0.0f,ls_q>=0 ? u2_lists[ls_q].vis : 12,in_model ? -1000.0f : ux,uy,left,clicked && !in_model,(moved || clicked) && h.active && !in_model,have_sel && fabsf(sel.h-U2_LIST_ROW)<0.3f,sel.y);
+    int ls_vis=ls_q>=0 ? u2_lists[ls_q].vis : 12;
+    if (ls_q==6 && ls_n[6]>=3 && ls_n[6]<ls_vis) ls_vis=ls_n[6];   /* (Récompenses sub menus with icons: Galeries shows 8 rows, Altérations 7, the panel has room for 8) */
+    const int ls_hover=u2_ls_update(now,!dlg && ls_q>=0 && !u2_sd.phase,ls_q>=0 ? ls_miny[ls_q] : 0.0f,ls_q>=0 ? u2_lists[ls_q].x : 0.0f,ls_q>=0 ? u2_lists[ls_q].w : 0.0f,ls_vis,in_model ? -1000.0f : ux,uy,left,clicked && !in_model,(moved || clicked) && h.active && !in_model,have_sel && fabsf(sel.h-U2_LIST_ROW)<0.3f,sel.y);
     if (in_model || u2_model_drag) h.active=0;
     if (ls_hover) h.active=0;   /* (the hover on a list is done above: no d-pad steps; a click still presses cross once the row is the selected one) */
     if (u2_row_inserted) {   /* Commandes, then ours, then Rétablir: ours is the middle one of the three wide rows */
