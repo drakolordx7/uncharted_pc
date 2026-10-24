@@ -294,7 +294,8 @@ static volatile float cover_last_step;          /* the turn (degrees) the cover 
 static volatile uint64_t cover_last_us;
 static volatile float cover_out_yaw;          /* the cover camera's output yaw (degrees) of this frame, and when: the walking camera's output is made the same */
 static volatile uint64_t cover_out_us;
-static volatile uint64_t cover_handover_us;   /* when the walking camera took over from a cover camera (0 while a cover runs) */
+static volatile float cover_pivot_x, cover_pivot_z;   /* the cover camera's pivot (where the player is in the cover) */
+static float orbit_r=3.0f, orbit_s=1.0f;              /* the walking camera's distance to the player and on which side of its yaw it sits (measured during a cover) */
 static volatile uint64_t zoom_camera_us;  /* last frame the zoom (aiming) camera was updated */
 /* The mouse's yaw since the aim began (degrees, positive to the right): the game's message that aligns the camera with the
  * player's pose gets a pose turned by it (u1b_aim_target), or the camera is pulled back to the player's facing every
@@ -382,26 +383,19 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
     const float heading=heading_of(dir);
     float dx, dy;
     camera_take(0,&dx,&dy);
-    {   /* The game puts the walking camera back to the direction it had before the cover when the cover ends, and the picture jumped there:
-         * once the cover camera is gone the walking camera is given the direction the cover camera ended with, and its output eases to its own. */
-        static int handed=1;
-        if ((cover_native_us && now-cover_native_us<COVER_RECENT_US) || (cover_out_us && now-cover_out_us<COVER_RECENT_US)) { handed=0; cover_handover_us=0; }
-        else if (!handed && cover_out_us && now-cover_out_us<2000000) {
-            const float fl=SDL_sqrtf(dir[0]*dir[0]+dir[2]*dir[2]), hd=cover_out_yaw*0.017453293f;
-            if (fl>0.01f) { dir[0]=-SDL_sinf(hd)*fl; dir[2]=-SDL_cosf(hd)*fl; }
-            handed=1; cover_handover_us=now;
-        }
+    /* While a cover camera runs the walking camera is kept at the cover camera's yaw by the same turns it makes for a mouse turn (a few degrees
+     * a frame, with the push that makes the game keep them): the game puts the old direction back every frame otherwise, and the picture jumped
+     * there when the cover ended. Measured: writing the direction does not hold. The mouse goes to the cover camera meanwhile. */
+    const int cover_follow=!aim_native && !look_held &&
+        ((cover_native_us && now-cover_native_us<COVER_RECENT_US) || (cover_out_us && now-cover_out_us<COVER_RECENT_US));
+    if (cover_follow) {
+        const float dd[3]={-cover_dir_x,0.0f,-cover_dir_z};
+        follow_target=(cover_out_us && now-cover_out_us<COVER_RECENT_US) ? cover_out_yaw : heading_of(dd);
+        follow_moved_us=now;
+        follow_direct=1; follow_kept=0.5f;   /* the turns of the direct mode with the push are the ones the game keeps (in the joypad mode it pulled the direction back at once) */
+        dx=0.0f; dy=0.0f;
     }
-    if (cover_native_us && now-cover_native_us<COVER_RECENT_US && !aim_native && !look_held) {
-        /* While the cover camera has the mouse the walking camera is kept behind it (its direction is the cover camera's, reversed; measured):
-         * the game blends the cover camera out over about a second after the cover, and the walking camera, left at the direction it had
-         * before the cover, pulled the picture back to the place where the player last looked. */
-        const float cl=SDL_sqrtf(cover_dir_x*cover_dir_x+cover_dir_z*cover_dir_z), fl=SDL_sqrtf(dir[0]*dir[0]+dir[2]*dir[2]);
-        static float written=1000.0f;
-        if (mouse_debug()) { static unsigned n; if (n++<400) printf("Mouse: coversync t=%.4f before=%.2f lastwritten=%.2f\n",now*1e-6,heading,written); }
-        if (cl>0.5f && fl>0.01f) { dir[0]=-cover_dir_x/cl*fl; dir[2]=-cover_dir_z/cl*fl; written=heading_of(dir); }
-    }
-    if (aim_native || look_held || (cover_native_us && now-cover_native_us<COVER_RECENT_US)) { follow_moved_us=0; follow_pending=0; follow_push=0.0f; return; } /* the aiming / look / cover camera takes the mouse */
+    if (aim_native || look_held) { follow_moved_us=0; follow_pending=0; follow_push=0.0f; return; } /* the aiming / look camera takes the mouse */
     if (stopped) { follow_moved_us=0; follow_pending=0; follow_push=0.0f; follow_correction=0.0f; return; } /* paused */
     if (follow_pending) {
         float kept=wrap_degrees(heading-follow_before)/wrap_degrees(follow_after-follow_before);
@@ -454,8 +448,9 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
     }
     follow_correction=0.0f;
     /* the shortfall is made up a few degrees a frame (no jump when the game keeps turns again) */
-    if (correction<-4.0f) correction=-4.0f;
-    if (correction>4.0f) correction=4.0f;
+    const float catch_up=(cover_follow || (cover_out_us && now-cover_out_us<150000)) ? 45.0f : 4.0f;   /* (while a cover runs: the cover camera turns faster than a mouse turn is made up) */
+    if (correction<-catch_up) correction=-catch_up;
+    if (correction>catch_up) correction=catch_up;
     const float total=turn+correction;
     follow_applied=total;
     follow_push=total>0.05f ? 0.3f : total<-0.05f ? -0.3f : 0.0f;
@@ -1343,18 +1338,31 @@ static void __attribute__((ms_abi)) u1b_aim_camera(uint64_t unused0, uint64_t un
          * w x the cover camera + (1-w) x the walking camera, whose weight w is 0 at first, so the picture did not turn at the start of a cover.
          * Its output yaw is made the cover camera's: both layers agree, whatever the weight. */
         const uint64_t at=now_us();
-        if (cover_handover_us && at-cover_handover_us<300000 && (!cover_out_us || at-cover_out_us>20000)) {   /* the cover is gone: the output eases from the cover camera's last yaw to the walking camera's own */
-            float *yaw_f=(float *)(uintptr_t)(guest_callback_rsp+0x140);
-            const float own_delta=wrap_degrees(*yaw_f-cover_out_yaw), k=(float)(at-cover_handover_us)/300000.0f;
-            *yaw_f=wrap_degrees(cover_out_yaw+own_delta*k);
-            return;
+        if (!cover_out_us || at-cover_out_us>80000) return;
+        float *yaw_o=(float *)(uintptr_t)(guest_callback_rsp+0x140);
+        /* While the cover camera runs, and for a few frames after it (the walking camera is still being turned back to its yaw, see follow_camera),
+         * the output is the cover camera's: no frame shows the walking camera's own yaw in between (it flashed there for two frames) */
+        float *pos_o=(float *)(uintptr_t)(guest_callback_rsp+0x120);   /* the output block: position x y z, then the angles at +0x20 */
+        if (at-cover_out_us<=20000) {   /* the player is in the cover spot: the camera's distance to him and its side are measured here */
+            const float ox=pos_o[0]-cover_pivot_x, oz=pos_o[2]-cover_pivot_z, yr=*yaw_o*0.017453293f;
+            const float len=SDL_sqrtf(ox*ox+oz*oz);
+            if (len>0.5f && len<30.0f) { orbit_r=len; orbit_s=(ox*SDL_sinf(yr)+oz*SDL_cosf(yr))>=0.0f ? 1.0f : -1.0f; }
         }
-        if (!cover_out_us || at-cover_out_us>20000) return;
-        *(float *)(uintptr_t)(guest_callback_rsp+0x140)=cover_out_yaw;
+        if (at-cover_out_us<=20000 || SDL_fabsf(wrap_degrees(*yaw_o-cover_out_yaw))>1.5f) {
+            /* The picture is the cover camera blended with this one. This one sits behind the player at the yaw the game put back (the old
+             * one) while the mouse has turned the view elsewhere: its position is turned round the player to the yaw of the cover camera, so
+             * the blend carries the camera in space from the cover to behind the player at the yaw the mouse gave. */
+            const float yo=*yaw_o*0.017453293f, yu=cover_out_yaw*0.017453293f;
+            pos_o[0]+=orbit_s*orbit_r*(SDL_sinf(yu)-SDL_sinf(yo));
+            pos_o[2]+=orbit_s*orbit_r*(SDL_cosf(yu)-SDL_cosf(yo));
+            *yaw_o=cover_out_yaw;
+        }
         return;
     }
     if (((const uint64_t *)(uintptr_t)vtable)[0x98/8]==image+0xa4670) {   /* the cover camera, right after its update */
         cover_out_yaw=*(const float *)(uintptr_t)(guest_callback_rsp+0x140);
+        cover_pivot_x=*(const float *)(uintptr_t)(camera+0x2a0);
+        cover_pivot_z=*(const float *)(uintptr_t)(camera+0x2a8);
         cover_out_us=now_us();
         return;
     }
@@ -1543,7 +1551,7 @@ static void __attribute__((ms_abi)) u1b_look_camera(uint64_t unused0, uint64_t u
 static float cover_pending_yaw, cover_pending_pitch;
 static void __attribute__((ms_abi)) u1b_cover_camera(uint64_t camera, uint64_t unused1, uint64_t image, uint64_t unused3) {
     (void)unused1; (void)unused3;
-    if (aim_held || look_held || camera<0x10000) return;
+    if (aim_native || look_held || camera<0x10000) return;   /* (L2 held without the aiming camera running, between two covers, is not an aim: the cover camera keeps the mouse) */
     const uint64_t now=now_us();
     static uint64_t frame_us; static uint64_t frame_camera; static float frame_yaw, frame_pitch;
     float step, step_pitch;
@@ -1716,7 +1724,7 @@ static void __attribute__((ms_abi)) u1_joypad_sticks(uint64_t unused0, uint64_t 
          * measured in U1: 45 x^2 degrees/s up to x = 1, then about 54 x - 9 (x = 3: 152, x = 6: 324) */
         const int following=camera_hook_us && now-camera_hook_us<50000;
         /* aiming, the look around and any camera other than the follow camera (cover) turn the same way */
-        const int aim_like=aim_held || look_held || !following;
+        const int aim_like=aim_native || look_held || !following;   /* (L2 held without the aiming camera running, in a roll or between two covers, is not an aim) */
         const float scale=MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity*(aim_like ? input.mouse_aim_sensitivity : 1.0f)/dt;
         float push=0.0f;
         if (!aim_like && following && follow_direct) { /* the follow camera turned itself */
@@ -5268,7 +5276,7 @@ static void sample(PadData *d) {
      * camera's direction (follow_push, see follow_camera), unless the stick is in use */
     const uint64_t now=now_us();
     if (!pad_only_mode && follow_push!=0.0f && camera_hook_us && now-camera_hook_us<100000 &&
-        !(sticks_hook_us && now-sticks_hook_us<100000) && !aim_held && !look_held && d->right_x>=118 && d->right_x<=138)
+        !(sticks_hook_us && now-sticks_hook_us<100000) && !aim_native && !look_held && d->right_x>=118 && d->right_x<=138)
         d->right_x=(uint8_t)(128.0f+follow_push*127.5f);
     if (hold_after_capture) {
         if (d->buttons) d->buttons=0;
