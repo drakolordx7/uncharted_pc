@@ -154,12 +154,14 @@ static int remove_entry(const char *path, const struct stat *st, int flag, struc
 static void remove_tree(const char *path) { nftw(path,remove_entry,16,FTW_DEPTH|FTW_PHYS); }
 #endif
 
-static ABI int32_t save_initialize(const void *param) { (void)param; initialized=1; return 0; }
+/* BB_SAVE_TRACE=1 also logs the save data calls (mount, umount, search, delete). */
+static int trace_calls(void) { static int v=-1; if (v<0) { const char *e=getenv("BB_SAVE_TRACE"); v=e && e[0]=='1'; } return v; }
+static ABI int32_t save_initialize(const void *param) { (void)param; initialized=1; if (trace_calls()) puts("Save trace: sceSaveDataInitialize"); return 0; }
 static ABI int32_t save_terminate(void) {
     if (!initialized) return ERR_NOT_INITIALIZED;
-    initialized=0; return 0;
+    initialized=0; if (trace_calls()) puts("Save trace: sceSaveDataTerminate"); return 0;
 }
-static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32_t mode, MountResult *result) {
+static int32_t mount_impl(int32_t user, const char *title, const DirName *dir, uint32_t mode, MountResult *result) {
     if (!initialized) return ERR_NOT_INITIALIZED;
     if (user<0) return ERR_INVALID_USER;
     if (!dir || !result || !valid_name(dir->data,sizeof(dir->data))) return ERR_PARAMETER;
@@ -198,6 +200,11 @@ static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32
            exists ? "existing" : "created",(mode & MODE_RDONLY) ? ", read-only" : "");
     return 0;
 }
+static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32_t mode, MountResult *result) {
+    int32_t r=mount_impl(user,title,dir,mode,result);
+    if (r) printf("Runtime: save data '%.32s' not mounted (error 0x%08x, mode %u)\n",dir ? dir->data : "?",(uint32_t)r,mode);
+    return r;
+}
 static ABI int32_t save_mount(const Mount1 *m, MountResult *result) {
     if (!m) return ERR_PARAMETER;
     return mount(m->user,m->title ? m->title->data : NULL,m->dir,m->mode,result);
@@ -215,7 +222,10 @@ static ABI int32_t save_umount(const MountPoint *point) {
     if (!initialized) return ERR_NOT_INITIALIZED;
     pthread_mutex_lock(&lock);
     int slot=slot_of(point);
-    if (slot>=0) { runtime_file_unmount(point->data); slots[slot].used=0; }
+    if (slot>=0) {
+        if (trace_calls()) printf("Save trace: umount %s (%s)\n",point->data,slots[slot].host);
+        runtime_file_unmount(point->data); slots[slot].used=0;
+    }
     pthread_mutex_unlock(&lock);
     return slot>=0 ? 0 : ERR_NOT_FOUND;
 }
@@ -262,7 +272,7 @@ static ABI int32_t save_delete(const Delete *d) {
     snprintf(host,sizeof(host),"%s/%s",base,d->dir->data);
     snprintf(meta,sizeof(meta),"%s/%s.sce_sys",base,d->dir->data);
     struct stat st;
-    if (stat(host,&st)) return ERR_NOT_FOUND;
+    if (stat(host,&st)) { printf("Runtime: save data '%s' not deleted (not found)\n",d->dir->data); return ERR_NOT_FOUND; }
     remove_tree(host);
     remove_tree(meta);
     printf("Runtime: save data '%s' deleted\n",d->dir->data);
@@ -339,6 +349,7 @@ static ABI int32_t save_search(const SearchCond *cond, SearchResult *result) {
         if (result->infos) { memset(&result->infos[i],0,sizeof(SearchInfo)); result->infos[i].blocks=32768; result->infos[i].free_blocks=16384; }
     }
     result->set_count=set;
+    if (trace_calls()) printf("Save trace: DirNameSearch '%.32s' user %d: %zu hits, %u listed\n",cond->dir ? cond->dir->data : "",cond->user,count,set);
     free(entries);
     return 0;
 }
