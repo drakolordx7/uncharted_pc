@@ -400,6 +400,10 @@ extern "C" void bbgpu_trophy_notify(int grade, const char* game, const char* nam
                                               : std::vector<unsigned char>());
 }
 
+extern "C" int bbgpu_gyro_aim(void) {
+    return BbSettings::Get().gyro_aim.load(std::memory_order_relaxed) ? 1 : 0;
+}
+
 extern "C" int bbgpu_overlay_captures_input(void) {
     return BbOverlay::CapturesInput() ? 1 : 0;
 }
