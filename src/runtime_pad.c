@@ -702,7 +702,48 @@ static void u2_look_camera(uint64_t camera, uint64_t image) {
     for (int i=0;i<4;++i) q[i]=result[i]/n;
     if (mouse_debug()) printf("Mouse: u2 lookturn t=%.4f step=%.3f pitch step=%.3f q=(%.3f %.3f %.3f %.3f)\n",now_us()*1e-6,step,step_pitch,q[0],q[1],q[2],q[3]);
 }
-/* Zoom camera (aiming with L2, the grenade with L1; update image+0x452c50): the stick turns its aim direction (x y z, unit vector
+/* Chapter 5 truck chase (update image+0x4496b0, found with the "EMULATED stick" monitoring). The camera lets the player look around a little: a yaw and a pitch offset
+ * (degrees, floats at camera+0x188 and +0x18c) that a filtered stick (floats +0x180 / +0x184) drives. Measured on 1000 frames of the chase: yaw offset += 0.46 x
+ * filtered stick x per frame and 1.7 % of it goes back to zero each frame; the picture turns 0.88 degrees per degree of offset; the range seen is about -15..+15 degrees.
+ * The mouse sets the offsets directly: the target is kept here and written before each update (a little above, to make up for the 1.7 % the update takes back),
+ * so the look holds where the mouse leaves it. BB_U2_CHASE=0 turns this off (the mouse goes through the stick again). */
+static U2Turn u2_chase_turn;
+static volatile uint64_t u2_chase_us;   /* last frame the chase camera was updated (its mouse queue, 2, is filled meanwhile) */
+static void u2_chase_camera(uint64_t camera, uint64_t image) {
+    static int mode=-1;
+    if (mode<0) { const char *e=getenv("BB_U2_CHASE"); mode=e && atoi(e)==0 ? 0 : 1; }
+    {   /* BB_U2_CHASE_DUMP=1: the camera object's floats 80..127 with the stick and the shown yaw, one line per frame (to find what the picture follows) */
+        static int dump=-1; static unsigned frames;
+        if (dump<0) { const char *e=getenv("BB_U2_CHASE_DUMP"); dump=e && atoi(e)>0; }
+        if (dump && frames<30000) {
+            float buf[512], shown=0.0f; double age=0.0;
+            const float *blk=(const float *)(uintptr_t)(guest_callback_rsp+0xe0);
+            if (safe_read(buf,camera,sizeof(buf))) {
+                if (!bbgpu_camera_yaw(&shown,&age) || age>0.25) shown=-999.0f;
+                ++frames;
+                printf("Mouse: CHASEOBJ %#llx t=%.4f rx=%.4f ry=%.4f shown=%.3f :",(unsigned long long)camera,now_us()*1e-6,blk[23],blk[24],shown);
+                for (int i=80;i<128;++i) printf(" %g",buf[i]);
+                printf("\n");
+            }
+        }
+    }
+    if (!mode || aim_native || look_held) return;
+    u2_chase_us=now_us();
+    float *off=(float *)(uintptr_t)(camera+0x188);
+    static uint64_t sess_us, sess_camera; static float target_yaw, target_pitch;
+    const uint64_t now=now_us();
+    float step, step_pitch;
+    if (!u2_mouse_turn(&u2_chase_turn,2,camera,u2_frame_dt(image),input.mouse_aim_sensitivity,-1.0f,&step,&step_pitch)) return;
+    if (!(off[0]>-60.0f && off[0]<60.0f && off[1]>-60.0f && off[1]<60.0f)) return;   /* (a camera not set yet) */
+    if (camera!=sess_camera || now-sess_us>300000) { sess_camera=camera; target_yaw=off[0]; target_pitch=off[1]; step=step_pitch=0.0f; }
+    sess_us=now;
+    u2_native_us=now;
+    target_yaw-=step/0.88f; target_pitch+=step_pitch/0.88f;
+    target_yaw=target_yaw<-15.0f ? -15.0f : target_yaw>15.0f ? 15.0f : target_yaw;
+    target_pitch=target_pitch<-13.0f ? -13.0f : target_pitch>13.0f ? 13.0f : target_pitch;
+    off[0]=target_yaw/0.983f; off[1]=target_pitch/0.983f;
+    if (mouse_debug()) { static unsigned n; if ((n++&15)==0) printf("Mouse: u2 chase %#llx offsets yaw %.3f pitch %.3f (step %.3f %.3f)\n",(unsigned long long)camera,target_yaw,target_pitch,step,step_pitch); }
+}/* Zoom camera (aiming with L2, the grenade with L1; update image+0x452c50): the stick turns its aim direction (x y z, unit vector
  * at camera+0x1f30; player-aiming-machine3's UpdateCameraDirection, image+0x71a1b0). Measured by moving the mouse as a stick: the
  * mouse to the right raises atan2(z, x), the mouse down lowers the elevation, as with the U1 aim vector. The mouse turns the vector
  * directly just before the update. Two zoom cameras (one per shoulder) are updated while the shoulder switches: both get the same turn. */
@@ -764,6 +805,7 @@ static void u2_weight_probe(void) {
         }
     }
 }
+static uint64_t u2_dbg_cams[12]; static int u2_dbg_ncams;   /* (debug) the cameras updated in the last frame that changed the set */
 static void __attribute__((ms_abi)) u2b_camera_hook(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t unused3) {
     (void)unused0; (void)unused1; (void)unused3;
     const uint64_t update=saved_register(5), camera=saved_register(7);
@@ -778,6 +820,7 @@ static void __attribute__((ms_abi)) u2b_camera_hook(uint64_t unused0, uint64_t u
                 for (int i=0;i<n_cur;++i) printf(" %#llx",(unsigned long long)cur[i]);
                 printf(" ] aim=%d look=%d follow=%d t=%.4f\n",aim_held,look_held,camera_hook_us && t-camera_hook_us<50000,t*1e-6);
                 memcpy(last,cur,sizeof(cur)); n_last=n_cur;
+                memcpy(u2_dbg_cams,cur,sizeof(cur)); u2_dbg_ncams=n_cur;
             }
             n_cur=0;
         }
@@ -792,6 +835,7 @@ static void __attribute__((ms_abi)) u2b_camera_hook(uint64_t unused0, uint64_t u
     case U2B_UPDATE_COVER: { static int wp=-1; if (wp<0) { const char *e=getenv("BB_U2_WPROBE"); wp=e && atoi(e)>0; } if (wp) u2_weight_probe(); }
         u2_cover_camera(camera,image); break;
     case U2B_UPDATE_LOOK: u2_look_camera(camera,image); break;
+    case 0x4496b0: u2_chase_camera(camera,image); break;
     case U2B_UPDATE_FOLLOW: /* walking: the follow camera's direction (+0x9ec0) and vertical arc (+0x9e60), as in the earlier U2 build */
     {
         /* A walking camera that has just been made (museum start, chapter or level change) holds numbers that are not set yet
@@ -5143,7 +5187,7 @@ static void sample_host(PadData *d) {
     const int native=u2_native_us && now-u2_native_us<100000; /* U2: the cover / look-around camera turns with the mouse */
     for (int q=0;q<CAMERA_QUEUES;++q) {
         /* queue 2 is the zoom camera's (U1 aiming): nothing else reads it, so it stays empty outside the aim */
-        if (captured && (following || joypad || native) && (q!=2 || aim_held || look_held || now_us()<aim_blend_until_us || now_us()<look_blend_until_us)) { camera_dx[q]+=mdx; camera_dy[q]+=mdy; }
+        if (captured && (following || joypad || native) && (q!=2 || aim_held || look_held || now_us()<aim_blend_until_us || now_us()<look_blend_until_us || (u2_chase_us && now_us()-u2_chase_us<200000))) { camera_dx[q]+=mdx; camera_dy[q]+=mdy; }
         else { camera_dx[q]=camera_dy[q]=0; }
     }
     /* gyro aiming: kept while aiming (at low frame rates the aim controller runs only every 100-200 ms) */
@@ -5156,6 +5200,17 @@ static void sample_host(PadData *d) {
     if (captured && direct_x && direct_y) {
         mouse_vx=mouse_vy=0; mouse_last_us=0;
     } else if (captured) {
+        if (mouse_debug() && (mdx!=0 || mdy!=0)) {   /* monitoring: the mouse goes through the emulated right stick; which cameras are running then? */
+            static uint64_t last_print; static unsigned n_since;
+            ++n_since;
+            if (now-last_print>1000000) {
+                last_print=now;
+                printf("Mouse: EMULATED stick (no native camera) %u mouse reports; cameras [",n_since);
+                for (int i=0;i<u2_dbg_ncams;++i) printf(" %#llx",(unsigned long long)u2_dbg_cams[i]);
+                printf(" ] following=%d joypad=%d native=%d aim=%d look=%d t=%.4f\n",following,joypad,native,aim_held,look_held,now*1e-6);
+                n_since=0;
+            }
+        }
         float dt=mouse_last_us ? (float)(now-mouse_last_us)*1e-6f : 0.0f;
         mouse_last_us=now;
         if (dt>0.0f) {
