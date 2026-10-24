@@ -252,6 +252,7 @@ static void load_input(void) {
 static float mouse_vx, mouse_vy;
 static uint64_t mouse_last_us;
 static uint64_t wheel_until_us[2]; /* wheel up, wheel down: held briefly for the game to see */
+static volatile int u1_rail_wheel;   /* U1: a list with a scrollbar is on screen: the wheel scrolls its view (the bar's thumb) instead of moving the highlight */
 /* A turn rate (degrees/s) as a stick byte, through the inverse of the U1 follow camera's response
  * measured below its speed ramp: about 240 x^2.5 degrees/s (x = 0.25: 7, 0.5: 37). */
 static uint8_t mouse_axis(float rate) {
@@ -3410,8 +3411,8 @@ static int key_action_down(int a, const bool *k, uint32_t mouse, uint64_t now) {
         if (a==A_LEFT && now<wheel_until_us[0]) return 1;
         if (a==A_RIGHT && now<wheel_until_us[1]) return 1;
     } else {
-        if (a==A_UP && now<wheel_until_us[0]) return 1;
-        if (a==A_DOWN && now<wheel_until_us[1]) return 1;
+        if (a==A_UP && now<wheel_until_us[0] && !u1_rail_wheel) return 1;
+        if (a==A_DOWN && now<wheel_until_us[1] && !u1_rail_wheel) return 1;
     }
     if (a==A_CIRCLE && ((mouse & 8u) || ((mouse & 2u) && u1_credits_recent(now)))) return 1;   /* (the credits have nothing to click: the right button goes back) */
     if (menu_button) {
@@ -3668,7 +3669,8 @@ static uint32_t menu_mouse_buttons(const bool *k, uint32_t mouse, uint64_t now) 
     menu_hover=0;
     static struct {
         int active, target, presses, click_pending, click_action, last_left, drag, queue, last_dir, last_sel, last_target, last_press, list_active, list_click, list_presses,
-            sb_drag, sb_measure, sb_same, sb_last, sb_n, sb_cmp, direct_tries, list_armed, jump_fail, dlg_sel;
+            sb_drag, sb_measure, sb_same, sb_last, sb_n, sb_cmp, direct_tries, list_armed, jump_fail, dlg_sel, sb_by_wheel, sb_pending;
+        uint64_t wseen[2];
         uint32_t jump_done_at_arm;
         int press_dir, freeze_on, freeze_top, sb_m_armed, sb_m_fallback; uint32_t sb_m_done; uint64_t press_until, freeze_item, freeze_end, sb_m_until, sb_m_deadline;
         uint64_t sb_item, sb_cached_item, list_hold, dlg_seen, dlg_cross_at;
@@ -3733,7 +3735,22 @@ static uint32_t menu_mouse_buttons(const bool *k, uint32_t mouse, uint64_t now) 
     {
         float rx, ry, rw, rh; uint64_t ritem=0;
         const int have_rail=menu_rail_find(now,&rx,&ry,&rw,&rh,&ritem);
-        if (!left) h.sb_drag=0;
+        if (!left && !h.sb_by_wheel) h.sb_drag=0;
+        u1_rail_wheel=have_rail;
+        if (h.sb_by_wheel && !have_rail) { h.sb_drag=0; h.sb_by_wheel=0; h.sb_pending=0; }
+        {   /* the wheel scrolls the list's view (the bar's thumb) like a drag of the bar would: a notch is one row; the highlight stays where it is */
+            int notch=0;
+            for (int i=0;i<2;++i) if (wheel_until_us[i]!=h.wseen[i]) { h.wseen[i]=wheel_until_us[i]; notch+=i==0 ? -1 : 1; }
+            if (have_rail && notch && !left && menu_list_index(ritem)>=0) {
+                if (!h.sb_drag) {
+                    h.sb_drag=1; h.sb_by_wheel=1; h.sb_pending=0; h.sb_item=ritem; h.sb_y=ry; h.sb_h=rh; h.sb_cmp=0; h.sb_same=0; h.sb_last=menu_list_index(ritem);
+                    h.sb_measure=(h.sb_cached_item!=ritem);
+                    if (h.sb_measure) h.sb_n=0;
+                    h.sb_m_armed=0; h.sb_m_fallback=0;
+                }
+                if (h.sb_by_wheel) h.sb_pending+=notch;
+            }
+        }
         if (have_rail && ux>=rx-10.0f && ux<=rx+rw+10.0f && uy>=ry-4.0f && uy<=ry+rh+4.0f) menu_hover=1;
         if (have_rail && clicked && ux>=rx-10.0f && ux<=rx+rw+10.0f && uy>=ry-4.0f && uy<=ry+rh+4.0f && menu_list_index(ritem)>=0) {
             h.sb_drag=1; h.sb_item=ritem; h.sb_y=ry; h.sb_h=rh; h.sb_cmp=0; h.sb_same=0; h.sb_last=menu_list_index(ritem);
@@ -3767,7 +3784,17 @@ static uint32_t menu_mouse_buttons(const bool *k, uint32_t mouse, uint64_t now) 
                 if (!h.sb_measure) printf("Runtime: scrollbar: the list has %d rows\n",h.sb_n);
                 else if ((now/16000u)&1u) sb_out=BTN_DOWN;
             }
-            if (!h.sb_measure && h.sb_drag) {
+            if (!h.sb_measure && h.sb_drag && h.sb_by_wheel) {
+                ListInfo li; const int top=list_top_read(h.sb_item);
+                if (menu_list_find_ex(now,&li,0) && li.pitch>1.0f && top>=0) {
+                    const int visible=(int)floorf((li.bottom-li.top)/li.pitch+0.5f);
+                    const int max_top=h.sb_n-visible>0 ? h.sb_n-visible : 0;
+                    int want=top+h.sb_pending;
+                    want=want<0 ? 0 : want>max_top ? max_top : want;
+                    if (want!=top) list_top_write(h.sb_item,want);
+                }
+                h.sb_pending=0; h.sb_drag=0; h.sb_by_wheel=0;
+            } else if (!h.sb_measure && h.sb_drag) {
                 float f=(uy-h.sb_y)/h.sb_h; f=f<0.0f ? 0.0f : f>1.0f ? 1.0f : f;
                 ListInfo li;
                 if (menu_list_find_ex(now,&li,0) && li.pitch>1.0f && list_top_read(h.sb_item)>=0) {   /* the highlighted row may be out of view: not needed here */
