@@ -3418,7 +3418,7 @@ static int menu_list_find_ex(uint64_t now, ListInfo *info, int need_highlight) {
         float ys[64]; int nys=0; float sel=-1.0f, top=1e9f, bottom=-1e9f;
         for (int j=0;j<menu_text_count && nys<64;++j) {
             const MenuText *b=&menu_texts[j];
-            if (b->ordinal<1 || now-b->us>100000 || b->w<=1.0f || b->h<22.0f || b->h>29.0f || fabsf(b->x-best_x)>=1.0f) continue;
+            if (b->ordinal<1 || now-b->us>100000 || b->w<=1.0f || b->h<22.0f || b->h>29.0f || (fabsf(b->x-best_x)>=1.0f && !(b->style[5]>2.5f && fabsf(b->x-best_x)<14.0f))) continue;   /* (a highlighted row can be drawn a little larger, so a little to the left: Récompenses) */
             ys[nys++]=b->y+b->h*0.5f;
             if (b->y<top) top=b->y;
             if (b->y+b->h>bottom) bottom=b->y+b->h;
@@ -3943,14 +3943,17 @@ static uint32_t menu_mouse_buttons(const bool *k, uint32_t mouse, uint64_t now) 
         /* Statistiques (a list with a column of values on the right): only the difficulties of Contre-la-montre (rows with an empty value) open
          * something. A click on a statistic does nothing, and the section titles (dimmer: style[1] 0.5) are never selected by the game, so
          * the cursor over one must not chase it (the highlight shook between the rows around it). */
-        int stats=0, label=-1, value_w=0;
+        int stats=0, label=-1, value_w=0, bright_label=0, nvals=0;
         pthread_mutex_lock(&menu_text_lock);
         for (int i=0;i<menu_text_count;++i) {
             const MenuText *t=&menu_texts[i];
             if (t->item!=list.item || now-t->us>100000 || t->ordinal<1) continue;
-            if (t->x>list.colx+300.0f && t->w>0.5f && t->h<30.0f) stats=1;
+            if (t->x>list.colx+300.0f && t->w>0.5f && t->h<30.0f) ++nvals;
+            if (t->h>=22.0f && t->h<=29.0f && fabsf(t->x-list.colx)<1.0f && t->style[1]>=0.7f) bright_label=1;   /* (Récompenses: every label, the highlighted one too, is at style[1] 0.5) */
             if (fabsf(t->x-list.colx)<1.0f && t->h>=22.0f && t->h<=29.0f && uy>=t->y-2.0f && uy<t->y+list.pitch-2.0f) label=i;
         }
+        stats=nvals>=3;   /* (Médailles has one lone icon on the right, not a column of values) */
+        if (!bright_label) stats=0;  /* Récompenses: every label is dim (style[1] 0.5) next to a value column; only Statistiques mixes dim titles with normal rows */
         if (label>=0) {
             const MenuText *l=&menu_texts[label];
             for (int i=0;i<menu_text_count;++i) {
@@ -3965,15 +3968,17 @@ static uint32_t menu_mouse_buttons(const bool *k, uint32_t mouse, uint64_t now) 
         pthread_mutex_unlock(&menu_text_lock);
     }
     if (list_found) {   /* Statistiques, highlight on a statistic (a row with a value): no "SÉLECTIONNER" in the prompt bar, see u1_bar_flags */
-        int stats=0, sel_value=0;
+        int stats=0, sel_value=0, bright_label=0, nvals=0;
         pthread_mutex_lock(&menu_text_lock);
         const MenuText *sl=NULL;
         for (int i=0;i<menu_text_count;++i) {
             const MenuText *t=&menu_texts[i];
             if (t->item!=list.item || now-t->us>100000 || t->ordinal<1) continue;
-            if (t->x>list.colx+300.0f && t->w>0.5f && t->h<30.0f) stats=1;
-            if (fabsf(t->x-list.colx)<1.0f && t->h>=22.0f && t->h<=29.0f && t->style[5]>2.5f) sl=t;
+            if (t->x>list.colx+300.0f && t->w>0.5f && t->h<30.0f) ++nvals;
+            if (t->h>=22.0f && t->h<=29.0f && fabsf(t->x-list.colx)<1.0f && t->style[1]>=0.7f) bright_label=1;
+            if (fabsf(t->x-list.colx)<14.0f && t->h>=22.0f && t->h<=29.0f && t->style[5]>2.5f) sl=t;
         }
+        stats=nvals>=3 && bright_label;
         if (sl) for (int i=0;i<menu_text_count;++i) {
             const MenuText *t=&menu_texts[i];
             if (t->item==list.item && now-t->us<=100000 && t->ordinal>=1 && t->x>list.colx+300.0f && t->h<30.0f && fabsf(t->y-sl->y)<2.0f && t->w>0.5f) sel_value=1;
@@ -4120,6 +4125,15 @@ static uint32_t menu_mouse_buttons(const bool *k, uint32_t mouse, uint64_t now) 
     }
     if (now<h.step_until) out|=h.step_dir==1 ? BTN_LEFT : BTN_RIGHT;
     out|=(uint32_t)sb_out;
+    if (list_ctl && list_delta!=0 && !h.sb_drag) {
+        /* never press past either end of the list: Up on the first row or Down on the last wraps round to the other end and the scroll bar's
+         * thumb leaps across (the cursor moving fast while the highlight lags behind a frame or two asks for exactly that) */
+        const int idx=menu_list_index(list.item);
+        if (idx>=0) {
+            if (list_delta<0 && -list_delta>idx) list_delta=-idx;
+            else if (list_delta>0 && h.sb_cached_item==list.item && h.sb_n>0 && list_delta>h.sb_n-1-idx) list_delta=h.sb_n-1-idx>0 ? h.sb_n-1-idx : 0;
+        }
+    }
     if (!h.sb_drag && list_ctl && (h.list_active || h.list_click)) {
         if (list_delta==0) {
             h.list_presses=0; u1_jump_steps=0; h.list_armed=0;
