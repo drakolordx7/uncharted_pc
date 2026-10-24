@@ -1440,6 +1440,11 @@ static void __attribute__((ms_abi)) u1b_aim_camera(uint64_t unused0, uint64_t un
     const int fading=!aim_held && now<aim_blend_until_us;
     if (!aim_held && !fading) return;
     const uint64_t entry=*(const uint64_t *)(uintptr_t)(guest_callback_rsp-72);
+    if (entry>0x10000) {   /* A roll with the aim held: the game blends the zoom camera out and the walking camera in (measured: the zoom entry's weight at +0x38 falls 1 -> 0 in a second while
+                            * +0x34 stays 1, the walking entry's weight rises 0 -> 1). That is not an aim: the walking camera takes the mouse as well, or the picture freezes meanwhile. */
+        float a=0.0f, b=0.0f;
+        if (safe_read(&a,entry+0x34,4) && safe_read(&b,entry+0x38,4) && a>0.99f && b>=0.0f && b<0.99f) u2_zoom_under_us=now;
+    }
     /* The picture while the aim blends in (about 0.5 s) is w x zoom camera + (1-w) x the cameras below it (w = the stack
      * entry's weight, float at entry+0x34, 0 -> 1 linearly; the manager's angle interpolation image+0xb2f00), and the
      * lower cameras ignore the mouse. Two more things hold the zoom camera back: for the first part of the blend its aim
@@ -1531,6 +1536,19 @@ static void __attribute__((ms_abi)) u1b_zoom_entry(uint64_t unused0, uint64_t un
     if (!aim_held || pad_only_mode) return;
     const uint64_t block=saved_register(4);
     if (block<0x10000) return;
+    {   /* The zoom camera coming in again after a roll with the aim held (the earlier zoom entry was blended out under the walking camera, see u1b_aim_camera): the walking camera under it
+         * does not turn with the mouse, and the new zoom camera's weight (the stack entry that register 9 points at, floats +0x34 and +0x38, equal while it comes in) stays near 0 for a
+         * moment, so the picture froze. Its weight is brought up linearly in a quarter of a second at most. */
+        const uint64_t entry=saved_register(9), now=now_us();
+        float a=0.0f, b=0.0f;
+        if (entry>0x10000 && u2_zoom_under_us && now-u2_zoom_under_us<1500000 && safe_read(&a,entry+0x34,4) && safe_read(&b,entry+0x38,4) && a>=0.0f && a<0.999f && SDL_fabsf(a-b)<0.002f) {
+            static uint64_t start_us, last_us;
+            if (!last_us || now-last_us>100000) start_us=now;
+            last_us=now;
+            float ramp=(float)(now-start_us)*(1.0f/250000.0f); ramp=ramp>1.0f ? 1.0f : ramp;
+            if (ramp>a) { safe_write(entry+0x34,&ramp,4); safe_write(entry+0x38,&ramp,4); }
+        }
+    }
     const float one=1.0f;
     safe_write(block+0x1c,&one,4);
 }
@@ -1815,7 +1833,8 @@ static void __attribute__((ms_abi)) u1_joypad_sticks(uint64_t unused0, uint64_t 
             aim_rate[0]=aim_rate[1]=0.0f;
         }
         /* the zoom camera is not updated for a few frames when the shoulder is switched: keep the stick out of it */
-        const int native_yaw=(aim_held && aim_native_us && now-aim_native_us<600000) ||
+        const int zoom_fading=u2_zoom_under_us && now-u2_zoom_under_us<100000;   /* (a roll with the aim held: the zoom camera is blending out, the walking camera has the mouse) */
+        const int native_yaw=(aim_held && !zoom_fading && aim_native_us && now-aim_native_us<600000) ||
                              (look_held && look_native_us && now-look_native_us<100000) ||
                              cover_native;
         x=native_yaw ? 0.0f : curve(rate_x)+push;
