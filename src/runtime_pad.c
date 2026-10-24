@@ -4527,6 +4527,12 @@ static uint32_t u2_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
     U2Row hov={0}, sel={0}, slid={0};
     const int popup=u2_popup_us && now-u2_popup_us<700000 && u2_popup_us<=now+1000000;   /* the chapter carousel of the Chapitres page is open */
     { static int popup_last; if (popup!=popup_last) { popup_last=popup; printf("Runtime: U2 popup %s\n",popup ? "in" : "out"); } }
+    {   /* a request to set a value that no control picked up (its page closed, or another control took its place) must not block every later one: it expires */
+        static uint64_t pend_since;
+        if (!u2_jump_pending) pend_since=0;
+        else if (!pend_since) pend_since=now;
+        else if (now-pend_since>500000) { u2_jump_pending=0; u2_jump_keep=0; pend_since=0; if (mouse_debug()) printf("Mouse: U2 stale jump request dropped\n"); }
+    }
     int have_hov=0, have_sel=0, hi_n=0, have_slid=0, wide_n=0, ls_wide_n=0, on_cmd=0, ls_n[6]={0,0,0,0,0,0}, ls_sel[6]={0,0,0,0,0,0};
     float ls_miny[6]={1e9f,1e9f,1e9f,1e9f,1e9f,1e9f};
     float hi_cy[16], wide_min=1e9f, wide_ys[16]; int wide_ys_n=0;
