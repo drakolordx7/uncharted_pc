@@ -81,6 +81,8 @@ struct CheckpointRecord {
     u64 hashes[2];
     u32 counts[3];
     VAddr args;
+    u64 tick;     // the scheduler tick this command is submitted with
+    u64 gpu_tick; // the GPU's last confirmed tick when the command was recorded
     struct Range {
         VAddr address;
         u32 size;
@@ -95,14 +97,15 @@ constexpr u64 CheckpointRingSize = 1u << 16;
 std::unique_ptr<CheckpointRecord[]> checkpoint_ring;
 std::atomic<u64> checkpoint_seq{0};
 
-const void* NoteCheckpoint(const char* kind, u64 hash0, u64 hash1, u32 a, u32 b, u32 c,
-                           VAddr args) {
+const void* NoteCheckpoint(Scheduler& scheduler, const char* kind, u64 hash0, u64 hash1,
+                           u32 a, u32 b, u32 c, VAddr args) {
     if (!g_gpu_checkpoints) {
         return nullptr;
     }
     const u64 seq = checkpoint_seq.fetch_add(1, std::memory_order_relaxed) + 1;
     auto& record = checkpoint_ring[seq % CheckpointRingSize];
-    record = {seq, kind, {hash0, hash1}, {a, b, c}, args};
+    record = {seq, kind, {hash0, hash1}, {a, b, c}, args, scheduler.CurrentTick(),
+              scheduler.GetWorkSemaphore()->KnownGpuTick()};
     record.num_buffers = num_checkpoint_buffers;
     std::copy_n(checkpoint_buffers, num_checkpoint_buffers, record.buffers);
     return reinterpret_cast<const void*>(static_cast<uintptr_t>(seq));
@@ -160,6 +163,54 @@ void ReportCheckpoints() {
     }
 }
 } // namespace
+
+// bbport: the commands the CPU recorded most recently, for the loader's fault handler — a driver
+// that crashes while resetting after a GPU hang leaves no Vulkan call to report the loss. Only
+// host memory is read (vkGetQueueCheckpointDataNV is not safe in that state). The tick stored with
+// each record is the submission it went into; the GPU's last confirmed tick separates the commands
+// it had finished from the ones that were in flight when it stopped.
+void ReportRecentCheckpoints(u32 max_records) {
+    if (!checkpoint_ring) {
+        std::printf("GPU crash: no GPU checkpoints (BB_GPU_CHECKPOINTS=1 was not set)\n");
+        return;
+    }
+    const u64 latest = checkpoint_seq.load(std::memory_order_acquire);
+    if (latest == 0) {
+        std::printf("GPU crash: no command recorded yet\n");
+        return;
+    }
+    const u64 gpu = checkpoint_ring[latest % CheckpointRingSize].gpu_tick;
+    // Walk back to the oldest command the GPU had not confirmed when the newest one was recorded.
+    u64 in_flight = 0;
+    while (in_flight < latest && in_flight < CheckpointRingSize) {
+        const auto& record = checkpoint_ring[(latest - in_flight) % CheckpointRingSize];
+        if (record.seq != latest - in_flight || record.tick <= gpu) {
+            break;
+        }
+        ++in_flight;
+    }
+    std::printf("GPU crash: the CPU recorded command #%llu; the GPU last confirmed tick %llu; "
+                "%llu command(s) in flight\n",
+                static_cast<unsigned long long>(latest), static_cast<unsigned long long>(gpu),
+                static_cast<unsigned long long>(in_flight));
+    // Nothing in flight (a CPU-side crash): the last commands are still worth seeing. Otherwise
+    // the first ones in flight: the GPU stopped in the oldest of them.
+    u64 seq = in_flight ? latest - in_flight + 1 : (latest > 8 ? latest - 7 : 1);
+    u64 shown = in_flight ? in_flight : latest - seq + 1;
+    if (shown > max_records) {
+        std::printf("GPU crash: showing the first %u of them\n", max_records);
+        shown = max_records;
+    }
+    for (u64 n = 0; n < shown; ++n, ++seq) {
+        const auto& record = checkpoint_ring[seq % CheckpointRingSize];
+        std::printf("GPU crash:   #%llu %s %016llx %016llx counts %u %u %u t%llu\n",
+                    static_cast<unsigned long long>(record.seq), record.kind,
+                    static_cast<unsigned long long>(record.hashes[0]),
+                    static_cast<unsigned long long>(record.hashes[1]), record.counts[0],
+                    record.counts[1], record.counts[2],
+                    static_cast<unsigned long long>(record.tick));
+    }
+}
 
 static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
     // TODO(roamic): Add support for multiple viewports and geometry shaders when ViewportIndex
@@ -1757,8 +1808,8 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     const void* checkpoint = nullptr;
     if (g_gpu_checkpoints) {
         const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
-        checkpoint = NoteCheckpoint("draw", vs_info.pgm_hash, ps ? ps->pgm_hash : 0, num_indices,
-                                    num_instances, 0, 0);
+        checkpoint = NoteCheckpoint(scheduler, "draw", vs_info.pgm_hash, ps ? ps->pgm_hash : 0,
+                                    num_indices, num_instances, 0, 0);
     }
     scheduler.Record([=](vk::CommandBuffer cmdbuf) {
         if (checkpoint) {
@@ -1918,7 +1969,8 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     const void* checkpoint = nullptr;
     if (g_gpu_checkpoints) {
         const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
-        checkpoint = NoteCheckpoint(is_indexed ? "indexed indirect draw" : "indirect draw",
+        checkpoint = NoteCheckpoint(scheduler,
+                                    is_indexed ? "indexed indirect draw" : "indirect draw",
                                     pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash,
                                     ps ? ps->pgm_hash : 0, max_count, stride,
                                     count_address != 0, indirect.args);
@@ -2261,7 +2313,8 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
         const char* env = std::getenv("BB_FULL_BARRIER");
         return env ? std::atoi(env) : 0;
     }();
-    const void* checkpoint = NoteCheckpoint("dispatch", cs.pgm_hash, 0, dim_x, dim_y, dim_z, 0);
+    const void* checkpoint =
+        NoteCheckpoint(scheduler, "dispatch", cs.pgm_hash, 0, dim_x, dim_y, dim_z, 0);
     scheduler.Record([=](vk::CommandBuffer cmdbuf) {
         const vk::MemoryBarrier2 barrier = {
             .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
@@ -2435,9 +2488,9 @@ void Rasterizer::DispatchIndirectRecord(const ComputePipeline* pipeline, VAddr a
         args_offset = copy_offset;
     }
     pipeline->BindResources(set_writes, push_data);
-    const void* checkpoint =
-        NoteCheckpoint("indirect dispatch", pipeline->GetStage(Shader::SwStage::Compute).pgm_hash,
-                       0, size, 0, 0, address + offset);
+    const void* checkpoint = NoteCheckpoint(
+        scheduler, "indirect dispatch", pipeline->GetStage(Shader::SwStage::Compute).pgm_hash, 0,
+        size, 0, 0, address + offset);
     scheduler.Record([=](vk::CommandBuffer cmdbuf) {
         if (checkpoint) {
             cmdbuf.setCheckpointNV(checkpoint);

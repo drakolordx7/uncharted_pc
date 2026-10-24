@@ -174,9 +174,10 @@ Presenter::~Presenter() {
     draw_scheduler.Finish();
     present_scheduler.Finish();
     flip_scheduler.Finish();
-    Check(draw_scheduler.CommandBuffer().reset());
-    Check(present_scheduler.CommandBuffer().reset());
-    Check(flip_scheduler.CommandBuffer().reset());
+    // bbport: a device lost here has already been reported; a destructor must not end the process.
+    CheckTeardown<"reset the draw command buffer">(draw_scheduler.CommandBuffer().reset());
+    CheckTeardown<"reset the present command buffer">(present_scheduler.CommandBuffer().reset());
+    CheckTeardown<"reset the flip command buffer">(flip_scheduler.CommandBuffer().reset());
 
     const vk::Device device = instance.GetDevice();
     for (auto& frame : present_frames) {
@@ -325,11 +326,11 @@ Frame* Presenter::PrepareLastFrame() {
         if (result == vk::Result::eSuccess) {
             break;
         }
-        if (result == vk::Result::eTimeout) {
-            continue;
+        if (result == vk::Result::eErrorDeviceLost) {
+            DeviceLost(instance.GetDevice()); // bbport: GPU crash report, not a bare assert
         }
-        ASSERT_MSG(result != vk::Result::eErrorDeviceLost,
-                   "Device lost during waiting for a frame");
+        ASSERT_MSG(result == vk::Result::eTimeout, "Waiting for a frame failed: {}",
+                   vk::to_string(result));
     }
 
     auto& scheduler = flip_scheduler;
@@ -800,6 +801,9 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last) {
     // the frame's present fence and future GetRenderFrame() call will hang waiting for this frame.
     if (last) {
         const auto reset_result = instance.GetDevice().resetFences(frame->present_done);
+        if (reset_result == vk::Result::eErrorDeviceLost) {
+            DeviceLost(instance.GetDevice()); // bbport: GPU crash report, not a bare assert
+        }
         ASSERT_MSG(reset_result == vk::Result::eSuccess,
                    "Unexpected error resetting present done fence: {}",
                    vk::to_string(reset_result));
@@ -962,12 +966,11 @@ Frame* Presenter::GetRenderFrame() {
 
     // Wait for the presentation to be finished so all frame resources are free
     while (wait() != vk::Result::eSuccess) {
-        ASSERT_MSG(result != vk::Result::eErrorDeviceLost,
-                   "Device lost during waiting for a frame");
-        // Retry if the waiting times out
-        if (result == vk::Result::eTimeout) {
-            continue;
+        if (result == vk::Result::eErrorDeviceLost) {
+            DeviceLost(device); // bbport: GPU crash report, not a bare assert
         }
+        ASSERT_MSG(result == vk::Result::eTimeout, "Waiting for a frame failed: {}",
+                   vk::to_string(result));
     }
 
     ::Libraries::VideoOut::NoteRenderFrameWait(static_cast<u64>(

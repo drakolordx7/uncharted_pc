@@ -246,6 +246,7 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
                              isa_kind_name(isa_table->sites[site].kind));
         isa_rewrite_report(isa_table,stderr);
     }
+    if (gpu_enabled) bbgpu_dump_recent_checkpoints();
     /* rbp chain (guest and host code keep frame pointers). */
     uintptr_t rbp=(uintptr_t)c->Rbp;
     for (int depth=0; depth<24 && rbp; ++depth) {

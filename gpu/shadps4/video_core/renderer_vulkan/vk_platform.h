@@ -32,6 +32,14 @@ bool AddressReportEnabled();
 vk::UniqueDebugUtilsMessengerEXT CreateAddressReportCallback(vk::Instance instance);
 void DumpAddressBindings(u64 address);
 
+/// bbport: the device a GPU crash report is read from. The port creates a single Vulkan device
+/// and Instance registers it here once it exists (defined in vk_semaphore.cpp).
+void SetDeviceLostDevice(vk::Device device);
+
+/// bbport: prints the GPU crash report (driver fault info, checkpoints, arenas) and ends the
+/// game (defined in vk_semaphore.cpp).
+[[noreturn]] void ReportDeviceLost();
+
 template <typename T>
 concept VulkanHandleType = vk::isVulkanHandleType<T>::value;
 
@@ -57,6 +65,12 @@ void SetObjectName(vk::Device device, const HandleType& handle, const char* form
 
 template <StringLiteral msg = "">
 static void Check(vk::Result r) {
+    // bbport: a lost device is a GPU crash, not a port bug. Report the driver's fault info, the
+    // last checkpoints and the arenas instead of stopping on the generic assert below (the
+    // report names the dispatch that hung the GPU; an assert here names nothing).
+    if (r == vk::Result::eErrorDeviceLost) [[unlikely]] {
+        ReportDeviceLost();
+    }
     if constexpr (msg.len <= 1) {
         ASSERT_MSG(r == vk::Result::eSuccess, "vk::Result={}", vk::to_string(r));
     } else {
@@ -67,6 +81,9 @@ static void Check(vk::Result r) {
 
 template <StringLiteral msg = "", typename T>
 static T Check(vk::ResultValue<T> r) {
+    if (r.result == vk::Result::eErrorDeviceLost) [[unlikely]] {
+        ReportDeviceLost();
+    }
     if constexpr (msg.len <= 1) {
         ASSERT_MSG(r.result == vk::Result::eSuccess, "vk::Result={}", vk::to_string(r.result));
     } else {
@@ -74,6 +91,21 @@ static T Check(vk::ResultValue<T> r) {
                    vk::to_string(r.result));
     }
     return std::move(r.value);
+}
+
+/// bbport: like Check, but a lost device is only logged. For teardown (~Presenter): the process
+/// is already going away and the crash report was printed by whichever call saw the loss first.
+template <StringLiteral msg = "">
+static void CheckTeardown(vk::Result r) {
+    if (r != vk::Result::eErrorDeviceLost) {
+        Check<msg>(r);
+        return;
+    }
+    if constexpr (msg.len <= 1) {
+        LOG_WARNING(Render_Vulkan, "Device lost during teardown");
+    } else {
+        LOG_WARNING(Render_Vulkan, "Device lost while trying to {}", msg.value);
+    }
 }
 
 } // namespace Vulkan

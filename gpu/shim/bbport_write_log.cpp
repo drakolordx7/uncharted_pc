@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "bbport_write_log.h"
 
+#include "video_core/renderer_vulkan/vk_rasterizer.h"
+
 #include <array>
 #include <atomic>
 #include <cstdio>
@@ -88,6 +90,10 @@ void Record(std::uint64_t address, const void* data, std::uint64_t size, Source 
     }
 }
 } // namespace BbWriteLog
+
+extern "C" void bbgpu_dump_recent_checkpoints(void) {
+    Vulkan::ReportRecentCheckpoints(200);
+}
 
 extern "C" void bbgpu_dump_guest_writes(void* ucontext) {
     using namespace BbWriteLog;

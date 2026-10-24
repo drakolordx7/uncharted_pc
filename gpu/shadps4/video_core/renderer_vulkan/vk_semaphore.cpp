@@ -29,12 +29,24 @@ void DumpBuffersNear(u64 address);
 }
 namespace Vulkan {
 
+// bbport: the device a GPU crash report is read from, registered by Instance::CreateDevice.
+// Written once before any render thread exists, only read afterwards.
+static vk::Device g_device_lost_device{};
+
+void SetDeviceLostDevice(vk::Device device) {
+    g_device_lost_device = device;
+}
+
+[[noreturn]] void ReportDeviceLost() {
+    DeviceLost(g_device_lost_device);
+}
+
 // bbport: the GPU crashed (device lost). The driver's description of the fault is printed and
 // the game ends: every later GPU wait would fail the same way (it used to wait forever).
 // Also called where a submission or present reports the loss (vk_semaphore.h).
 [[noreturn]] void DeviceLost(vk::Device device) {
     std::printf("GPU crash: the graphics device was lost\n");
-    if (g_device_fault_ext && VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceFaultInfoEXT) {
+    if (device && g_device_fault_ext && VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceFaultInfoEXT) {
         const auto get = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceFaultInfoEXT;
         VkDeviceFaultCountsEXT counts{.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
         get(device, &counts, nullptr);
@@ -73,7 +85,8 @@ namespace Vulkan {
                         static_cast<unsigned long long>(v.vendorFaultData), v.description);
         }
     } else {
-        std::printf("GPU crash: the driver gives no details (VK_EXT_device_fault unavailable)\n");
+        std::printf("GPU crash: the driver gives no details (%s)\n",
+                    device ? "VK_EXT_device_fault unavailable" : "the device was not created");
     }
     if (g_gpu_checkpoint_report) {
         g_gpu_checkpoint_report();

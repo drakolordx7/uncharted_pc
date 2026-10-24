@@ -35,6 +35,10 @@ namespace Vulkan {
 class GraphicsPipeline;
 class Runtime;
 
+/// bbport: prints the last commands the CPU recorded and how far the GPU got (fault-handler
+/// safe: no driver calls).
+void ReportRecentCheckpoints(u32 max_records);
+
 class Rasterizer {
 public:
     explicit Rasterizer(const Instance& instance, Scheduler& scheduler, Runtime& runtime,

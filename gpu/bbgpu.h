@@ -26,6 +26,9 @@ uintptr_t bbgpu_resolve(const char *scoped_nid);
 int bbgpu_handle_fault(void *ucontext, void *address);
 /* BB_WRITE_LOG=1: prints the logged GPU-side writes to guest memory near the fault. */
 void bbgpu_dump_guest_writes(void *ucontext);
+/* Prints the last draws and dispatches the CPU recorded (BB_GPU_CHECKPOINTS=1) and how far the
+ * GPU got: for a fault where no Vulkan call reported a lost device (the driver crashed). */
+void bbgpu_dump_recent_checkpoints(void);
 /* Keyboard text entry through the game window (IME dialog). begin returns 0 when
  * no window exists; poll returns 0 typing, 1 confirmed, 2 cancelled (UTF-8 text). */
 int bbgpu_text_input_begin(const char *initial_utf8, const char *prompt_utf8);

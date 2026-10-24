@@ -776,6 +776,8 @@ bool Instance::CreateDevice() {
         return false;
     }
     device = std::move(dev);
+    // bbport: the device-lost report reads the driver's fault info from this handle.
+    SetDeviceLostDevice(*device);
 
     VULKAN_HPP_DEFAULT_DISPATCHER.init(*device);
     if (Dlss* dlss = Dlss::Get()) {
