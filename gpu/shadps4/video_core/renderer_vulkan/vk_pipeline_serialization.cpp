@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "shader_recompiler/ir/passes/ir_passes.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -34,6 +35,13 @@ static constexpr u32 PipelineKeyVersion = 6u; // bbport: Info layout (ImageResou
 static u32 TranslatedBinaryVersion() {
     // BB_WAVE_LDS_BARRIERS=1 changes the compute shaders of workgroups larger than one wave.
     return ShaderBinaryVersion | (Shader::WaveLdsBarriers() ? 0x40000u : 0u);
+}
+/// bbport (BilalReloaded): the cache name of a shader's SPIR-V. Shaders that gained multi-wave
+/// LDS barriers get a new name, so their binaries cached before the fix are not found and only
+/// those shaders recompile.
+static std::string ShaderBinaryName(u64 pgm_hash, size_t perm_idx) {
+    return fmt::format("{:#018x}_{}{}", pgm_hash, perm_idx,
+                       Shader::Optimization::MultiwaveLdsBarriers(pgm_hash) ? "_lds4" : "");
 }
 } // namespace Serialization
 
@@ -126,7 +134,7 @@ void RegisterShaderBinary(std::vector<u32>&& spv, u64 pgm_hash, size_t perm_idx)
 
     t_saved_binary = {pgm_hash, perm_idx, BinaryChecksum(spv)};
     Storage::DataBase::Instance().Save(Storage::BlobType::ShaderBinary,
-                                       fmt::format("{:#018x}_{}", pgm_hash, perm_idx),
+                                       Serialization::ShaderBinaryName(pgm_hash, perm_idx),
                                        std::move(spv));
 }
 
@@ -450,7 +458,7 @@ void PipelineCache::WarmUpThread() {
         }
         std::vector<u32> spv{};
         db.Load(Storage::BlobType::ShaderBinary,
-                fmt::format("{:#018x}_{}", info.pgm_hash, stage.perm_idx), spv);
+                Serialization::ShaderBinaryName(info.pgm_hash, stage.perm_idx), spv);
         if (spv.empty()) {
             return;
         }
@@ -460,7 +468,7 @@ void PipelineCache::WarmUpThread() {
             mismatched_binaries.fetch_add(1, std::memory_order_relaxed);
             db.Remove(Storage::BlobType::ShaderMeta, fmt::format("{:#018x}", stage_hashes[i]));
             db.Remove(Storage::BlobType::ShaderBinary,
-                      fmt::format("{:#018x}_{}", info.pgm_hash, stage.perm_idx));
+                      Serialization::ShaderBinaryName(info.pgm_hash, stage.perm_idx));
             return;
         }
         stage.module = CompileSPV(spv, device);
