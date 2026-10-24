@@ -357,6 +357,7 @@ static int follow_pending;
 static volatile uint64_t aim_blend_until_us; /* the aim is blended out for about a second after L2 is released: the zoom camera keeps the mouse until then */
 static volatile int aim_native;   /* aim_held and the zoom (aiming) camera runs: L2 held during a roll aims nothing yet, and the mouse must keep turning the free view then */
 static volatile int aim_held;             /* L2 is held: the aiming camera (also while it blends in) */
+static volatile uint64_t look_blend_until_us; /* the look-around camera (V) is blended out for about a second after the key is released: it keeps the mouse until then */
 static volatile int look_held;            /* R3 is held: first-person look around, which turns like the aim */
 static float follow_target;               /* wanted heading (degrees) */
 static uint64_t follow_moved_us;          /* last frame the mouse moved */
@@ -1486,8 +1487,8 @@ static uint64_t look_native_us;       /* last frame the look camera was turned b
 static float look_pending_yaw, look_pending_pitch;
 static void __attribute__((ms_abi)) u1b_look_camera(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t unused3) {
     (void)unused0; (void)unused1; (void)unused3;
-    if (!look_held) return;
     const uint64_t now=now_us();
+    if (!look_held && now>=look_blend_until_us) return;
     static uint64_t frame_us; static float frame_yaw, frame_pitch;
     float step, step_pitch;
     if (frame_us && now-frame_us<1500) {
@@ -1678,7 +1679,7 @@ static void __attribute__((ms_abi)) u1_joypad_sticks(uint64_t unused0, uint64_t 
     if (camera_stopped(image,u1_camera_dt_offset)) return; /* paused */
     if (aim_test<0.0f) { const char *t=getenv("BB_MOUSE_AIM_TEST"); aim_test=t ? (float)atof(t) : 0.0f; }
     float *pad=(float *)(uintptr_t)joypad_state;
-    if (!aim_held && !look_held && now_us()>=aim_blend_until_us) { float ix, iy; camera_take(2,&ix,&iy); }   /* (the zoom camera keeps the queue while the aim is blended out) */
+    if (!aim_held && !look_held && now_us()>=aim_blend_until_us && now_us()>=look_blend_until_us) { float ix, iy; camera_take(2,&ix,&iy); }   /* (the zoom camera keeps the queue while the aim is blended out) */
     const int cover_native=cover_native_us && now-cover_native_us<COVER_RECENT_US;
     if (!cover_native) { float ix, iy; camera_take(3,&ix,&iy); } /* the cover camera's queue fills outside of the cover too */ /* the aiming camera's queue fills in free look too */
     if (mouse_debug() && getenv("BB_BUTTON_WATCH")) { /* TEMPORARY: who reads the persistent pad's button words (pressed +0x94, held +0x9c) */
@@ -5038,7 +5039,7 @@ static void sample_host(PadData *d) {
     const int native=u2_native_us && now-u2_native_us<100000; /* U2: the cover / look-around camera turns with the mouse */
     for (int q=0;q<CAMERA_QUEUES;++q) {
         /* queue 2 is the zoom camera's (U1 aiming): nothing else reads it, so it stays empty outside the aim */
-        if (captured && (following || joypad || native) && (q!=2 || aim_held || look_held || now_us()<aim_blend_until_us)) { camera_dx[q]+=mdx; camera_dy[q]+=mdy; }
+        if (captured && (following || joypad || native) && (q!=2 || aim_held || look_held || now_us()<aim_blend_until_us || now_us()<look_blend_until_us)) { camera_dx[q]+=mdx; camera_dy[q]+=mdy; }
         else { camera_dx[q]=camera_dy[q]=0; }
     }
     /* gyro aiming: kept while aiming (at low frame rates the aim controller runs only every 100-200 ms) */
@@ -5226,6 +5227,7 @@ static void sample(PadData *d) {
     if (aim_held) aim_blend_until_us=now_us()+1300000;
     aim_native=aim_held && zoom_camera_us && now_us()-zoom_camera_us<100000;
     look_held=(d->buttons & (BTN_R3|BTN_UP))!=0; /* U1: the d-pad up (V) looks around */
+    if (look_held) look_blend_until_us=now_us()+1300000;
     if (!aim_held) { aim_target_total=0.0f; aim_session_reset=1; }
     if (mouse_debug()) { /* the pad the game gets, when it changes (jetski: which buttons stop it) */
         static uint32_t last_buttons=~0u; static uint8_t last_l2, last_r2, last_ly=128;
