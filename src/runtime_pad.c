@@ -267,7 +267,7 @@ static pthread_mutex_t camera_lock=PTHREAD_MUTEX_INITIALIZER;
  * gets all of it (the follow camera does not read the joypad's right stick values, the other
  * cameras do not use the follow camera's direction). */
 static float camera_dx[2], camera_dy[2];
-/* Gyro aiming (the menu's setting; Steam's gyro arrives as a mouse): raw aim and the cover camera
+/* Raw mouse aiming (the menu's setting, on by default; also what Steam's gyro as a mouse needs): raw aim and the cover camera
  * below. Mouse pixels not yet given to the aim direction, and the last time the aim controller ran
  * (the mouse then turns its direction, not the stick). */
 static int gyro_on(void) { return bbgpu_gyro_aim(); }
@@ -473,7 +473,7 @@ static void __attribute__((ms_abi)) u3_follow_camera(uint64_t camera, uint64_t u
     (void)unused; (void)image; (void)r14;
     follow_camera(camera,0x78c0,0x7874,&u3_arc);
 }
-/* Gyro aiming, from Umar-Qayyum-dev's raw mouse aiming (Supermedo/uncharted_pc#561), U1 1.02 only.
+/* Gyro aiming, from Umar-Qayyum-dev's raw mouse aiming (Supermedo/uncharted_pc#561), U1 1.00 and 1.02.
  * The cover camera (CameraControlCover) turns with the right stick in its own update: its horizontal
  * direction (x, 0, z) turns around the vertical, and its pitch (degrees) moves within limits (up to
  * limits[0], down to -limits[1]). At the start of the update the mouse turns both directly, the same
@@ -530,12 +530,12 @@ static void aim_turn(float *v, float yaw, float pitch) {
  * callers are left alone and take no mouse motion. The return address is the word above the
  * registers the hook saved (the hook is at the function's first instruction). */
 static void raw_aim(const char *game, uint64_t controller, const RuntimeGuestRegs *regs, uint64_t image,
-                    uint64_t main_return) {
+                    uint64_t main_return, uint64_t main_return_alt) {
     if (!gyro_on()) return;
     const uint64_t ret=((const uint64_t *)(regs+1))[0]-image;
     float *dir=(float *)(uintptr_t)regs->rcx;
     static uint64_t other_logged;
-    if (ret!=main_return) {
+    if (ret!=main_return && ret!=main_return_alt) {
         if (other_logged!=ret) {
             other_logged=ret;
             printf("Gyro: %s aim controller from another caller (return %#llx), left alone\n",game,
@@ -615,8 +615,9 @@ static void raw_aim(const char *game, uint64_t controller, const RuntimeGuestReg
 static void __attribute__((ms_abi)) u1_aim_controller(uint64_t output, uint64_t controller, uint64_t image,
                                                       uint64_t r14, const RuntimeGuestRegs *regs) {
     (void)output; (void)r14;
-    /* U1 1.02: the aiming camera's update (0xc43b0) calls it at 0xc4c52 with rcx = camera+0x1830 */
-    raw_aim("U1",controller,regs,image,0xc4c57);
+    /* the aiming camera's update calls it with rcx = camera+0x1830: 1.02 at 0xc4c52 (the function is 0x276a10, the
+     * update 0xc43b0), 1.00 at 0xc4b62 (0x2764c0; the code around is the same). Another build is left alone. */
+    raw_aim("U1",controller,regs,image,0xc4c57,0xc4b67);
 }
 /* U1 1.02 cover camera update (vtable 0x927320): rsi = the camera, direction +0x240, pitch +0x230,
  * its settings at +0x1300 with the pitch limits at +0x8 (up) and +0xc (down). */
@@ -963,8 +964,8 @@ static const RuntimeGuestCallback guest_callbacks[]={
       "8d 35 ?? ?? ?? ?? 48 8d 15 ?? ?? ?? ?? 48 8d 0d ?? ?? ?? ?? "
       "41 b8 4d 04 00 00 45 31 c9 ff d0 cd 41 c5 f8 28 45 d0",
       0x0, 58, NULL, u2_focus_reset_102},
-    /* Gyro aiming (raw_aim, cover_camera; only while the menu's setting is on), U1 build 102: the aim
-     * controller and the cover camera update, each found once in the 1.02 image (0x276a10, 0xa4670) */
+    /* Gyro aiming (raw_aim, cover_camera; only while the menu's setting is on), U1 builds 100 and 102 (same code): the aim
+     * controller and the cover camera update, each found once in the 1.00 and 1.02 images (1.02: 0x276a10, 0xa4670; 1.00: 0x2764c0, 0xa4590) */
     {"U1 aim controller (gyro)",
       "55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec 08 03 00 00 "
       "45 89 c4 48 89 8d 00 fd ff ff",

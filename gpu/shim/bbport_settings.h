@@ -69,9 +69,10 @@ struct Values {
     std::atomic<float> reactive_max{0.9f};
     std::atomic<int> debug_view{DebugNone};
     std::atomic<bool> show_fps{false};
-    /// Gyro aiming (runtime_pad.c through bbgpu_gyro_aim): popping out keeps the aim, the mouse (Steam's
-    /// gyro as a mouse) turns the aiming and cover cameras directly. Off: the mouse as before.
-    std::atomic<bool> gyro_aim{false};
+    /// Raw mouse aiming (runtime_pad.c through bbgpu_gyro_aim, key gyro_aim): popping out keeps the aim, the mouse
+    /// (also Steam's gyro as a mouse) turns the aiming and cover cameras directly, 1:1. Off: the mouse is a
+    /// right stick value there (the game's stick curve and top speed).
+    std::atomic<bool> gyro_aim{true};
     // FSR 4 checks (menu): the provider's auto exposure, the jitter sign it is given.
     std::atomic<bool> fsr4_auto_exposure{true};
     std::atomic<bool> fsr4_invert_jitter{false};

@@ -393,9 +393,9 @@ void Menu() {
 
     ImGui::SeparatorText("Other");
     Checkbox("FPS counter in the corner", s.show_fps);
-    Checkbox("Steam Gyro Aiming Fix", s.gyro_aim);
+    Checkbox("Raw mouse aiming and cover camera", s.gyro_aim);
     ImGui::SameLine();
-    ImGui::TextDisabled("(for a gyro set up in Steam as a mouse)");
+    ImGui::TextDisabled("(Uncharted 1; also for a gyro set up in Steam as a mouse)");
 
     ImGui::Spacing();
     if (ImGui::Button("Close")) {
