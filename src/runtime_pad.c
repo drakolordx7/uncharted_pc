@@ -297,6 +297,7 @@ static volatile uint64_t cover_out_us;
 static volatile float cover_pivot_x, cover_pivot_z;   /* the cover camera's pivot (where the player is in the cover) */
 static float orbit_r=3.0f, orbit_s=1.0f;              /* the walking camera's distance to the player and on which side of its yaw it sits (measured during a cover) */
 static volatile uint64_t zoom_camera_us;  /* last frame the zoom (aiming) camera was updated */
+static volatile uint64_t u2_zoom_top_us;   /* U2: the zoom camera runs on top of the stack (the aim, but also the whole of the truck turret sequence, with the aim button released) */
 static volatile uint64_t u2_follow_seen_us, u2_zoom_under_us; /* U2: the walking camera was updated just before the zoom camera = the zoom camera is under it, blending out (L2 held in a roll): not an aim */
 /* The mouse's yaw since the aim began (degrees, positive to the right): the game's message that aligns the camera with the
  * player's pose gets a pose turned by it (u1b_aim_target), or the camera is pulled back to the player's facing every
@@ -712,21 +713,6 @@ static volatile uint64_t u2_chase_us;   /* last frame the chase camera was updat
 static void u2_chase_camera(uint64_t camera, uint64_t image) {
     static int mode=-1;
     if (mode<0) { const char *e=getenv("BB_U2_CHASE"); mode=e && atoi(e)==0 ? 0 : 1; }
-    {   /* BB_U2_CHASE_DUMP=1: the camera object's floats 80..127 with the stick and the shown yaw, one line per frame (to find what the picture follows) */
-        static int dump=-1; static unsigned frames;
-        if (dump<0) { const char *e=getenv("BB_U2_CHASE_DUMP"); dump=e && atoi(e)>0; }
-        if (dump && frames<30000) {
-            float buf[512], shown=0.0f; double age=0.0;
-            const float *blk=(const float *)(uintptr_t)(guest_callback_rsp+0xe0);
-            if (safe_read(buf,camera,sizeof(buf))) {
-                if (!bbgpu_camera_yaw(&shown,&age) || age>0.25) shown=-999.0f;
-                ++frames;
-                printf("Mouse: CHASEOBJ %#llx t=%.4f rx=%.4f ry=%.4f shown=%.3f :",(unsigned long long)camera,now_us()*1e-6,blk[23],blk[24],shown);
-                for (int i=80;i<128;++i) printf(" %g",buf[i]);
-                printf("\n");
-            }
-        }
-    }
     if (!mode || aim_native || look_held) return;
     u2_chase_us=now_us();
     float *off=(float *)(uintptr_t)(camera+0x188);
@@ -775,36 +761,6 @@ static void u2_zoom_camera(uint64_t camera, uint64_t image) {
     }
     if (mouse_debug()) printf("Mouse: u2 aimturn t=%.4f step=%.3f pitch step=%.3f dir=(%.3f %.3f %.3f)\n",now_us()*1e-6,step,step_pitch,d[0],d[1],d[2]);
 }
-/* diagnosis (BB_U2_WPROBE=1): where does the camera stack keep a cover camera's blend weight (a float that goes 0 -> 1 in about a second)? Records, for every pointer
- * among the saved registers and the words around the hook's stack, the floats at +0..+0xff over the first frames of a cover, prints those that rise from <0.15 to >0.85. */
-#define WP_SRC (12+192)
-#define WP_FR 90
-static void u2_weight_probe(void) {
-    static float v[WP_FR][WP_SRC][64]; static unsigned n; static uint64_t last_us;
-    const uint64_t t=now_us();
-    if (!last_us || t-last_us>400000) n=0;
-    last_us=t;
-    if (n>=WP_FR) return;
-    for (int s=0;s<WP_SRC;++s) {
-        uint64_t p=0;
-        if (s<12) p=saved_register(s); else safe_read(&p,guest_callback_rsp+(uint64_t)(s-12-48)*8,8);
-        float buf[64]; int ok=p>0x10000 && p<0x7fffffffffffULL && safe_read(buf,p,sizeof(buf));
-        for (int k=0;k<64;++k) v[n][s][k]=ok ? buf[k] : -9.0f;
-    }
-    if (++n==WP_FR) {
-        printf("Mouse: WPROBE done\n");
-        for (int s=0;s<WP_SRC;++s) for (int k=0;k<64;++k) {
-            int up=1, changes=0;
-            if (!(v[0][s][k]>=0.0f && v[0][s][k]<0.15f) || !(v[WP_FR-1][s][k]>0.85f && v[WP_FR-1][s][k]<=1.0001f)) continue;
-            for (unsigned f=1;f<WP_FR;++f) { if (v[f][s][k]<v[f-1][s][k]-0.002f) up=0; if (v[f][s][k]!=v[f-1][s][k]) ++changes; }
-            if (up && changes>=15) {
-                printf("Mouse: WPROBE src %d off %#x:",s,k*4);
-                for (unsigned f=0;f<WP_FR;f+=6) printf(" %.3f",v[f][s][k]);
-                printf("\n");
-            }
-        }
-    }
-}
 static uint64_t u2_dbg_cams[12]; static int u2_dbg_ncams;   /* (debug) the cameras updated in the last frame that changed the set */
 static void __attribute__((ms_abi)) u2b_camera_hook(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t unused3) {
     (void)unused0; (void)unused1; (void)unused3;
@@ -832,8 +788,7 @@ static void __attribute__((ms_abi)) u2b_camera_hook(uint64_t unused0, uint64_t u
     if (camera<0x10000 || pad_only_mode || disabled) return;
     if (update-image==U2B_UPDATE_FOLLOW) u2_follow_seen_us=now_us();
     switch (update-image) {
-    case U2B_UPDATE_COVER: { static int wp=-1; if (wp<0) { const char *e=getenv("BB_U2_WPROBE"); wp=e && atoi(e)>0; } if (wp) u2_weight_probe(); }
-        u2_cover_camera(camera,image); break;
+    case U2B_UPDATE_COVER: u2_cover_camera(camera,image); break;
     case U2B_UPDATE_LOOK: u2_look_camera(camera,image); break;
     case 0x4496b0: u2_chase_camera(camera,image); break;
     case U2B_UPDATE_FOLLOW: /* walking: the follow camera's direction (+0x9ec0) and vertical arc (+0x9e60), as in the earlier U2 build */
@@ -911,7 +866,7 @@ static void __attribute__((ms_abi)) u2b_camera_hook(uint64_t unused0, uint64_t u
         break;
     case U2B_UPDATE_ZOOM: /* L1 (grenade) aims with this camera once it runs, see sample() */
         zoom_camera_us=now_us();
-        if (u2_follow_seen_us && zoom_camera_us-u2_follow_seen_us<3000) u2_zoom_under_us=zoom_camera_us;
+        if (u2_follow_seen_us && zoom_camera_us-u2_follow_seen_us<3000) u2_zoom_under_us=zoom_camera_us; else u2_zoom_top_us=zoom_camera_us;
         u2_zoom_camera(camera,image);
         break;
     default: break;
@@ -5382,7 +5337,7 @@ static void sample(PadData *d) {
     replay_sample(d);
     d->buttons|=injected.buttons;
     /* L2 aims; L1 (grenade) aims with the same zoom camera, but only once that camera runs (L1 without a grenade does nothing) */
-    aim_held=(d->buttons & BTN_L2)!=0 || ((d->buttons & BTN_L1) && zoom_camera_us && now_us()-zoom_camera_us<100000);
+    aim_held=(d->buttons & BTN_L2)!=0 || ((d->buttons & BTN_L1) && zoom_camera_us && now_us()-zoom_camera_us<100000) || (u2_zoom_top_us && now_us()-u2_zoom_top_us<100000);
     if (aim_held) aim_blend_until_us=now_us()+1300000;
     aim_native=aim_held && zoom_camera_us && now_us()-zoom_camera_us<100000 && !(u2_zoom_under_us && now_us()-u2_zoom_under_us<100000);
     look_held=(d->buttons & (BTN_R3|BTN_UP))!=0; /* U1: the d-pad up (V) looks around */
