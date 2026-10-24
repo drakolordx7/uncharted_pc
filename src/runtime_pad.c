@@ -3418,7 +3418,7 @@ static int menu_list_find_ex(uint64_t now, ListInfo *info, int need_highlight) {
         float ys[64]; int nys=0; float sel=-1.0f, top=1e9f, bottom=-1e9f;
         for (int j=0;j<menu_text_count && nys<64;++j) {
             const MenuText *b=&menu_texts[j];
-            if (b->ordinal<1 || now-b->us>100000 || b->w<=1.0f || b->h<22.0f || b->h>29.0f || (fabsf(b->x-best_x)>=1.0f && !(b->style[5]>2.5f && fabsf(b->x-best_x)<14.0f))) continue;   /* (a highlighted row can be drawn a little larger, so a little to the left: Récompenses) */
+            if (b->ordinal<1 || now-b->us>100000 || b->w<=1.0f || b->h<22.0f || b->h>29.0f || fabsf(b->x-best_x)>=1.0f) continue;
             ys[nys++]=b->y+b->h*0.5f;
             if (b->y<top) top=b->y;
             if (b->y+b->h>bottom) bottom=b->y+b->h;
@@ -3976,7 +3976,7 @@ static uint32_t menu_mouse_buttons(const bool *k, uint32_t mouse, uint64_t now) 
             if (t->item!=list.item || now-t->us>100000 || t->ordinal<1) continue;
             if (t->x>list.colx+300.0f && t->w>0.5f && t->h<30.0f) ++nvals;
             if (t->h>=22.0f && t->h<=29.0f && fabsf(t->x-list.colx)<1.0f && t->style[1]>=0.7f) bright_label=1;
-            if (fabsf(t->x-list.colx)<14.0f && t->h>=22.0f && t->h<=29.0f && t->style[5]>2.5f) sl=t;
+            if (fabsf(t->x-list.colx)<1.0f && t->h>=22.0f && t->h<=29.0f && t->style[5]>2.5f) sl=t;
         }
         stats=nvals>=3 && bright_label;
         if (sl) for (int i=0;i<menu_text_count;++i) {
