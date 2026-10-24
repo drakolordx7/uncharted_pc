@@ -294,6 +294,7 @@ static volatile float cover_last_step;          /* the turn (degrees) the cover 
 static volatile uint64_t cover_last_us;
 static volatile float cover_out_yaw;          /* the cover camera's output yaw (degrees) of this frame, and when: the walking camera's output is made the same */
 static volatile uint64_t cover_out_us;
+static volatile uint64_t cover_handover_us;   /* when the walking camera took over from a cover camera (0 while a cover runs) */
 static volatile uint64_t zoom_camera_us;  /* last frame the zoom (aiming) camera was updated */
 /* The mouse's yaw since the aim began (degrees, positive to the right): the game's message that aligns the camera with the
  * player's pose gets a pose turned by it (u1b_aim_target), or the camera is pulled back to the player's facing every
@@ -381,6 +382,16 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
     const float heading=heading_of(dir);
     float dx, dy;
     camera_take(0,&dx,&dy);
+    {   /* The game puts the walking camera back to the direction it had before the cover when the cover ends, and the picture jumped there:
+         * once the cover camera is gone the walking camera is given the direction the cover camera ended with, and its output eases to its own. */
+        static int handed=1;
+        if ((cover_native_us && now-cover_native_us<COVER_RECENT_US) || (cover_out_us && now-cover_out_us<COVER_RECENT_US)) { handed=0; cover_handover_us=0; }
+        else if (!handed && cover_out_us && now-cover_out_us<2000000) {
+            const float fl=SDL_sqrtf(dir[0]*dir[0]+dir[2]*dir[2]), hd=cover_out_yaw*0.017453293f;
+            if (fl>0.01f) { dir[0]=-SDL_sinf(hd)*fl; dir[2]=-SDL_cosf(hd)*fl; }
+            handed=1; cover_handover_us=now;
+        }
+    }
     if (cover_native_us && now-cover_native_us<COVER_RECENT_US && !aim_native && !look_held) {
         /* While the cover camera has the mouse the walking camera is kept behind it (its direction is the cover camera's, reversed; measured):
          * the game blends the cover camera out over about a second after the cover, and the walking camera, left at the direction it had
@@ -415,7 +426,8 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
         follow_target=heading;
         correction=0.0f;
     }
-    if (correction>90.0f || correction<-90.0f) { /* at most a quarter turn behind */
+    /* Mouse still: a shortfall under 0.3 degree is left alone (making it up flipped the push and the turn every frame for 0.15 s after a stop: a slight tremble) */
+    if (turn==0.0f && correction>-0.3f && correction<0.3f) correction=0.0f;    if (correction>90.0f || correction<-90.0f) { /* at most a quarter turn behind */
         correction=correction>0.0f ? 90.0f : -90.0f;
         follow_target=wrap_degrees(heading-correction);
     }
@@ -1331,6 +1343,12 @@ static void __attribute__((ms_abi)) u1b_aim_camera(uint64_t unused0, uint64_t un
          * w x the cover camera + (1-w) x the walking camera, whose weight w is 0 at first, so the picture did not turn at the start of a cover.
          * Its output yaw is made the cover camera's: both layers agree, whatever the weight. */
         const uint64_t at=now_us();
+        if (cover_handover_us && at-cover_handover_us<300000 && (!cover_out_us || at-cover_out_us>20000)) {   /* the cover is gone: the output eases from the cover camera's last yaw to the walking camera's own */
+            float *yaw_f=(float *)(uintptr_t)(guest_callback_rsp+0x140);
+            const float own_delta=wrap_degrees(*yaw_f-cover_out_yaw), k=(float)(at-cover_handover_us)/300000.0f;
+            *yaw_f=wrap_degrees(cover_out_yaw+own_delta*k);
+            return;
+        }
         if (!cover_out_us || at-cover_out_us>20000) return;
         *(float *)(uintptr_t)(guest_callback_rsp+0x140)=cover_out_yaw;
         return;
