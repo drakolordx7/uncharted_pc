@@ -167,13 +167,13 @@ FIXES = {
         {'on': {'BB_SCALAR_COPY64_SYNC': '2', 'BB_SCALAR_COPY64_DEFER': '1'},
          'off': {'BB_SCALAR_COPY64_SYNC': '0', 'BB_SCALAR_COPY64_DEFER': '0'}}),
     'fix_tiny_readback': (
-        'Aim and turret focus (Uncharted 2)',
-        'Enemies stay in focus when aiming. Automatic: on in Uncharted 2 only; elsewhere it costs about 13%.',
+        'Aim and turret focus',
+        'Enemies stay in focus when aiming (blurry aim in Uncharted 2 and 3). Automatic: on in Uncharted 2 and 3, no measurable cost.',
         {'on': {'BB_TINY_READBACK': '1'}, 'off': {'BB_TINY_READBACK': '0'}}),
     'fix_small_buffers': (
         'Brightness flicker fix',
-        'Copies small GPU results back every frame (auto exposure, Uncharted 2 weapon textures). '
-        'Automatic: on in Uncharted 2 only; elsewhere it halved the frame rate in Uncharted 3\'s Cartagena square.',
+        'Copies small GPU results back every frame (fixes black weapons and stuck brightness). '
+        'Automatic: on in Uncharted 2 only. In Uncharted 3 it costs about a third of the frame rate, so turn it on there only if guns draw black.',
         {'on': {'BB_READBACK_SMALL_BUFFERS': '1'}, 'off': {'BB_READBACK_SMALL_BUFFERS': '0'}}),
     'fix_vram': (
         'Small video memory mode',
