@@ -234,6 +234,7 @@ def main():
     # Its aim and turret blur reads tiny render results back (BB_TINY_READBACK, ~13% elsewhere).
     player_merge = env.get('BB_GPU_MERGE')
     player_tiny = env.get('BB_TINY_READBACK')
+    player_small = env.get('BB_READBACK_SMALL_BUFFERS')
     player_copy = env.get('BB_SCALAR_COPY64_SYNC')
     all_cheats = env.setdefault('BB_CHEATS_ALL', env.get('BB_CHEATS', ''))
     while True:
@@ -244,6 +245,11 @@ def main():
                 env.pop('BB_GPU_MERGE', None)
         if player_tiny is None:
             env['BB_TINY_READBACK'] = '1' if exe == EXECUTABLES['u2'] else '0'
+        # Its weapons need the small results the GPU writes (a few bytes the CPU reads back) to reach
+        # guest memory: without it guns draw black and untextured. Off elsewhere (it halves U3's
+        # frame rate in Cartagena square).
+        if player_small is None:
+            env['BB_READBACK_SMALL_BUFFERS'] = '1' if exe == EXECUTABLES['u2'] else '0'
         # Its mesh raycaster copies land in guest memory too (iSubMesh after checkpoints).
         if player_copy is None:
             env['BB_SCALAR_COPY64_SYNC'] = '2' if exe == EXECUTABLES['u2'] else '0'
