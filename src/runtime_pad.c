@@ -761,6 +761,17 @@ static void u2_chase_camera(uint64_t camera, uint64_t image) {
     if (mode<0) { const char *e=getenv("BB_U2_CHASE"); mode=e && atoi(e)==0 ? 0 : 1; }
     if (!mode || aim_native || look_held) return;
     u2_chase_us=now_us();
+    {   /* (debug) the window passage turns the camera's state (+0xb4) from 0x14 to 0x15 and the look no longer moves the picture; holding 0x14 did not free it */
+        if (mouse_debug()) {   /* the state of every chase camera object, when it changes */
+            static uint64_t seen[4]; static uint32_t seen_st[4]; static int ns;
+            uint32_t st=0; int k=-1;
+            if (safe_read(&st,camera+0xb4,4)) {
+                for (int i=0;i<ns;++i) if (seen[i]==camera) k=i;
+                if (k<0 && ns<4) { k=ns++; seen[k]=camera; seen_st[k]=~st; }
+                if (k>=0 && seen_st[k]!=st) { printf("Mouse: u2 chase %#llx state +0xb4 %#x -> %#x t=%.4f\n",(unsigned long long)camera,(unsigned)(seen_st[k]==~st ? 0 : seen_st[k]),(unsigned)st,now_us()*1e-6); seen_st[k]=st; }
+            }
+        }
+    }
     float *off=(float *)(uintptr_t)(camera+0x188);
     static uint64_t sess_us, sess_camera; static float target_yaw, target_pitch;
     const uint64_t now=now_us();
@@ -852,6 +863,40 @@ static uint64_t u2_probe_target(void) { /* BB_U2_PROBE=<hex update id> (default 
         printf("Mouse: PROBE target %#llx (BB_U2_PROBE=%s)\n",(unsigned long long)id,e ? e : "none");
     }
     return id;
+}
+/* ---- Snapshots of the cameras' memory (BB_U2_SNAP=1, with BB_MOUSE_DEBUG=1) ---------------------------------
+ * The last seconds of the three cameras that matter in the window passage (base 0x4383d0, chase 0x4496b0, walking 0x42d940): at each update, the first
+ * 0x300 bytes of the object. F6 writes them to user\camsnap.bin (record: u64 t_us, u64 update id, u64 camera, 192 u32 words) so the locked phase can be
+ * compared with the free one offline against the timestamps of the log. */
+#define U2_SNAP_WORDS 192
+#define U2_SNAP_RING 2400
+typedef struct { uint64_t t, id, camera; uint32_t w[U2_SNAP_WORDS]; } U2Snap;
+static U2Snap *u2_snap_ring; static unsigned u2_snap_n; static pthread_mutex_t u2_snap_lock=PTHREAD_MUTEX_INITIALIZER;
+static int u2_snap_on(void) { static int on=-1; if (on<0) on=mouse_debug() && getenv("BB_U2_SNAP")!=NULL; return on; }
+static void u2_snap_frame(uint64_t id, uint64_t camera) {
+    if (!u2_snap_on() || camera<0x10000) return;
+    pthread_mutex_lock(&u2_snap_lock);
+    if (!u2_snap_ring) u2_snap_ring=(U2Snap *)calloc(U2_SNAP_RING,sizeof(U2Snap));
+    if (u2_snap_ring) {
+        U2Snap *s=&u2_snap_ring[u2_snap_n%U2_SNAP_RING];
+        s->t=now_us(); s->id=id; s->camera=camera;
+        if (!safe_read(s->w,camera,sizeof(s->w))) memset(s->w,0,sizeof(s->w));
+        ++u2_snap_n;
+    }
+    pthread_mutex_unlock(&u2_snap_lock);
+}
+static void u2_snap_dump(void) {
+    pthread_mutex_lock(&u2_snap_lock);
+    if (u2_snap_ring && u2_snap_n) {
+        FILE *f=fopen("user\\camsnap.bin","wb");
+        if (f) {
+            const unsigned n=u2_snap_n<U2_SNAP_RING ? u2_snap_n : U2_SNAP_RING, first=u2_snap_n-n;
+            for (unsigned i=0;i<n;++i) fwrite(&u2_snap_ring[(first+i)%U2_SNAP_RING],sizeof(U2Snap),1,f);
+            fclose(f);
+            printf("Mouse: SNAP dumped %u records to user\\camsnap.bin t=%.4f\n",n,now_us()*1e-6);
+        }
+    }
+    pthread_mutex_unlock(&u2_snap_lock);
 }
 static uint32_t u2_probe_offset(int i) { return i<48 ? (uint32_t)(i*4) : (uint32_t)(0x140+(i-48)*4); }
 static void u2_probe_report(void);
@@ -1041,6 +1086,20 @@ static void __attribute__((ms_abi)) u2b_camera_hook(uint64_t unused0, uint64_t u
             printf(" yaw %.1f -> %.1f%s t=%.4f\n",(double)yaw0,have ? (double)y : 0.0,have ? "" : "?",t0*1e-6);
         }
     }
+    { const uint64_t uid=update-image; if (uid==0x4383d0 || uid==0x4496b0 || uid==0x42d940) u2_snap_frame(uid,camera); }
+    if (mouse_debug()) {   /* (debug, BB_U2_WEIGHTS=1) the blend weights (stack entry +0x30..+0x3c, entries named by registers 9 and 11) of the three cameras of the window passage */
+        static int on=-1;
+        if (on<0) on=getenv("BB_U2_WEIGHTS")!=NULL;
+        const uint64_t uid=update-image;
+        if (on && (uid==0x4383d0 || uid==0x4496b0 || uid==0x42d940)) {
+            float w9[4]={-9,-9,-9,-9}, w11[4]={-9,-9,-9,-9};
+            const uint64_t r9=saved_register(9), r11=saved_register(11);
+            if (r9>0x10000) safe_read(w9,r9+0x30,16);
+            if (r11>0x10000) safe_read(w11,r11+0x30,16);
+            printf("Mouse: WEIGHTS %#llx cam %#llx r9 %#llx [%.3f %.3f %.3f %.3f] r11 %#llx [%.3f %.3f %.3f %.3f] t=%.4f\n",(unsigned long long)uid,(unsigned long long)camera,
+                   (unsigned long long)r9,w9[0],w9[1],w9[2],w9[3],(unsigned long long)r11,w11[0],w11[1],w11[2],w11[3],t0*1e-6);
+        }
+    }
     {   /* BB_U2_PROBE=<hex update id>: the fields of the camera that holds the picture during an animation */
         static int on=-1;
         if (on<0) on=getenv("BB_U2_PROBE")!=NULL;
@@ -1071,6 +1130,29 @@ static void __attribute__((ms_abi)) u2b_camera_hook(uint64_t unused0, uint64_t u
     if (disabled<0) { const char *e=getenv("BB_U2_NATIVE"); disabled=e && atoi(e)==0; }
     if (camera<0x10000 || pad_only_mode || disabled) return;
     if (update-image==U2B_UPDATE_FOLLOW) u2_follow_seen_us=now_us();
+    {   /* After the chapter 5 window the walking camera comes back as a new stack entry whose weight (float at entry+0x34) takes about 0.9 s to rise from 0
+         * while the chase camera, frozen by the game, still holds most of the picture: the mouse shows only w times. As with the cover, the weight is
+         * brought up linearly in 0.3 s (written at the entry of the update). BB_U2_WINBLEND=0 turns it off. */
+        static int mode=-1; static uint64_t chase_seen_us, ramp_entry, ramp_start_us, ramp_seen_us;
+        if (mode<0) { const char *e=getenv("BB_U2_WINBLEND"); mode=!(e && atoi(e)==0); }
+        const uint64_t now=now_us();
+        if (update-image==0x4496b0) chase_seen_us=now;
+        else if (mode && update-image==U2B_UPDATE_FOLLOW) {
+            const uint64_t entry=saved_register(11);
+            float w=1.0f;
+            if (entry>0x10000 && safe_read(&w,entry+0x34,4) && w>=0.0f && w<0.999f) {
+                if (entry!=ramp_entry || now-ramp_seen_us>300000) {
+                    ramp_entry=entry; ramp_start_us=0;
+                    if (w<0.05f && chase_seen_us && now-chase_seen_us<600000) ramp_start_us=now;
+                }
+                ramp_seen_us=now;
+                if (ramp_start_us) {
+                    float ramp=(float)(now-ramp_start_us)*(1.0f/300000.0f); ramp=ramp>1.0f ? 1.0f : ramp;
+                    if (ramp>w) { safe_write(entry+0x34,&ramp,4); if (mouse_debug()) printf("Mouse: u2 winblend entry %#llx w %.3f -> %.3f t=%.4f\n",(unsigned long long)entry,w,ramp,now*1e-6); }
+                }
+            }
+        }
+    }
     switch (update-image) {
     case U2B_UPDATE_COVER: u2_cover_camera(camera,image); break;
     case U2B_UPDATE_LOOK: u2_look_camera(camera,image); break;
@@ -1080,16 +1162,20 @@ static void __attribute__((ms_abi)) u2b_camera_hook(uint64_t unused0, uint64_t u
         /* A walking camera that has just been made (museum start, chapter or level change) holds numbers that are not set yet
          * (NaN, huge): writing the position from them made the game stop on IsFinite(m_smoothedCameraPos) / the camera
          * translation limit. So the camera is left alone for its first frames and while any of its numbers is unusable. */
-        static uint64_t seen_camera; static unsigned seen_frames;
+        static struct { uint64_t camera, seen_us; unsigned frames; } seen_slot[4];   /* (after the chapter 5 window two walking cameras are updated alternately: one slot per camera, or the guard restarted at every call and the mouse stayed off for 1.2 s) */
         const uint64_t t_now=now_us();
-        static uint64_t seen_us;
+        int sl=-1;
+        for (int i=0;i<4;++i) if (seen_slot[i].camera==camera) sl=i;
+        if (sl<0) { sl=0; for (int i=1;i<4;++i) if (seen_slot[i].seen_us<seen_slot[sl].seen_us) sl=i; seen_slot[sl].camera=camera; seen_slot[sl].frames=0; seen_slot[sl].seen_us=t_now; }
+        unsigned seen_frames=seen_slot[sl].frames;
         /* A camera that has just been made holds numbers that are not set yet. The guard is for a NEW camera (another
          * pointer, or one that has been away for a second: a level change); after a short animation gap the same camera
          * comes back with its numbers intact, and resetting the guard there put the mouse back on the emulated stick for
          * 8 frames after every animation (measured 2026-10-24: following=0 while the walking camera ran 28 ms ago). */
-        if (camera!=seen_camera || t_now-seen_us>1000000) { seen_camera=camera; seen_frames=0; }
-        seen_us=t_now;
+        if (t_now-seen_slot[sl].seen_us>1000000) seen_frames=0;
+        seen_slot[sl].seen_us=t_now;
         if (seen_frames<8) ++seen_frames;
+        seen_slot[sl].frames=seen_frames;
         const float *chk_dir=(const float *)(uintptr_t)(camera+0x9ec0), *chk_pos=(const float *)(uintptr_t)(camera+0x9d70);
         const float *chk_pivot=(const float *)(uintptr_t)(camera+0x9e70), *chk_t1=(const float *)(uintptr_t)(camera+0x9d50);
         const float *chk_t0=(const float *)(uintptr_t)(camera+0x9eb0);
@@ -3273,6 +3359,7 @@ static void __attribute__((ms_abi)) u2_model_hook(uint64_t rdi, uint64_t frame, 
 }
 static volatile float u2_anim_sx, u2_anim_sy;   /* the mouse's turn rate (degrees/s) while it goes through the emulated stick */
 static volatile uint64_t u2_anim_us;
+static float anim_fb_err, anim_fb_yaw; static int anim_fb_have; static uint64_t anim_fb_moved_us;   /* the shortfall of the turn against the mouse, see sample_host */
 static double anim_cal_req, anim_cal_got; static float anim_cal_yaw; static int anim_cal_have;   /* (debug) degrees the mouse asked for vs degrees the picture turned in one spell on the emulated stick */
 /* U2 of CUSA02320 (the collection): image+0x431580 turns a pad object (rsi, image+0x1116950 + 0x130 * n) into the "game stick" block (rdi, a
  * caller's stack): dead zone, then the length of each stick clamped to 1, left stick at +0, right stick at +8 / +0xc. Every system that
@@ -3288,10 +3375,47 @@ static void __attribute__((ms_abi)) u2_stick_filter(uint64_t block, uint64_t unu
     if (block<0x10000) return;
     float *out=(float *)(uintptr_t)block;
     const uint64_t now=now_us();
+    static unsigned dbg_calls, dbg_inj; static uint64_t dbg_last;
+    const float game_sx=out[2], game_sy=out[3];
+    ++dbg_calls;
+    {   /* (debug, BB_U2_CALLERS=1) who asks for the stick: the return addresses (a call just before them) found on the stack, counted per 250 ms */
+        static int on=-1; static uint64_t addr[48]; static unsigned cnt[48]; static int n; static uint64_t last_print;
+        if (on<0) on=mouse_debug() && getenv("BB_U2_CALLERS")!=NULL;
+        if (on && guest_callback_rsp>0x10000) {
+            uint64_t stack[96];
+            if (safe_read(stack,guest_callback_rsp,sizeof(stack))) {
+                for (int i=0;i<96;++i) {
+                    const uint64_t v=stack[i];
+                    if (v<image+0x100000 || v>=image+0xe00000) continue;
+                    unsigned char op=0;
+                    if (!safe_read(&op,v-5,1) || op!=0xe8) continue;
+                    int k=-1; for (int j=0;j<n;++j) if (addr[j]==v) k=j;
+                    if (k<0 && n<48) { k=n++; addr[k]=v; cnt[k]=0; }
+                    if (k>=0) ++cnt[k];
+                }
+            }
+            const uint64_t t=now_us();
+            if (t-last_print>250000) {
+                last_print=t;
+                printf("Mouse: STICKCALLERS calls %u:",dbg_calls);
+                for (int j=0;j<n;++j) if (cnt[j]>=3) printf(" %#llx:%u",(unsigned long long)(addr[j]-image),cnt[j]);
+                printf(" t=%.4f\n",t*1e-6);
+                n=0;
+            }
+        }
+    }
     if (u2_anim_us && now-u2_anim_us<60000 && (u2_anim_sx!=0.0f || u2_anim_sy!=0.0f)) {
         float sx=u2_anim_sx/full_rate, sy=u2_anim_sy/full_rate;
         sx=sx>8.0f ? 8.0f : sx<-8.0f ? -8.0f : sx; sy=sy>8.0f ? 8.0f : sy<-8.0f ? -8.0f : sy;
         out[2]=sx; out[3]=sy;
+        ++dbg_inj;
+    }
+    if (mouse_debug() && ((u2_anim_us && now-u2_anim_us<500000) || game_sx>0.3f || game_sx<-0.3f) && now-dbg_last>100000) {   /* is the stick block asked for, and does the mouse (or the pad) get in, while the stick is on? */
+        dbg_last=now;
+        float yaw=0.0f; double age=0.0;
+        const int have=bbgpu_camera_yaw(&yaw,&age);
+        printf("Mouse: STICKFILTER calls %u injected %u game stick %.2f %.2f -> %.2f %.2f yaw %.1f%s t=%.4f\n",dbg_calls,dbg_inj,(double)game_sx,(double)game_sy,(double)out[2],(double)out[3],(double)yaw,have && age<0.25 ? "" : "?",now*1e-6);
+        dbg_calls=dbg_inj=0;
     }
 }
 static const unsigned char u2_stick_filter_code[]={0xc5,0xfa,0x10,0x46,0x10,0xc5,0xfa,0x11,0x47,0x10,0xc5,0xfa,0x10,0x46,0x14};
@@ -5456,6 +5580,7 @@ static void sample_host(PadData *d) {
         if (auto_open && layout && !was_layout) { printf("Runtime: U2 controller picture: keys window opened\n"); bbgpu_open_controls(); }
         was_layout=layout;
     }
+    if (u2_snap_on()) { static int f6_was_down; const int f6=k && k[SDL_SCANCODE_F6]; if (f6 && !f6_was_down) u2_snap_dump(); f6_was_down=f6; }
     if (mouse_debug()) { static int f8_was_down; const int f8=k && k[SDL_SCANCODE_F8]; if (f8 && !f8_was_down && u2_menu) u2_data_snapshot(); f8_was_down=f8; }
     /* the wheel is the d-pad left / right of the play (weapon change): in a menu it moves up / down instead, not both at once */
     if (u2_menu && (now<wheel_until_us[0] || now<wheel_until_us[1])) d->buttons&=~(BTN_UP|BTN_DOWN|BTN_LEFT|BTN_RIGHT);
@@ -5592,6 +5717,7 @@ static void sample_host(PadData *d) {
             if (anim_cal_req>20.0 || anim_cal_req<-20.0)   /* the mouse turns right = a negative yaw change */
                 printf("Mouse: ANIMCAL asked %.1f deg, the picture turned %.1f deg (ratio %.3f)\n",anim_cal_req,anim_cal_got,-anim_cal_got/anim_cal_req);
             anim_cal_req=anim_cal_got=0.0; anim_cal_have=0;
+            anim_fb_err=0.0f; anim_fb_have=0;
         }
         emulated_on_us=0;
         mouse_vx=mouse_vy=0; mouse_last_us=0;
@@ -5631,11 +5757,30 @@ static void sample_host(PadData *d) {
             if (mdy==0 && mouse_vy>-1.0f && mouse_vy<1.0f) mouse_vy=0;
             /* U2 animations (grab, vault, ledge): the game's stick block is built by image+0x431580 with its length clamped to 1, which caps the turn at
              * the full stick's rate; the hook there (u2_stick_filter) takes the mouse's rate over the full stick's, unclamped */
-            if (anim_pad_idle) { u2_anim_sx=mouse_vx; u2_anim_sy=mouse_vy; u2_anim_us=now; }
-            if (mouse_debug() && anim_pad_idle) {
+            if (anim_pad_idle) {
+                /* 1:1 with the free view: the game's animation ramps up and loses part of what it is asked, so the stick rate is the mouse's rate
+                 * (smoothed) plus the shortfall (degrees the mouse asked for minus degrees the picture turned, measured on the main view matrix)
+                 * taken up over 0.25 s. The shortfall is forgotten once the mouse has rested for 0.3 s (the animation's own drift is not fought). */
+                static int feedback=-1;
+                if (feedback<0) { const char *e=getenv("BB_U2_ANIM_FB"); feedback=!(e && e[0]=='0'); }
+                if (!u2_anim_us || now-u2_anim_us>500000) { anim_fb_err=0.0f; anim_fb_have=0; anim_fb_moved_us=now; }   /* a new spell on the emulated stick */
                 float y=0.0f; double a=0.0;
-                if (bbgpu_camera_yaw(&y,&a)) { if (anim_cal_have) anim_cal_got+=wrap_degrees(y-anim_cal_yaw); anim_cal_yaw=y; anim_cal_have=1; }
-                anim_cal_req+=(double)mouse_vx*dt;
+                const int have=bbgpu_camera_yaw(&y,&a) && a<0.1;
+                const float ang=mdx*scale;                       /* degrees the mouse asks for in this report (right = +) */
+                float turned=0.0f;
+                if (have && anim_fb_have) turned=-wrap_degrees(y-anim_fb_yaw);   /* a turn to the right lowers the yaw */
+                anim_fb_have=have; anim_fb_yaw=y;
+                if (ang!=0.0f) anim_fb_moved_us=now;
+                anim_fb_err+=ang-turned;
+                anim_fb_err=anim_fb_err>180.0f ? 180.0f : anim_fb_err<-180.0f ? -180.0f : anim_fb_err;
+                if (now-anim_fb_moved_us>300000) anim_fb_err*=SDL_expf(-dt/0.1f);
+                u2_anim_sx=mouse_vx+(feedback && have ? anim_fb_err/0.25f : 0.0f);
+                u2_anim_sy=mouse_vy; u2_anim_us=now;
+                if (mouse_debug()) {
+                    if (have && anim_cal_have) anim_cal_got+=wrap_degrees(y-anim_cal_yaw);
+                    anim_cal_yaw=y; anim_cal_have=have;
+                    anim_cal_req+=(double)ang;
+                }
             }
         }
         if (mouse_vx!=0 && !rx && !direct_x) d->right_x=mouse_axis(mouse_vx);
