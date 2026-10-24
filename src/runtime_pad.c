@@ -298,6 +298,7 @@ static volatile float cover_pivot_x, cover_pivot_z;   /* the cover camera's pivo
 static float orbit_r=3.0f, orbit_s=1.0f;              /* the walking camera's distance to the player and on which side of its yaw it sits (measured during a cover) */
 static volatile uint64_t zoom_camera_us;  /* last frame the zoom (aiming) camera was updated */
 static volatile uint64_t u2_zoom_top_us;   /* U2: the zoom camera runs on top of the stack (the aim, but also the whole of the truck turret sequence, with the aim button released) */
+static volatile uint64_t u2_zoom_below_cover_us;
 static volatile uint64_t u2_follow_seen_us, u2_zoom_under_us; /* U2: the walking camera was updated just before the zoom camera = the zoom camera is under it, blending out (L2 held in a roll): not an aim */
 #define U2_FOLLOW_RESYNC_US 150000u /* the walking camera away for longer than this = an animation held the picture: no catch-up afterwards (its normal call interval measured 30 to 60 ms in the climbing sequences) */
 /* The mouse's yaw since the aim began (degrees, positive to the right): the game's message that aligns the camera with the
@@ -1247,7 +1248,9 @@ static void __attribute__((ms_abi)) u2b_camera_hook(uint64_t unused0, uint64_t u
         break;
     case U2B_UPDATE_ZOOM: /* L1 (grenade) aims with this camera once it runs, see sample() */
         zoom_camera_us=now_us();
-        if (u2_follow_seen_us && zoom_camera_us-u2_follow_seen_us<3000) u2_zoom_under_us=zoom_camera_us; else u2_zoom_top_us=zoom_camera_us;
+        if (u2_follow_seen_us && zoom_camera_us-u2_follow_seen_us<3000) u2_zoom_under_us=zoom_camera_us;
+        else if (u2_cover_seen_us && zoom_camera_us-u2_cover_seen_us<3000) u2_zoom_below_cover_us=zoom_camera_us;   /* (aim released in cover: the cover camera is on top, the zoom camera blends out beneath it) */
+        else u2_zoom_top_us=zoom_camera_us;
         u2_zoom_camera(camera,image);
         break;
     case 0x4383d0: /* the camera that holds the picture alone during an animation: relative yaw offset at +0x18c */
@@ -5955,7 +5958,8 @@ static void sample(PadData *d) {
     /* L2 aims; L1 (grenade) aims with the same zoom camera, but only once that camera runs (L1 without a grenade does nothing) */
     aim_held=(d->buttons & BTN_L2)!=0 || ((d->buttons & BTN_L1) && zoom_camera_us && now_us()-zoom_camera_us<100000) || (u2_zoom_top_us && now_us()-u2_zoom_top_us<100000);
     if (aim_held) aim_blend_until_us=now_us()+1300000;
-    aim_native=aim_held && zoom_camera_us && now_us()-zoom_camera_us<100000 && !(u2_zoom_under_us && now_us()-u2_zoom_under_us<100000);
+    aim_native=aim_held && zoom_camera_us && now_us()-zoom_camera_us<100000 && !(u2_zoom_under_us && now_us()-u2_zoom_under_us<100000) &&
+               !(u2_zoom_below_cover_us && now_us()-u2_zoom_below_cover_us<100000);
     look_held=(d->buttons & (BTN_R3|BTN_UP))!=0; /* U1: the d-pad up (V) looks around */
     if (look_held) look_blend_until_us=now_us()+1300000;
     if (!aim_held) { aim_target_total=0.0f; aim_session_reset=1; }
