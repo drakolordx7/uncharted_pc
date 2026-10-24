@@ -123,7 +123,12 @@ STICK_ACTIONS = [
     ('ls_left', 'Move left', 'A'), ('ls_right', 'Move right', 'D'),
     ('rs_up', 'Look up', 'I'), ('rs_down', 'Look down', 'K'),
     ('rs_left', 'Look left', 'J'), ('rs_right', 'Look right', 'L'),
+    ('rotate_ccw', 'Turn valve / wheel counter-clockwise (hold)', 'R'),
+    ('rotate_cw', 'Turn valve / wheel clockwise (hold)', 'T'),
 ]
+# Hold one of the last two and the left stick circles: the games' valves, wheels and cranks ask for
+# the stick turned in circles, which the eight movement-key directions cannot do (#609).
+ROTATE_ACTIONS = ('rotate_ccw', 'rotate_cw')
 DEFAULT_KEYS = {a: k for a, _t, k, _p in BUTTON_ACTIONS} | {a: k for a, _t, k in STICK_ACTIONS}
 DEFAULT_PAD = {a: p for a, _t, _k, p in BUTTON_ACTIONS}
 PAD_BUTTONS = [('a', 'A / Cross'), ('b', 'B / Circle'), ('x', 'X / Square'), ('y', 'Y / Triangle'),
@@ -442,6 +447,11 @@ def input_ini_path():
 def write_input_ini(s):
     """input.ini: the keyboard, mouse and controller bindings the game reads at start."""
     keys = {**DEFAULT_KEYS, **(s.get('key_bindings') or {})}
+    saved = s.get('key_bindings') or {}
+    taken = {k.strip() for a, v in keys.items() if a not in ROTATE_ACTIONS or a in saved for k in v.split('|')}
+    for action in ROTATE_ACTIONS:  # a default key the player gave to something else stays theirs
+        if action not in saved and DEFAULT_KEYS[action] in taken:
+            keys[action] = ''
     pad = {**DEFAULT_PAD, **(s.get('pad_bindings') or {})}
     lines = ['# Uncharted controls (written by the launcher, Controls page)',
              f"mouse_look={1 if s.get('mouse_look', True) else 0}",
