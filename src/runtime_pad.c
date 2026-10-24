@@ -297,6 +297,7 @@ static volatile uint64_t cover_out_us;
 static volatile float cover_pivot_x, cover_pivot_z;   /* the cover camera's pivot (where the player is in the cover) */
 static float orbit_r=3.0f, orbit_s=1.0f;              /* the walking camera's distance to the player and on which side of its yaw it sits (measured during a cover) */
 static volatile uint64_t zoom_camera_us;  /* last frame the zoom (aiming) camera was updated */
+static volatile uint64_t u2_follow_seen_us, u2_zoom_under_us; /* U2: the walking camera was updated just before the zoom camera = the zoom camera is under it, blending out (L2 held in a roll): not an aim */
 /* The mouse's yaw since the aim began (degrees, positive to the right): the game's message that aligns the camera with the
  * player's pose gets a pose turned by it (u1b_aim_target), or the camera is pulled back to the player's facing every
  * frame while the aim blends in (about 0.5 s), which cancelled the mouse. */
@@ -599,7 +600,7 @@ static void quat_mul(const float *a, const float *b, float *o) { /* quaternions 
  * by stick y; the mouse turns the two values directly just before, as in U1. */
 static U2Turn u2_cover_turn;
 static void u2_cover_camera(uint64_t camera, uint64_t image) {
-    if (aim_held || look_held) return;
+    if (aim_native || look_held) return;   /* (L2 held without the aiming camera running, in a roll or between two covers, is not an aim) */
     float step, step_pitch;
     if (!u2_mouse_turn(&u2_cover_turn,3,camera,u2_frame_dt(image),1.0f,0.0f,&step,&step_pitch)) return;
     u2_native_us=now_us();
@@ -620,6 +621,38 @@ static void u2_cover_camera(uint64_t camera, uint64_t image) {
                    dir[0],dir[1],dir[2],dir[3],*pitch,*(const float *)(uintptr_t)(shape+0xc),*(const float *)(uintptr_t)(shape+8),
                    *(const float *)(uintptr_t)(shape+0x30));
         }
+    }
+    /* While the cover is blended in (its weight w, the float at stack entry + 0x34, stays at 0 for a fifth of a second, then rises to 1 in about a second) the
+     * picture is w x this camera + (1-w) x the walking camera, which the game holds still: a turn of this camera shows only w times. So the state is turned by the
+     * mouse's whole turn since the cover began divided by w (at least 0.2): the picture then follows the mouse, and the state ends up where the mouse put it. */
+    {
+        /* two cover cameras are updated together when one cover leads to another: one slot per camera */
+        static struct { uint64_t camera, seen_us, start_us, frame_us; float total_yaw, total_pitch, done_yaw, done_pitch; int entering; } slot[2];
+        const uint64_t now=now_us();
+        int si=-1;
+        for (int i=0;i<2;++i) if (slot[i].camera==camera && now-slot[i].seen_us<300000) si=i;
+        float w=1.0f; const uint64_t entry=saved_register(11);
+        if (entry>0x10000) { float f; if (safe_read(&f,entry+0x34,4) && f>=0.0f && f<=1.0f) w=f; }
+        if (si<0) {   /* a cover camera seen for the first time (or after a pause) */
+            si=slot[0].seen_us<=slot[1].seen_us ? 0 : 1;
+            memset(&slot[si],0,sizeof(slot[si]));
+            slot[si].camera=camera; slot[si].start_us=now;
+            slot[si].entering=w<0.05f;   /* (a camera already in the mix, blending out, is not entering) */
+            step=step_pitch=0.0f;   /* (the first step holds all the mouse's motion since the walking began: the queue is only emptied by a cover camera) */
+        }
+        slot[si].seen_us=now;
+        float *total_yaw=&slot[si].total_yaw, *total_pitch=&slot[si].total_pitch;
+        if (u2_cover_turn.frame_us!=slot[si].frame_us) { slot[si].frame_us=u2_cover_turn.frame_us; *total_yaw+=step; *total_pitch+=step_pitch; }
+        if (w>=0.999f) slot[si].entering=0;
+        if (slot[si].entering) {   /* the game's weight stays at 0 for 0.2 s: the cover is brought in from the first frame, linearly in 0.35 s, until the game's own weight (S curve) has caught up */
+            float ramp=(float)(now-slot[si].start_us)*(1.0f/350000.0f); ramp=ramp>1.0f ? 1.0f : ramp;
+            if (ramp>w) { w=ramp; if (entry>0x10000) { safe_write(entry+0x34,&w,4); safe_write(entry+0x38,&w,4); } }
+        }
+        const float k=slot[si].entering && w<0.999f ? 1.0f/(w<0.5f ? 0.5f : w) : 1.0f;   /* (at most twice: the game blends the directions, a larger turn of the state goes round the circle) */
+        const float want_yaw=*total_yaw*k, want_pitch=*total_pitch*k;
+        step=want_yaw-slot[si].done_yaw; slot[si].done_yaw=want_yaw;
+        step_pitch=want_pitch-slot[si].done_pitch; slot[si].done_pitch=want_pitch;
+        if (mouse_debug() && slot[si].entering) printf("Mouse: u2 coverblend cam %#llx w=%.3f k=%.2f total=%.2f applied=%.2f\n",(unsigned long long)camera,w,k,*total_yaw,want_yaw);
     }
     if (step==0.0f && step_pitch==0.0f) return;
     if (step!=0.0f) {
@@ -653,7 +686,7 @@ static void u2_cover_camera(uint64_t camera, uint64_t image) {
  * The mouse turns the quaternion it is given: yaw about the vertical on the left, pitch about the side on the right. */
 static U2Turn u2_look_turn;
 static void u2_look_camera(uint64_t camera, uint64_t image) {
-    if (!look_held) return;
+    if (!look_held && now_us()>=look_blend_until_us) return;   /* (blended out for about a second after the key is released: it keeps the mouse) */
     float step, step_pitch;
     if (!u2_mouse_turn(&u2_look_turn,2,camera,u2_frame_dt(image),input.mouse_aim_sensitivity,-1.0f,&step,&step_pitch)) return;
     u2_native_us=now_us();
@@ -675,7 +708,8 @@ static void u2_look_camera(uint64_t camera, uint64_t image) {
  * directly just before the update. Two zoom cameras (one per shoulder) are updated while the shoulder switches: both get the same turn. */
 static U2Turn u2_zoom_turn;
 static void u2_zoom_camera(uint64_t camera, uint64_t image) {
-    if (!aim_held || look_held) return;
+    /* (after the aim the game blends the zoom camera out for about a second: it keeps the mouse meanwhile, or the picture holds still) */
+    if ((!aim_held && now_us()>=aim_blend_until_us) || look_held) return;
     float step, step_pitch;
     if (!u2_mouse_turn(&u2_zoom_turn,2,1,u2_frame_dt(image),input.mouse_aim_sensitivity,-1.0f,&step,&step_pitch)) return;
     u2_native_us=now_us();
@@ -700,6 +734,36 @@ static void u2_zoom_camera(uint64_t camera, uint64_t image) {
     }
     if (mouse_debug()) printf("Mouse: u2 aimturn t=%.4f step=%.3f pitch step=%.3f dir=(%.3f %.3f %.3f)\n",now_us()*1e-6,step,step_pitch,d[0],d[1],d[2]);
 }
+/* diagnosis (BB_U2_WPROBE=1): where does the camera stack keep a cover camera's blend weight (a float that goes 0 -> 1 in about a second)? Records, for every pointer
+ * among the saved registers and the words around the hook's stack, the floats at +0..+0xff over the first frames of a cover, prints those that rise from <0.15 to >0.85. */
+#define WP_SRC (12+192)
+#define WP_FR 90
+static void u2_weight_probe(void) {
+    static float v[WP_FR][WP_SRC][64]; static unsigned n; static uint64_t last_us;
+    const uint64_t t=now_us();
+    if (!last_us || t-last_us>400000) n=0;
+    last_us=t;
+    if (n>=WP_FR) return;
+    for (int s=0;s<WP_SRC;++s) {
+        uint64_t p=0;
+        if (s<12) p=saved_register(s); else safe_read(&p,guest_callback_rsp+(uint64_t)(s-12-48)*8,8);
+        float buf[64]; int ok=p>0x10000 && p<0x7fffffffffffULL && safe_read(buf,p,sizeof(buf));
+        for (int k=0;k<64;++k) v[n][s][k]=ok ? buf[k] : -9.0f;
+    }
+    if (++n==WP_FR) {
+        printf("Mouse: WPROBE done\n");
+        for (int s=0;s<WP_SRC;++s) for (int k=0;k<64;++k) {
+            int up=1, changes=0;
+            if (!(v[0][s][k]>=0.0f && v[0][s][k]<0.15f) || !(v[WP_FR-1][s][k]>0.85f && v[WP_FR-1][s][k]<=1.0001f)) continue;
+            for (unsigned f=1;f<WP_FR;++f) { if (v[f][s][k]<v[f-1][s][k]-0.002f) up=0; if (v[f][s][k]!=v[f-1][s][k]) ++changes; }
+            if (up && changes>=15) {
+                printf("Mouse: WPROBE src %d off %#x:",s,k*4);
+                for (unsigned f=0;f<WP_FR;f+=6) printf(" %.3f",v[f][s][k]);
+                printf("\n");
+            }
+        }
+    }
+}
 static void __attribute__((ms_abi)) u2b_camera_hook(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t unused3) {
     (void)unused0; (void)unused1; (void)unused3;
     const uint64_t update=saved_register(5), camera=saved_register(7);
@@ -723,8 +787,10 @@ static void __attribute__((ms_abi)) u2b_camera_hook(uint64_t unused0, uint64_t u
     static int disabled=-1;   /* BB_U2_NATIVE=0: the mouse goes through the stick again (to tell a crash of the game from one of these hooks) */
     if (disabled<0) { const char *e=getenv("BB_U2_NATIVE"); disabled=e && atoi(e)==0; }
     if (camera<0x10000 || pad_only_mode || disabled) return;
+    if (update-image==U2B_UPDATE_FOLLOW) u2_follow_seen_us=now_us();
     switch (update-image) {
-    case U2B_UPDATE_COVER: u2_cover_camera(camera,image); break;
+    case U2B_UPDATE_COVER: { static int wp=-1; if (wp<0) { const char *e=getenv("BB_U2_WPROBE"); wp=e && atoi(e)>0; } if (wp) u2_weight_probe(); }
+        u2_cover_camera(camera,image); break;
     case U2B_UPDATE_LOOK: u2_look_camera(camera,image); break;
     case U2B_UPDATE_FOLLOW: /* walking: the follow camera's direction (+0x9ec0) and vertical arc (+0x9e60), as in the earlier U2 build */
     {
@@ -801,6 +867,7 @@ static void __attribute__((ms_abi)) u2b_camera_hook(uint64_t unused0, uint64_t u
         break;
     case U2B_UPDATE_ZOOM: /* L1 (grenade) aims with this camera once it runs, see sample() */
         zoom_camera_us=now_us();
+        if (u2_follow_seen_us && zoom_camera_us-u2_follow_seen_us<3000) u2_zoom_under_us=zoom_camera_us;
         u2_zoom_camera(camera,image);
         break;
     default: break;
@@ -4320,8 +4387,19 @@ static int u2_ls_update(uint64_t now, int list_on, float top, float rowx, float 
         for (int i=0;i<2;++i) {
             if (wheel_until_us[i]==seen[i]) continue;
             seen[i]=wheel_until_us[i];
-            int want=cur+(i==0 ? -3 : 3); if (want<lo) want=lo; if (want>hi) want=hi;
-            if (want!=cur && !u2_jump_pending) { u2_jump_ds=ds; u2_jump_val=want; u2_jump_pending=1; last_us=now; last_want=want; exp_ok=0; }
+            /* the wheel scrolls the view like the bar (the first row seen), the selected text stays where it is */
+            if (hi-lo+1>vis) {
+                int32_t t0=0, base=-1;
+                if (u2_scroll_pending && u2_scroll_w==u2_pick_self) base=u2_scroll_top;
+                else if (u2_pick_self && safe_read(&t0,u2_pick_self+0x248,4) && t0>=lo && t0<=hi) base=t0;
+                if (base>=0) {
+                    int t=base+(i==0 ? -3 : 3); if (t>hi+1-vis) t=hi+1-vis; if (t<lo) t=lo;
+                    u2_scroll_w=u2_pick_self; u2_scroll_top=t; u2_scroll_pending=1; exp_ok=0;
+                }
+            } else {
+                int want=cur+(i==0 ? -3 : 3); if (want<lo) want=lo; if (want>hi) want=hi;
+                if (want!=cur && !u2_jump_pending) { u2_jump_ds=ds; u2_jump_val=want; u2_jump_pending=1; last_us=now; last_want=want; exp_ok=0; }
+            }
         }
         u2_ls_wheel=1;
     }
@@ -5251,7 +5329,7 @@ static void sample(PadData *d) {
     /* L2 aims; L1 (grenade) aims with the same zoom camera, but only once that camera runs (L1 without a grenade does nothing) */
     aim_held=(d->buttons & BTN_L2)!=0 || ((d->buttons & BTN_L1) && zoom_camera_us && now_us()-zoom_camera_us<100000);
     if (aim_held) aim_blend_until_us=now_us()+1300000;
-    aim_native=aim_held && zoom_camera_us && now_us()-zoom_camera_us<100000;
+    aim_native=aim_held && zoom_camera_us && now_us()-zoom_camera_us<100000 && !(u2_zoom_under_us && now_us()-u2_zoom_under_us<100000);
     look_held=(d->buttons & (BTN_R3|BTN_UP))!=0; /* U1: the d-pad up (V) looks around */
     if (look_held) look_blend_until_us=now_us()+1300000;
     if (!aim_held) { aim_target_total=0.0f; aim_session_reset=1; }
