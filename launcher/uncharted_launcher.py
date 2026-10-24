@@ -181,7 +181,7 @@ FIXES = {
     'fix_small_buffers': (
         'Brightness flicker fix',
         'Copies small GPU results back every frame (fixes black weapons and stuck brightness). '
-        'Automatic: on in Uncharted 2 only. In Uncharted 3 it costs about a third of the frame rate, so turn it on there only if guns draw black.',
+        'Automatic: on in Uncharted 2 and 3.',
         {'on': {'BB_READBACK_SMALL_BUFFERS': '1'}, 'off': {'BB_READBACK_SMALL_BUFFERS': '0'}}),
     'fix_vram': (
         'Small video memory mode',

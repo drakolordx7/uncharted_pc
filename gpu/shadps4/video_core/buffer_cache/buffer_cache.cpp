@@ -378,7 +378,10 @@ bool BufferCache::DeferGuestCopy(VAddr src, VAddr dst, u64 size, bool guest_part
         const char* env = std::getenv("BB_SCALAR_COPY64_DEFER");
         return env && env[0] == '1'; // run.py: on for Uncharted 2
     }();
-    if (!enabled || !side_queue || land_stopping.load(std::memory_order_acquire) || size == 0 ||
+    // The raycaster copies (guest_part) are opt-in; the small GPU results the guest reads in place
+    // (ReadBackSmallWrittenBuffers, guest_part false) always land on the landing thread:
+    // waiting for them stopped the GPU thread (U3 Cartagena square 60 -> 36 FPS).
+    if ((guest_part && !enabled) || !side_queue || land_stopping.load(std::memory_order_acquire) || size == 0 ||
         size > SideQueue::StagingSize / 2 || !memory->IsValidGpuMapping(src, size) ||
         !memory->IsValidGpuMapping(dst, size)) {
         return false;
