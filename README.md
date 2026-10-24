@@ -8,9 +8,10 @@ No game files are included; you need your own dump of the collection (CUSA02343,
 
 ## Requirements
 
-- Windows 10 or 11, 64-bit
-- CPU with AVX (Intel 2nd gen, AMD FX or newer)
-- GPU with Vulkan 1.3 and 6 GB of video memory (4 GB cards work with frame generation off)
+- Windows 10 (1903 or later) or Windows 11, 64-bit
+- CPU with AVX, SSE4.2 and POPCNT: Intel 2nd gen (Sandy Bridge), AMD FX or newer
+- GPU with Vulkan 1.3 and at least 4 GB of video memory (6 GB or more recommended; on 4 GB keep frame generation off)
+- About 8 GB of free memory, RAM plus page file (leave the Windows page file on "System managed size")
 
 ## Usage
 
