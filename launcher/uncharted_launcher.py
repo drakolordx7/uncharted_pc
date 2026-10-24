@@ -238,7 +238,12 @@ APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_
                 'frame_gen_multiplier': '2', 'extra_env': '', 'close_on_play': False,
                 'mouse_look': True, 'mouse_sensitivity': '1.0', 'mouse_aim_sensitivity': '1.0', 'mouse_invert_y': False,
                 'free_view_smoothing': False, 'aim_raw': False,
-                'pad_invert_y': False, 'key_icons': True, 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True}
+                'pad_invert_y': False, 'key_icons': True, 'art_banner': '', 'art_u1': '', 'art_u2': '', 'art_u3': '', 'steam_art': '', 'art_crops': {}, 'shortcut_name': 'Uncharted: The Nathan Drake Collection', 'shortcut_icon': '', 'trophy_game': 'u1', 'pad_vibration': True, 'pad_vibration_strength': '100', 'button_prompts': 'auto', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True,
+                **{key: 'auto' for key in FIXES},
+                **{f'{game}_infinite_{cheat}': False for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')}}
+
+
+UI_LANGUAGE = 'en'
 
 
 def _(text):
@@ -510,7 +515,9 @@ def write_input_ini(s):
              f"mouse_invert_y={1 if s.get('mouse_invert_y') else 0}",
              f"free_view_smoothing={1 if s.get('free_view_smoothing') else 0}",
              f"aim_raw={1 if s.get('aim_raw') else 0}",
-             f"pad_invert_y={1 if s.get('pad_invert_y') else 0}"]
+             f"pad_invert_y={1 if s.get('pad_invert_y') else 0}",
+             f"pad_vibration={1 if s.get('pad_vibration', True) else 0}",
+             f"pad_vibration_strength={vibration_strength(s)}"]
     lines += [f'key.{action}={keys.get(action, "")}' for action in DEFAULT_KEYS]
     lines += [f'pad.{action}={pad.get(action, "none")}' for action in DEFAULT_PAD]
     path = input_ini_path()
@@ -605,6 +612,11 @@ def game_environment(s, start=None):
     if dlss_folder and 'BB_DLSS_DIR' not in env:
         env['BB_DLSS_DIR'] = str(dlss_folder)
     env['BB_FRAME_GEN_MULTIPLIER'] = str(s.get('frame_gen_multiplier') or '2')
+    for key, (_title, _hint, choices) in FIXES.items():
+        env.update(choices.get(str(s.get(key) or 'auto'), {}))
+    env['BB_BUTTON_PROMPTS'] = str(s.get('button_prompts') or 'auto')
+    env['BB_CHEATS'] = ','.join(f'{game}:{cheat}' for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')
+                                if s.get(f'{game}_infinite_{cheat}'))
     env['BB_KEY_ICONS'] = '1' if s.get('key_icons', True) else '0'
     for item in str(s['extra_env']).split():
         if '=' in item:
@@ -718,6 +730,7 @@ class Launcher:
             self.append(_('Could not store the save in its slot: {}').format(error) + '\n')
         root.protocol('WM_DELETE_WINDOW', self.close)
         root.after(100, self.drain_output)
+        root.after(150, self.detect_controller)
         if UPDATES_ENABLED and self.app.get('check_updates', True):
             threading.Thread(target=self.check_update, daemon=True).start()
         threading.Thread(target=self.download_art, daemon=True).start()
