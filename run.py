@@ -234,6 +234,7 @@ def main():
     # Aim and turret blur: the game reads a tiny render result (focus depth) on the CPU, so it is read back
     # (BB_TINY_READBACK). On for U2 and U3: no measurable cost in U3 (square and chateau fight). U1 unchanged.
     player_merge = env.get('BB_GPU_MERGE')
+    player_prio = env.get('BB_THREAD_PRIO')
     player_tiny = env.get('BB_TINY_READBACK')
     player_small = env.get('BB_READBACK_SMALL_BUFFERS')
     player_copy = env.get('BB_SCALAR_COPY64_SYNC')
@@ -244,6 +245,14 @@ def main():
                 env['BB_GPU_MERGE'] = '0'
             else:
                 env.pop('BB_GPU_MERGE', None)
+        # Uncharted 1's job system stops on its own asserts (cmdBuf.m_bInUse, m_workerThreadIndex ==
+        # GetCurrentWorkerThreadIndex: #620, #594) with the PS4 thread priorities applied; off, nobody
+        # reported it. Uncharted 2 and 3 keep them (the runtime default).
+        if player_prio is None:
+            if exe == EXECUTABLES['u1']:
+                env['BB_THREAD_PRIO'] = '0'
+            else:
+                env.pop('BB_THREAD_PRIO', None)
         if player_tiny is None:
             env['BB_TINY_READBACK'] = '1' if exe in (EXECUTABLES['u2'], EXECUTABLES['u3']) else '0'
         # Weapons need the small results the GPU writes (a few bytes the CPU reads back) to reach
