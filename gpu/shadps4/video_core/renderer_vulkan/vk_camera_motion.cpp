@@ -251,6 +251,16 @@ bool CameraMotion::IsVelocityShader(u64 ps_hash) const noexcept {
 static std::atomic<float> shown_camera_yaw{0.0f};
 static std::atomic<double> shown_camera_time{0.0};
 
+static void publish_shown_camera(float fx, float fz) {
+    if (!std::isfinite(fx) || !std::isfinite(fz) || (fx == 0.0f && fz == 0.0f)) {
+        return;
+    }
+    const double t = std::chrono::duration<double>(
+                         std::chrono::steady_clock::now().time_since_epoch()).count();
+    shown_camera_yaw.store(std::atan2(fx, fz) * 57.29578f, std::memory_order_relaxed);
+    shown_camera_time.store(t, std::memory_order_release);
+}
+
 extern "C" int bbgpu_camera_yaw(float* yaw_degrees, double* age_seconds) {
     const double t = shown_camera_time.load(std::memory_order_acquire);
     if (t == 0.0) {
@@ -367,6 +377,11 @@ void CameraMotion::OnConstants(const float* data) {
     std::memcpy(current.inv_view.data(), data + 180, 12 * sizeof(float));
     current.proj = {data[52], data[57], data[62], data[63]};
     current.valid = current.proj[0] != 0.0f && current.proj[1] != 0.0f;
+    // The rendered camera's heading for the mouse controls (bbgpu_camera_yaw), from the view matrix:
+    // its third row is the camera's back vector (world -> view), so the forward is its opposite. This
+    // runs every frame, also during the scripted animations (the velocity pass does not run there,
+    // which is why bbgpu_camera_yaw used to freeze).
+    publish_shown_camera(-current.view[8], -current.view[10]);
     const std::array<u32, 2> size{u32(data[4]), u32(data[5])};
     if (size != render_size) {
         std::printf("Camera motion: scene render size %ux%u\n", size[0], size[1]);

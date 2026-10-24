@@ -299,6 +299,7 @@ static float orbit_r=3.0f, orbit_s=1.0f;              /* the walking camera's di
 static volatile uint64_t zoom_camera_us;  /* last frame the zoom (aiming) camera was updated */
 static volatile uint64_t u2_zoom_top_us;   /* U2: the zoom camera runs on top of the stack (the aim, but also the whole of the truck turret sequence, with the aim button released) */
 static volatile uint64_t u2_follow_seen_us, u2_zoom_under_us; /* U2: the walking camera was updated just before the zoom camera = the zoom camera is under it, blending out (L2 held in a roll): not an aim */
+#define U2_FOLLOW_RESYNC_US 150000u /* the walking camera away for longer than this = an animation held the picture: no catch-up afterwards (its normal call interval measured 30 to 60 ms in the climbing sequences) */
 /* The mouse's yaw since the aim began (degrees, positive to the right): the game's message that aligns the camera with the
  * player's pose gets a pose turned by it (u1b_aim_target), or the camera is pulled back to the player's facing every
  * frame while the aim blends in (about 0.5 s), which cancelled the mouse. */
@@ -370,7 +371,8 @@ static volatile float follow_push;        /* the right stick while the direction
 static volatile int follow_has_arc;       /* the follow camera's vertical arc is known */
 static float follow_applied;              /* degrees the last follow_camera() call turned the direction by (0 if it did not) */
 static int follow_arc_moved;              /* the last follow_camera() call changed the vertical arc *//* arc_degrees: the camera pitch one unit of arc covers (U1 61; measured in U2 about 135, in U3 about 105, steeper upwards) */
-static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_offset, float arc_degrees, int stopped) {
+static uint32_t follow_gap_us;            /* time between the last two follow_camera() calls: long after an animation held the picture */
+static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_offset, float arc_degrees, int stopped, uint32_t resync_gap_us) {
     const uint64_t now=now_us();
     follow_applied=0.0f;
     follow_arc_moved=0;
@@ -383,6 +385,33 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
     camera_hook_us=now;
     float *dir=(float *)(uintptr_t)(camera+dir_offset);
     const float heading=heading_of(dir);
+    /* The walking camera was away for a few frames (grab, vault, ledge drop, knock-out: the animation camera holds the
+     * picture alone). The game's own camera turned meanwhile; the wanted heading it left behind would then be made up at
+     * 4 degrees a frame, which swung the picture just after every animation. After such a gap nothing is made up: the
+     * wanted heading is taken from where the camera is now, and the mouse's turn made during the gap is dropped. */
+    static uint64_t follow_call_us;
+    const uint32_t gap_us=(uint32_t)(follow_call_us && now>follow_call_us ? now-follow_call_us : 0);
+    follow_gap_us=gap_us;
+    if (mouse_debug() && resync_gap_us) { /* the walking camera's rhythm: what is a normal interval, what is an animation gap? */
+        static uint64_t hist_us; static unsigned h[6];
+        ++h[gap_us<10000?0:gap_us<20000?1:gap_us<35000?2:gap_us<60000?3:gap_us<150000?4:5];
+        if (now-hist_us>10000000) {
+            hist_us=now;
+            printf("Mouse: follow intervals <10 10-20 20-35 35-60 60-150 >150 ms: %u %u %u %u %u %u\n",h[0],h[1],h[2],h[3],h[4],h[5]);
+            h[0]=h[1]=h[2]=h[3]=h[4]=h[5]=0;
+        }
+    }
+    /* The walking camera was away for the animation (grab, vault, ledge drop, knock-out): the animation camera holds the
+     * picture alone and the game's own camera turns meanwhile. The wanted heading it leaves behind would then be made up at
+     * 4 degrees a frame, which swung the picture just after every animation. After such a gap nothing is made up: the wanted
+     * heading is taken from where the camera is now, and the mouse's turn made during the gap is dropped. */
+    if (resync_gap_us && gap_us>resync_gap_us) {
+        float ignore_x, ignore_y;
+        camera_take(0,&ignore_x,&ignore_y);
+        follow_moved_us=0; follow_pending=0; follow_push=0.0f; follow_correction=0.0f; follow_target=heading;
+        if (mouse_debug()) printf("Mouse: follow resync after a %.0f ms gap (heading %.2f) t=%.4f\n",gap_us*1e-3,(double)heading,now*1e-6);
+    }
+    follow_call_us=now;
     float dx, dy;
     camera_take(0,&dx,&dy);
     /* While a cover camera runs the walking camera is kept at the cover camera's yaw by the same turns it makes for a mouse turn (a few degrees
@@ -398,13 +427,21 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
         dx=0.0f; dy=0.0f;
     }
     if (aim_native || look_held) { follow_moved_us=0; follow_pending=0; follow_push=0.0f; return; } /* the aiming / look camera takes the mouse */
-    if (stopped) { follow_moved_us=0; follow_pending=0; follow_push=0.0f; follow_correction=0.0f; return; } /* paused */
+    if (stopped) { /* paused (or a frame time out of range): the mouse is taken but not applied, the camera goes on as the game wants */
+        follow_moved_us=0; follow_pending=0; follow_push=0.0f; follow_correction=0.0f;
+        if (mouse_debug()) { static unsigned n; if ((n++&31)==0) printf("Mouse: u2 follow camera %#llx stopped (dt out of range) t=%.4f\n",(unsigned long long)camera,now*1e-6); }
+        return;
+    }
     if (follow_pending) {
         float kept=wrap_degrees(heading-follow_before)/wrap_degrees(follow_after-follow_before);
         kept=kept<0.0f ? 0.0f : kept>1.0f ? 1.0f : kept;
         follow_kept+=0.2f*(kept-follow_kept);
+        const int was_direct=follow_direct, kept_pct=(int)(kept*100.0f);
         if (follow_kept<0.12f) follow_direct=0;
         else if (follow_kept>0.3f) follow_direct=1;
+        if (mouse_debug() && was_direct!=follow_direct) /* the mouse changes route: a jolt here is a bug or a sequence whose camera keeps no turns */
+            printf("Mouse: u2 follow %s (was %s) kept=%d%% avg=%.2f t=%.4f\n",follow_direct?"DIRECT":"JOYPAD (emulated right stick)",
+                   was_direct?"direct":"joypad",kept_pct,follow_kept,now*1e-6);
         follow_pending=0;
     }
     float shown=heading; /* the shown camera's yaw (debug output) */
@@ -456,8 +493,9 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
     const float total=turn+correction;
     follow_applied=total;
     follow_push=total>0.05f ? 0.3f : total<-0.05f ? -0.3f : 0.0f;
-    if (mouse_debug()) printf("Mouse: follow t=%.4f dx=%.1f heading=%.2f shown=%.2f target=%.2f turn=%.2f total=%.2f\n",
-                              now*1e-6,dx,heading,shown,follow_target,turn,total);
+    if (mouse_debug()) printf("Mouse: follow t=%.4f dx=%.1f heading=%.2f shown=%.2f target=%.2f turn=%.2f corr=%.2f%s total=%.2f\n",
+                              now*1e-6,dx,heading,shown,follow_target,turn,correction,
+                              (correction>8.0f || correction<-8.0f) ? " CATCHUP" : "",total);
     if (total!=0.0f) {
         const float a=total*0.017453293f, c=SDL_cosf(a), s=SDL_sinf(a);
         const float x=dir[0], z=dir[2];
@@ -480,7 +518,7 @@ static uint32_t u1_camera_dt_offset;  /* set by the callbacks of the versions wh
 static uint64_t u1_image;             /* U1 image base, seen by the pad update callback */
 static void __attribute__((ms_abi)) u1_follow_camera(uint64_t camera, uint64_t unused, uint64_t image, uint64_t r14) {
     (void)unused; (void)r14;
-    follow_camera(camera,0x1310,0x12bc,61.0f,camera_stopped(image,u1_camera_dt_offset));
+    follow_camera(camera,0x1310,0x12bc,61.0f,camera_stopped(image,u1_camera_dt_offset),0);
 }
 static int safe_read(void *dst, uint64_t src, size_t size);
 static int safe_write(uint64_t dst, const void *src, size_t size);
@@ -537,15 +575,15 @@ static void __attribute__((ms_abi)) u1b_follow_camera(uint64_t camera, uint64_t 
     (void)unused; (void)r14;
     u1b_free_view_spring(camera,image);
     u1_camera_dt_offset=U1B_CAMERA_DT;
-    follow_camera(camera,0x1310,0x12bc,61.0f,camera_stopped(image,U1B_CAMERA_DT));
+    follow_camera(camera,0x1310,0x12bc,61.0f,camera_stopped(image,U1B_CAMERA_DT),0);
 }
 static void __attribute__((ms_abi)) u2_follow_camera(uint64_t camera, uint64_t unused, uint64_t image, uint64_t r14) {
     (void)unused; (void)image; (void)r14;
-    follow_camera(camera,0x9ec0,0x9e60,135.0f,0);
+    follow_camera(camera,0x9ec0,0x9e60,135.0f,0,U2_FOLLOW_RESYNC_US);
 }
 static void __attribute__((ms_abi)) u3_follow_camera(uint64_t camera, uint64_t unused, uint64_t image, uint64_t r14) {
     (void)unused; (void)image; (void)r14;
-    follow_camera(camera,0x78c0,0x7874,105.0f,0);
+    follow_camera(camera,0x78c0,0x7874,105.0f,0,0);
 }
 static uint64_t saved_register(int n);
 static int safe_read(void *dst, uint64_t src, size_t size);
@@ -790,9 +828,227 @@ static void u2_zoom_camera(uint64_t camera, uint64_t image) {
     if (mouse_debug()) printf("Mouse: u2 aimturn t=%.4f step=%.3f pitch step=%.3f dir=(%.3f %.3f %.3f)\n",now_us()*1e-6,step,step_pitch,d[0],d[1],d[2]);
 }
 static uint64_t u2_dbg_cams[12]; static int u2_dbg_ncams;   /* (debug) the cameras updated in the last frame that changed the set */
+
+/* ---- Probe for the camera that holds the picture alone during an animation (BB_U2_PROBE=1) --------------
+ * During a grab, a vault or a ledge drop the walking camera 0x42d940 leaves the stack and 0x4383d0 keeps the picture;
+ * the mouse then goes through the emulated right stick and the animation camera turns at ~100 deg/s at most. To drive it
+ * from the mouse like the truck chase camera, its fields must be known. This records the floats of the camera object
+ * during each such gap and compares their change frame by frame with the stick the mouse sends: the float whose delta
+ * follows the right stick is the yaw offset (the same with the vertical stick for the pitch). Analysis printed when the
+ * walking camera comes back. Nothing runs without BB_U2_PROBE. */
+#define U2_PROBE_OFFSETS 96
+#define U2_PROBE_SAMPLES 400
+static float u2_probe_v[U2_PROBE_SAMPLES][U2_PROBE_OFFSETS];
+static float u2_probe_sx[U2_PROBE_SAMPLES], u2_probe_sy[U2_PROBE_SAMPLES]; /* the stick byte the game received (128 = centre) */
+static unsigned char u2_probe_seg[U2_PROBE_SAMPLES];
+static int u2_probe_n, u2_probe_seg_cur;
+static uint64_t u2_probe_start, u2_probe_last, u2_probe_camera;
+static uint64_t u2_probe_target(void) { /* BB_U2_PROBE=<hex update id> (default the base camera 0x4383d0) */
+    static uint64_t id; static int done;
+    if (!done) {
+        done=1; id=0x4383d0;
+        const char *e=getenv("BB_U2_PROBE");
+        if (e && SDL_strlen(e)>2) id=(uint64_t)SDL_strtoull(e,NULL,16);
+        printf("Mouse: PROBE target %#llx (BB_U2_PROBE=%s)\n",(unsigned long long)id,e ? e : "none");
+    }
+    return id;
+}
+static uint32_t u2_probe_offset(int i) { return i<48 ? (uint32_t)(i*4) : (uint32_t)(0x140+(i-48)*4); }
+static void u2_probe_report(void);
+static void u2_probe_frame(uint64_t camera) {
+    if (!mouse_debug() || !getenv("BB_U2_PROBE")) return;
+    const uint64_t t=now_us();
+    const int ax=mouse_axis(mouse_vx), ay=mouse_axis(mouse_vy);
+    const int pushed=ax-128>3 || ax-128<-3 || ay-128>3 || ay-128<-3;
+    { static int seen; if (!seen) { seen=1;
+        printf("Mouse: PROBE target seen during a gap (vx=%.1f vy=%.1f axis=%d/%d pushed=%d)\n",
+               (double)mouse_vx,(double)mouse_vy,ax,ay,pushed); } }
+    if (!pushed) return;                                  /* only the frames where the mouse really presses the stick carry the signal */
+    if (u2_probe_n>=U2_PROBE_SAMPLES) { u2_probe_report(); return; }
+    if (u2_probe_n==0) { u2_probe_start=t; u2_probe_camera=camera; ++u2_probe_seg_cur; }
+    else if (t-u2_probe_last>100000) ++u2_probe_seg_cur;  /* a pause or another animation: no delta across it */
+    for (int i=0;i<U2_PROBE_OFFSETS;++i) {
+        float f=0.0f;
+        if (!safe_read(&f,camera+u2_probe_offset(i),4)) f=0.0f;
+        u2_probe_v[u2_probe_n][i]=f;
+    }
+    u2_probe_sx[u2_probe_n]=(float)ax; u2_probe_sy[u2_probe_n]=(float)ay;
+    u2_probe_seg[u2_probe_n]=(unsigned char)(u2_probe_seg_cur & 0xff);
+    ++u2_probe_n;
+    u2_probe_last=t;
+}
+static void u2_probe_report(void) {
+    const int n=u2_probe_n;
+    u2_probe_n=0;
+    ++u2_probe_seg_cur;                                   /* whatever comes next is another segment */
+    if (n<12) return;
+    printf("Mouse: PROBE base %#llx samples=%d t=%.2f (stick byte 128 = centre)\n",
+           (unsigned long long)u2_probe_camera,n,u2_probe_start*1e-6);
+    for (int pass=0;pass<2;++pass) {
+        float best=0.0f, best_last=0.0f, best_range=0.0f; int best_i=-1, best_lag=0;
+        for (int lag=0;lag<=2;++lag) {
+            for (int i=0;i<U2_PROBE_OFFSETS;++i) {
+                float sxx=0.0f,syy=0.0f,sxy=0.0f;
+                float lo=1e30f, hi=-1e30f;
+                int m=0;
+                for (int k=1+lag;k<n;++k) {
+                    if (u2_probe_seg[k]!=u2_probe_seg[k-1]) continue;
+                    const float st=(pass ? u2_probe_sy[k-lag] : u2_probe_sx[k-lag])-128.0f;
+                    const float d=u2_probe_v[k][i]-u2_probe_v[k-1][i];
+                    if (!(st==st) || !(d==d) || d>1e30f || d<-1e30f) continue;
+                    sxx+=st*st; syy+=d*d; sxy+=st*d; ++m;
+                    if (u2_probe_v[k][i]<lo) lo=u2_probe_v[k][i];
+                    if (u2_probe_v[k][i]>hi) hi=u2_probe_v[k][i];
+                }
+                if (m<10 || sxx<10.0f || syy<1e-10f) continue;
+                const float corr=sxy/SDL_sqrtf(sxx*syy);
+                const float r=corr<0.0f ? -corr : corr;
+                if (r>best) { best=r; best_i=i; best_lag=lag; best_last=u2_probe_v[n-1][i]; best_range=hi-lo; }
+            }
+        }
+        if (best_i<0) { printf("Mouse: PROBE %s: nothing correlated\n",pass ? "pitch" : "yaw"); continue; }
+        printf("Mouse: PROBE %s +0x%03x corr=%.2f lag=%d value=%.3f range=%.3f\n",pass ? "pitch" : "yaw",
+               u2_probe_offset(best_i),(double)best,best_lag,(double)best_last,(double)best_range);
+    }
+}
+static void u2_probe_finish(uint64_t camera) {
+    (void)camera;
+    ++u2_probe_seg_cur;
+    if (u2_probe_n>=12) { u2_probe_report(); return; }
+    if (mouse_debug()) { /* diagnostic: the base camera is updated only a few times per animation */
+        static uint64_t last;
+        const uint64_t t=now_us();
+        if (t-last>2000000) { last=t; printf("Mouse: PROBE gap end, only %d samples so far (kept)\n",u2_probe_n); }
+    }
+}
+/* BB_U2_BASE=1 (experiment, 2026-10-24): during an animation the picture is held by camera 0x4383d0. Its disassembly
+ * (0x4383d0) shows camera+0x1a0 = position, camera+0x1b0 = quaternion, both copied to the output; the quaternion is built
+ * from a relative yaw at camera+0x18c, accumulated from an input field (vmovss 0x18c(%r15)) and composed with the previous
+ * orientation. So +0x18c is a look offset, not an output: this writes the mouse's turn there and logs what the object holds
+ * at the next frame (a value that survives the update can be driven 1:1). Nothing runs without BB_U2_BASE. */
+static int u2_base_on(void) {
+    static int on=-1;
+    if (on<0) { const char *e=getenv("BB_U2_BASE"); on=e && *e && *e!='0'; }
+    return on;
+}
+static float u2_base_written; /* (debug) radians this hook added to +0x18c since the animation began */
+static uint64_t u2_t5_us; static float u2_t5_yaw0; static int u2_t5_frames;   /* test mode 5 */
+static void u2_base_camera(uint64_t camera, int gap) {
+    float dx,dy;
+    camera_take(0,&dx,&dy);
+    static int stepped;   /* test modes 2 and 4: one marked step per animation */
+    if (!gap) { u2_base_written=0.0f; stepped=0; u2_t5_us=0; u2_t5_frames=0; return; }
+    const char *mode=getenv("BB_U2_BASE");
+    const int test2=mode && mode[0]=='2';
+    if (!test2 && dx==0.0f && dy==0.0f) return;
+    if (gap && mode && mode[0]=='5') { /* measure: one 0.5 rad step on +0x188, yaw read every frame (bbgpu_camera_yaw) */
+        float *o=(float *)(uintptr_t)(camera+0x188);
+        if (!u2_t5_us) {
+            u2_t5_us=now_us(); u2_t5_frames=0; u2_t5_yaw0=0.0f;
+            float y=0.0f; double a=0.0;
+            if (bbgpu_camera_yaw(&y,&a)) u2_t5_yaw0=y;
+            const float w=*o;
+            if (w>-5.0f && w<5.0f) *o=w+0.5f;
+            printf("Mouse: TEST5 write 0x188 %.3f -> %.3f yaw0=%.2f t=%.4f\n",(double)w,(double)*o,(double)u2_t5_yaw0,now_us()*1e-6);
+            return;
+        }
+        if (++u2_t5_frames<=20) {
+            float y=0.0f; double a=0.0; const int have=bbgpu_camera_yaw(&y,&a);
+            printf("Mouse: TEST5 f=%d 0x188=%.3f yaw=%.2f%s d=%.2f t=%.4f\n",u2_t5_frames,(double)*o,(double)y,
+                   have && a<0.25 ? "" : "?",(double)(have ? y-u2_t5_yaw0 : 0.0f),now_us()*1e-6);
+        }
+        return;
+    }
+    if (mode && mode[0]=='4') { /* +0x188: the yaw offset of the chase camera; does one step turn the picture? */
+        if (!stepped) {
+            float *o=(float *)(uintptr_t)(camera+0x188);
+            const float w=*o;
+            if (w>-5.0f && w<5.0f) *o=w+0.2f;
+            stepped=1;
+            if (mouse_debug()) {
+                float shown=0.0f; double age=0.0; const int have=bbgpu_camera_yaw(&shown,&age);
+                printf("Mouse: base TEST4 0x188 %.3f -> %.3f shown=%.2f%s t=%.4f\n",(double)w,(double)*o,
+                       (double)shown,have && age<0.25 ? "" : "?",now_us()*1e-6);
+            }
+        }
+        return;
+    }
+    if (mode && mode[0]=='3') { /* +0x17c/+0x180/+0x184: clamped and decayed by the game (the stick fields) */
+        const float step=dx*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity*0.017453293f;
+        float *a=(float *)(uintptr_t)(camera+0x17c), *b=(float *)(uintptr_t)(camera+0x180), *c=(float *)(uintptr_t)(camera+0x184);
+        const float wa=*a, wb=*b, wc=*c;
+        if (step>-0.3f && step<0.3f) {
+            if (wa>-1.0f && wa<1.0f) *a=wa+step;
+            if (wb>-1.0f && wb<1.0f) *b=wb+step;
+            if (wc>-1.0f && wc<1.0f) *c=wc+step;
+        }
+        if (mouse_debug()) {
+            float shown=0.0f; double age=0.0; const int have=bbgpu_camera_yaw(&shown,&age);
+            printf("Mouse: base TEST3 0x17c %.3f->%.3f 0x180 %.3f->%.3f 0x184 %.3f->%.3f dx=%.0f shown=%.2f%s t=%.4f\n",
+                   (double)wa,(double)*a,(double)wb,(double)*b,(double)wc,(double)*c,(double)dx,
+                   (double)shown,have && age<0.25 ? "" : "?",now_us()*1e-6);
+        }
+        return;
+    }
+    if (test2) { /* 0.5 rad once per animation on +0x18c: does the picture turn at all? */
+        float *yaw=(float *)(uintptr_t)(camera+0x18c);
+        const float was=*yaw;
+        if (!stepped) { *yaw=was+0.5f; u2_base_written=0.5f; stepped=1; }
+        if (mouse_debug()) {
+            float shown=0.0f; double age=0.0; const int have=bbgpu_camera_yaw(&shown,&age);
+            printf("Mouse: base TEST2 0x18c %.4f -> %.4f dx=%.0f shown=%.2f%s t=%.4f\n",
+                   (double)was,(double)*yaw,(double)dx,(double)shown,have && age<0.25 ? "" : "?",now_us()*1e-6);
+        }
+        return;
+    }
+    {   /* mode 1: the mouse's turn added to +0x18c */
+        float *yaw=(float *)(uintptr_t)(camera+0x18c);
+        const float was=*yaw;
+        const float step=dx*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity*0.017453293f;
+        if (step>-0.5f && step<0.5f && was>-7.0f && was<7.0f) { *yaw=was+step; u2_base_written+=step; }
+        if (mouse_debug()) {
+            float shown=0.0f; double age=0.0; const int have=bbgpu_camera_yaw(&shown,&age);
+            printf("Mouse: base 0x18c %.4f -> %.4f (written %.3f rad, dx=%.1f) shown=%.2f%s t=%.4f\n",
+                   (double)was,(double)*yaw,(double)u2_base_written,(double)dx,(double)shown,
+                   have && age<0.25 ? "" : "?",now_us()*1e-6);
+        }
+    }
+}
 static void __attribute__((ms_abi)) u2b_camera_hook(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t unused3) {
     (void)unused0; (void)unused1; (void)unused3;
     const uint64_t update=saved_register(5), camera=saved_register(7);
+    const uint64_t t0=now_us();
+    const int gap=!(u2_follow_seen_us && t0-u2_follow_seen_us<U2_FOLLOW_RESYNC_US); /* the walking camera is away: an animation holds the picture */
+    if (mouse_debug()) { /* map of a gap: which camera updates run while the walking camera is away, and does the picture turn? */
+        static uint64_t ids[8]; static unsigned counts[8]; static int n, active; static uint64_t t; static float yaw0;
+        if (gap) {
+            if (!active) {
+                active=1; t=t0; n=0;
+                float y=0.0f; double a=0.0;
+                yaw0=bbgpu_camera_yaw(&y,&a) ? y : 0.0f;
+            }
+            const uint64_t id=update-image;
+            int i=0;
+            for (;i<n;++i) if (ids[i]==id) break;
+            if (i==n && n<8) { ids[n]=id; counts[n]=0; ++n; }
+            if (i<n) ++counts[i];
+        }
+        if (update-image==U2B_UPDATE_FOLLOW && active) {
+            active=0;
+            float y=0.0f; double a=0.0; const int have=bbgpu_camera_yaw(&y,&a);
+            printf("Mouse: GAP %.0f ms updates=",(t0-t)*1e-3);
+            for (int i=0;i<n;++i) printf(" %#llx x%u",(unsigned long long)ids[i],counts[i]);
+            printf(" yaw %.1f -> %.1f%s t=%.4f\n",(double)yaw0,have ? (double)y : 0.0,have ? "" : "?",t0*1e-6);
+        }
+    }
+    {   /* BB_U2_PROBE=<hex update id>: the fields of the camera that holds the picture during an animation */
+        static int on=-1;
+        if (on<0) on=getenv("BB_U2_PROBE")!=NULL;
+        if (on) {
+            if (update-image==U2B_UPDATE_FOLLOW) { if (u2_probe_n) u2_probe_finish(camera); }
+            else if (update-image==u2_probe_target() && gap) u2_probe_frame(camera);
+        }
+    }
     if (mouse_debug()) { /* the set of cameras updated in one frame (calls less than 2 ms apart), printed when it changes */
         static uint64_t cur[12], last[12], last_us; static int n_cur, n_last;
         const uint64_t t=now_us();
@@ -827,7 +1083,11 @@ static void __attribute__((ms_abi)) u2b_camera_hook(uint64_t unused0, uint64_t u
         static uint64_t seen_camera; static unsigned seen_frames;
         const uint64_t t_now=now_us();
         static uint64_t seen_us;
-        if (camera!=seen_camera || t_now-seen_us>100000) { seen_camera=camera; seen_frames=0; }
+        /* A camera that has just been made holds numbers that are not set yet. The guard is for a NEW camera (another
+         * pointer, or one that has been away for a second: a level change); after a short animation gap the same camera
+         * comes back with its numbers intact, and resetting the guard there put the mouse back on the emulated stick for
+         * 8 frames after every animation (measured 2026-10-24: following=0 while the walking camera ran 28 ms ago). */
+        if (camera!=seen_camera || t_now-seen_us>1000000) { seen_camera=camera; seen_frames=0; }
         seen_us=t_now;
         if (seen_frames<8) ++seen_frames;
         const float *chk_dir=(const float *)(uintptr_t)(camera+0x9ec0), *chk_pos=(const float *)(uintptr_t)(camera+0x9d70);
@@ -852,7 +1112,7 @@ static void __attribute__((ms_abi)) u2b_camera_hook(uint64_t unused0, uint64_t u
         }
     }
         { const float frame_dt=u2_frame_dt(image);
-          follow_camera(camera,0x9ec0,0x9e60,135.0f,!(frame_dt>0.0f && frame_dt<0.25f)); }
+          follow_camera(camera,0x9ec0,0x9e60,135.0f,!(frame_dt>0.0f && frame_dt<0.25f),U2_FOLLOW_RESYNC_US); }
         if ((follow_applied!=0.0f || follow_arc_moved) && !input.free_view_smoothing) {
             /* The camera's target position (+0x9d50, the one before it at +0x9eb0) follows the direction at once, on a circle about
              * the player (+0x9e70), but the position it shows (+0x9d70) follows that target through a spring and trails it by 6 to
@@ -873,8 +1133,15 @@ static void __attribute__((ms_abi)) u2b_camera_hook(uint64_t unused0, uint64_t u
                 if (r1>0.3f && r0>0.3f && h>0.1f) {
                     float d=SDL_atan2f(t1[1]-pivot[1],r1)-SDL_atan2f(t0[1]-pivot[1],r0); /* change of elevation, radians */
                     d=d>0.35f ? 0.35f : d<-0.35f ? -0.35f : d;
-                    const float e=SDL_atan2f(py,h), len=SDL_sqrtf(h*h+py*py), e2=e+d, k=len*SDL_cosf(e2)/h;
-                    px*=k; pz*=k; py=len*SDL_sinf(e2);
+                    if (mouse_debug() && (d>0.05f || d<-0.05f)) printf("Mouse: u2 arc tilt %.1f deg (gap %.0f ms)\n",(double)(d*57.29578f),follow_gap_us*1e-3);
+                    /* After an animation the previous target (+0x9eb0) is the one from before it: the change of elevation
+                     * it shows is the animation's, not the player's, and tilting the shown position by it jolted the picture.
+                     * Measured 2026-10-24: the walking camera's normal call interval is 30 to 60 ms in the climbing
+                     * sequences, so only a gap beyond that (an animation) is treated as one. */
+                    if (follow_gap_us<U2_FOLLOW_RESYNC_US) {
+                        const float e=SDL_atan2f(py,h), len=SDL_sqrtf(h*h+py*py), e2=e+d, k=len*SDL_cosf(e2)/h;
+                        px*=k; pz*=k; py=len*SDL_sinf(e2);
+                    } else if (mouse_debug()) printf("Mouse: u2 arc tilt dropped (gap %.0f ms)\n",follow_gap_us*1e-3);
                 }
             }
             if (follow_applied!=0.0f) {
@@ -897,7 +1164,21 @@ static void __attribute__((ms_abi)) u2b_camera_hook(uint64_t unused0, uint64_t u
         if (u2_follow_seen_us && zoom_camera_us-u2_follow_seen_us<3000) u2_zoom_under_us=zoom_camera_us; else u2_zoom_top_us=zoom_camera_us;
         u2_zoom_camera(camera,image);
         break;
-    default: break;
+    case 0x4383d0: /* the camera that holds the picture alone during an animation: relative yaw offset at +0x18c */
+        if (u2_base_on()) u2_base_camera(camera,gap);
+        break;
+    default:
+        if (mouse_debug()) { /* a camera this hook does not know: the mouse stays a stick while it runs (climbing, cutscenes, special views) */
+            static uint64_t seen[16]; static int nseen;
+            const uint64_t id=update-image;
+            int known=0;
+            for (int i=0;i<nseen && !known;++i) known=seen[i]==id;
+            if (!known) {
+                if (nseen<16) seen[nseen++]=id;
+                printf("Mouse: u2 camera update %#llx not handled (mouse stays on the stick) t=%.4f\n",(unsigned long long)id,now_us()*1e-6);
+            }
+        }
+        break;
     }
 }
 static const unsigned char u2b_camera_hook_code[]={
@@ -2990,6 +3271,30 @@ static void __attribute__((ms_abi)) u2_model_hook(uint64_t rdi, uint64_t frame, 
     safe_write(self+0x70,v,8);
     if (mouse_debug()) { static uint64_t last; const uint64_t now=now_us(); if (now-last>250000) { last=now; printf("Mouse: U2 model hook: scene %#llx dt %.4f drag %d speed %.3f %.3f\n",(unsigned long long)self,dt,u2_model_drag,vx,vy); } }
 }
+static volatile float u2_anim_sx, u2_anim_sy;   /* the mouse's turn rate (degrees/s) while it goes through the emulated stick */
+static volatile uint64_t u2_anim_us;
+static double anim_cal_req, anim_cal_got; static float anim_cal_yaw; static int anim_cal_have;   /* (debug) degrees the mouse asked for vs degrees the picture turned in one spell on the emulated stick */
+/* U2 of CUSA02320 (the collection): image+0x431580 turns a pad object (rsi, image+0x1116950 + 0x130 * n) into the "game stick" block (rdi, a
+ * caller's stack): dead zone, then the length of each stick clamped to 1, left stick at +0, right stick at +8 / +0xc. Every system that
+ * wants the sticks (cameras, the player's animations) calls it. The hook sits after the right stick is stored (image+0x4316cc, rdi still
+ * the block). During a grab, a vault or a ledge the picture is held by the game's animation, which turns at a rate proportional to this
+ * stick (about 120 degrees/s per unit once its ramp-up is counted, measured), and the clamp to 1 was the cap on the mouse. The mouse's rate
+ * while it goes through the emulated stick is put here as a value above 1 when the pad's own right stick is at rest (BB_U2_ANIM_RATE=<deg/s
+ * per unit> tunes it). The walking camera is not affected: it does not use this block for the mouse. */
+static void __attribute__((ms_abi)) u2_stick_filter(uint64_t block, uint64_t unused1, uint64_t image, uint64_t r14) {
+    (void)unused1; (void)image; (void)r14;
+    static float full_rate=0.0f;
+    if (full_rate<=0.0f) { const char *e=getenv("BB_U2_ANIM_RATE"); full_rate=e && atof(e)>10.0 ? (float)atof(e) : 120.0f; }
+    if (block<0x10000) return;
+    float *out=(float *)(uintptr_t)block;
+    const uint64_t now=now_us();
+    if (u2_anim_us && now-u2_anim_us<60000 && (u2_anim_sx!=0.0f || u2_anim_sy!=0.0f)) {
+        float sx=u2_anim_sx/full_rate, sy=u2_anim_sy/full_rate;
+        sx=sx>8.0f ? 8.0f : sx<-8.0f ? -8.0f : sx; sy=sy>8.0f ? 8.0f : sy<-8.0f ? -8.0f : sy;
+        out[2]=sx; out[3]=sy;
+    }
+}
+static const unsigned char u2_stick_filter_code[]={0xc5,0xfa,0x10,0x46,0x10,0xc5,0xfa,0x11,0x47,0x10,0xc5,0xfa,0x10,0x46,0x14};
 static const unsigned char u1_menu_event_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x18};
 static const RuntimeGuestCallback guest_callbacks[]={
     {"U1 menu event (list jump)",0x1336c0,u1_menu_event_code,sizeof(u1_menu_event_code),6,u1_menu_event,NULL},
@@ -3007,6 +3312,7 @@ static const RuntimeGuestCallback guest_callbacks[]={
     {"U2 follow camera (mouse)",0x171fe0,u2_follow_camera_code,sizeof(u2_follow_camera_code),6,u2_follow_camera,NULL},
     {"U3 follow camera (mouse)",0x121b90,u3_follow_camera_code,sizeof(u3_follow_camera_code),6,u3_follow_camera,NULL},
     {"U2 camera update (mouse, collection)",0x4374cc,u2b_camera_hook_code,sizeof(u2b_camera_hook_code),7,u2b_camera_hook,NULL},
+    {"U2 stick filter (collection)",0x4316cc,u2_stick_filter_code,sizeof(u2_stick_filter_code),5,u2_stick_filter,NULL},
     {"U2 list widget update (collection)",0x57e410,u2_bind_code,sizeof(u2_bind_code),8,u2_widget_hook,NULL},
     {"U2 treasure model (mouse, collection)",0x5d7c05,u2_model_code,sizeof(u2_model_code),8,u2_model_hook,NULL},
     {"U2 prompt bar: compare-with-friends prompt (hook, collection)",0x5a54c7,u2_compare_cmp_code,sizeof(u2_compare_cmp_code),5,u2_compare_prompt,NULL},
@@ -5238,9 +5544,26 @@ static void sample_host(PadData *d) {
     const int following=camera_hook_us && now-camera_hook_us<100000;
     const int joypad=sticks_hook_us && now-sticks_hook_us<100000;
     const int native=u2_native_us && now-u2_native_us<100000; /* U2: the cover / look-around camera turns with the mouse */
+    /* The animation camera (0x4383d0) takes the mouse while the walking camera is away, when BB_U2_BASE is on. */
+    const int base_gap=u2_base_on() && !(u2_follow_seen_us && now-u2_follow_seen_us<U2_FOLLOW_RESYNC_US);
+    if (mouse_debug()) { /* does the picture turn while no camera update runs (an animation holds the view)? */
+        static int was_following, seen;
+        static float yaw0;
+        if (was_following && !following) {
+            float y=0.0f; double a=0.0;
+            seen=bbgpu_camera_yaw(&y,&a); yaw0=y;
+        } else if (!was_following && following && seen) {
+            float y=0.0f; double a=0.0;
+            const int have=bbgpu_camera_yaw(&y,&a);
+            printf("Mouse: GAPEND yaw %.1f -> %.1f%s (menu=%d) t=%.4f\n",(double)yaw0,have ? (double)y : 0.0,
+                   have ? "" : "?",u2_menu,now*1e-6);
+            seen=0;
+        }
+        was_following=following;
+    }
     for (int q=0;q<CAMERA_QUEUES;++q) {
         /* queue 2 is the zoom camera's (U1 aiming): nothing else reads it, so it stays empty outside the aim */
-        if (captured && (following || joypad || native) && (q!=2 || aim_held || look_held || now_us()<aim_blend_until_us || now_us()<look_blend_until_us || (u2_chase_us && now_us()-u2_chase_us<200000))) { camera_dx[q]+=mdx; camera_dy[q]+=mdy; }
+        if (captured && (following || joypad || native || base_gap) && (q!=2 || aim_held || look_held || now_us()<aim_blend_until_us || now_us()<look_blend_until_us || (u2_chase_us && now_us()-u2_chase_us<200000))) { camera_dx[q]+=mdx; camera_dy[q]+=mdy; }
         else { camera_dx[q]=camera_dy[q]=0; }
     }
     /* gyro aiming: kept while aiming (at low frame rates the aim controller runs only every 100-200 ms) */
@@ -5248,22 +5571,54 @@ static void sample_host(PadData *d) {
     if (captured && raw_aiming) { aim_dx+=mdx; aim_dy+=mdy; }
     else { aim_dx=aim_dy=0.0f; }
     pthread_mutex_unlock(&camera_lock);
-    const int direct_x=joypad || native || (following && !aim_native && !look_held && follow_direct);
-    const int direct_y=joypad || native || (following && !aim_native && !look_held && follow_direct && follow_has_arc);
+    const int direct_x=base_gap || joypad || native || (following && !aim_native && !look_held && follow_direct);
+    const int direct_y=base_gap || joypad || native || (following && !aim_native && !look_held && follow_direct && follow_has_arc);
+    if (mouse_debug()) { /* state of the input loop: why the mouse does or does not reach the animation camera */
+        static uint64_t last;
+        if (now-last>1000000) {
+            last=now;
+            printf("Mouse: state menu=%d captured=%d base_gap=%d following=%d since_follow=%.0f ms mdx=%.0f t=%.4f\n",
+                   u2_menu,captured,base_gap,following,u2_follow_seen_us ? (now-u2_follow_seen_us)*1e-3 : -1.0,
+                   (double)mdx,now*1e-6);
+        }
+    }
+    static uint64_t emulated_on_us; /* (debug) when the mouse went to the emulated right stick, 0 if it is native */
     if (captured && direct_x && direct_y) {
+        if (mouse_debug() && emulated_on_us) { /* end of a spell on the emulated stick: how long was it, and did the picture turn meanwhile? */
+            float yaw=0.0f; double age=0.0;
+            const int have=bbgpu_camera_yaw(&yaw,&age);
+            printf("Mouse: emulated stick off after %.0f ms%s yaw=%.2f t=%.4f\n",(now-emulated_on_us)*1e-3,
+                   have && age<0.25 ? "" : "?",(double)yaw,now*1e-6);
+            if (anim_cal_req>20.0 || anim_cal_req<-20.0)   /* the mouse turns right = a negative yaw change */
+                printf("Mouse: ANIMCAL asked %.1f deg, the picture turned %.1f deg (ratio %.3f)\n",anim_cal_req,anim_cal_got,-anim_cal_got/anim_cal_req);
+            anim_cal_req=anim_cal_got=0.0; anim_cal_have=0;
+        }
+        emulated_on_us=0;
         mouse_vx=mouse_vy=0; mouse_last_us=0;
     } else if (captured) {
         if (mouse_debug() && (mdx!=0 || mdy!=0)) {   /* monitoring: the mouse goes through the emulated right stick; which cameras are running then? */
             static uint64_t last_print; static unsigned n_since;
+            if (!emulated_on_us) {
+                emulated_on_us=now;
+                float yaw=0.0f; double age=0.0;
+                const int have=bbgpu_camera_yaw(&yaw,&age);
+                printf("Mouse: emulated stick on%s yaw=%.2f cameras [",have && age<0.25 ? "" : "?",(double)yaw);
+                for (int i=0;i<u2_dbg_ncams;++i) printf(" %#llx",(unsigned long long)u2_dbg_cams[i]);
+                printf(" ] following=%d joypad=%d native=%d t=%.4f\n",following,joypad,native,now*1e-6);
+            }
             ++n_since;
             if (now-last_print>1000000) {
+                float yaw=0.0f; double age=0.0;
+                const int have=bbgpu_camera_yaw(&yaw,&age);
                 last_print=now;
                 printf("Mouse: EMULATED stick (no native camera) %u mouse reports; cameras [",n_since);
                 for (int i=0;i<u2_dbg_ncams;++i) printf(" %#llx",(unsigned long long)u2_dbg_cams[i]);
-                printf(" ] following=%d joypad=%d native=%d aim=%d look=%d t=%.4f\n",following,joypad,native,aim_held,look_held,now*1e-6);
+                printf(" ] following=%d joypad=%d native=%d aim=%d look=%d yaw=%.2f%s t=%.4f\n",following,joypad,native,aim_held,look_held,
+                       (double)yaw,have && age<0.25 ? "" : "?",now*1e-6);
                 n_since=0;
             }
         }
+        const int anim_pad_idle=d->right_x>118 && d->right_x<138 && d->right_y>118 && d->right_y<138;   /* the pad's own right stick (or its keys) at rest, before the mouse takes it */
         float dt=mouse_last_us ? (float)(now-mouse_last_us)*1e-6f : 0.0f;
         mouse_last_us=now;
         if (dt>0.0f) {
@@ -5274,9 +5629,27 @@ static void sample_host(PadData *d) {
             mouse_vy+=alpha*((input.mouse_invert_y ? -mdy : mdy)/dt*scale-mouse_vy);
             if (mdx==0 && mouse_vx>-1.0f && mouse_vx<1.0f) mouse_vx=0;
             if (mdy==0 && mouse_vy>-1.0f && mouse_vy<1.0f) mouse_vy=0;
+            /* U2 animations (grab, vault, ledge): the game's stick block is built by image+0x431580 with its length clamped to 1, which caps the turn at
+             * the full stick's rate; the hook there (u2_stick_filter) takes the mouse's rate over the full stick's, unclamped */
+            if (anim_pad_idle) { u2_anim_sx=mouse_vx; u2_anim_sy=mouse_vy; u2_anim_us=now; }
+            if (mouse_debug() && anim_pad_idle) {
+                float y=0.0f; double a=0.0;
+                if (bbgpu_camera_yaw(&y,&a)) { if (anim_cal_have) anim_cal_got+=wrap_degrees(y-anim_cal_yaw); anim_cal_yaw=y; anim_cal_have=1; }
+                anim_cal_req+=(double)mouse_vx*dt;
+            }
         }
         if (mouse_vx!=0 && !rx && !direct_x) d->right_x=mouse_axis(mouse_vx);
         if (mouse_vy!=0 && !ry && !direct_y) d->right_y=mouse_axis(mouse_vy);
+        if (mouse_debug()) { /* the requested rate against the rate the game gives: how much of the mouse the stick path keeps */
+            static uint64_t last;
+            if (now-last>100000) {
+                float yaw=0.0f; double age=0.0;
+                const int have=bbgpu_camera_yaw(&yaw,&age);
+                last=now;
+                printf("Mouse: stick vx=%.1f vy=%.1f axis=%d/%d yaw=%.2f%s t=%.4f\n",(double)mouse_vx,(double)mouse_vy,
+                       d->right_x,d->right_y,(double)yaw,have && age<0.25 ? "" : "?",now*1e-6);
+            }
+        }
     } else {
         mouse_vx=mouse_vy=0; mouse_last_us=0;
     }
