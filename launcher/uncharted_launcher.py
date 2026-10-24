@@ -169,9 +169,9 @@ FIXES = {
         'Automatic: on in Uncharted 2 only. Costs speed in busy scenes.',
         {'on': {'BB_GPU_MERGE': '0'}, 'off': {'BB_GPU_MERGE': '1'}}),
     'fix_u2_mesh': (
-        'Mesh raycaster copies (Uncharted 2)',
-        'Fixes "iSubMesh < m_numSubMeshInstances" after checkpoints. Automatic: on in Uncharted 2 only. '
-        'In Uncharted 3\'s Cartagena square it cost 94 to 54 FPS.',
+        'Mesh raycaster copies (Uncharted 1 and 2)',
+        'Fixes "iSubMesh < m_numSubMeshInstances" crashes after checkpoints and in cutscenes. '
+        'Automatic: on in Uncharted 1 and 2, off in Uncharted 3 where it cost 94 to 54 FPS in Cartagena square.',
         {'on': {'BB_SCALAR_COPY64_SYNC': '2', 'BB_SCALAR_COPY64_DEFER': '1'},
          'off': {'BB_SCALAR_COPY64_SYNC': '0', 'BB_SCALAR_COPY64_DEFER': '0'}}),
     'fix_tiny_readback': (
