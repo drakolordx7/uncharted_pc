@@ -299,10 +299,6 @@ static volatile uint64_t zoom_camera_us;  /* last frame the zoom (aiming) camera
  * frame while the aim blends in (about 0.5 s), which cancelled the mouse. */
 static volatile float aim_target_total;
 static volatile uint64_t aim_target_us;
-/* The walking camera (last seen by follow_camera): it is not updated while the aim is held (the manager drops it from the stack), so the aiming camera hands its turns
- * on to it directly, and it is where the aim looked when the game blends the aim out (it was left where it was before the aim, and pulled the picture back). */
-static volatile uint64_t follow_obj, follow_obj_us, follow_dir_off, follow_arc_off;
-static volatile float follow_arc_deg;
 static float camera_dx[CAMERA_QUEUES], camera_dy[CAMERA_QUEUES];
 /* U1: the camera time step (seconds, image+0xa4cb10 in CUSA02320 / CUSA02344 1.02) the cameras multiply
  * their speeds with; it is 0 while the game is paused, and the mouse must not turn anything then. */
@@ -378,7 +374,6 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
         follow_moved_us=0;
     }
     camera_hook_us=now;
-    follow_obj=camera; follow_obj_us=now; follow_dir_off=dir_offset; follow_arc_off=arc_offset; follow_arc_deg=arc_degrees;
     float *dir=(float *)(uintptr_t)(camera+dir_offset);
     const float heading=heading_of(dir);
     float dx, dy;
@@ -1389,20 +1384,6 @@ static void __attribute__((ms_abi)) u1b_aim_camera(uint64_t unused0, uint64_t un
         frame_turn=fade ? 0.0f : total_yaw-embedded_yaw;
         frame_turn_pitch=fade ? 0.0f : total_pitch-embedded_pitch;
         aim_target_total=wrap_degrees(aim_target_total+step); aim_target_us=now;
-        if (aim_held && follow_obj && now-follow_obj_us<60000000 && (step!=0.0f || step_pitch!=0.0f)) {   /* (the walking camera is not in the stack: it is turned here) */
-            float d[3]; float arc;
-            if (step!=0.0f && safe_read(d,follow_obj+follow_dir_off,12)) {
-                const float a=step*0.017453293f, c=SDL_cosf(a), s=SDL_sinf(a);
-                const float x=d[0], z=d[2];
-                d[0]=x*c-z*s; d[2]=x*s+z*c;
-                safe_write(follow_obj+follow_dir_off,d,12);
-            }
-            if (step_pitch!=0.0f && follow_arc_off && safe_read(&arc,follow_obj+follow_arc_off,4)) {
-                arc+=step_pitch/follow_arc_deg;
-                arc=arc<0.0f ? 0.0f : arc>1.0f ? 1.0f : arc;
-                safe_write(follow_obj+follow_arc_off,&arc,4);
-            }
-        }
     }
     aim_native_us=now;
     float *aim=(float *)(uintptr_t)(camera+0x1830);
