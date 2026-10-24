@@ -35,25 +35,34 @@ Controls are remapped on the Controls page. For prompts that ask you to rotate t
 
 ## Credits
 
-Port by [SuperMedo](https://github.com/Supermedo), built on [bbport](https://github.com/deadinside28/bloodborne_pc) (deadinside28) and the [shadPS4](https://github.com/shadps4-emu/shadPS4) renderer. Video decoding from [IFreemz](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR). Thanks to Mindro for the first shadPS4 Uncharted build.
+Community build by [drakolordx7](https://github.com/drakolordx7). Port by [SuperMedo](https://github.com/Supermedo), built on [bbport](https://github.com/deadinside28/bloodborne_pc) (deadinside28) and the [shadPS4](https://github.com/shadps4-emu/shadPS4) renderer. Video decoding from [IFreemz](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR). Thanks to Mindro for the first shadPS4 Uncharted build.
 
-Fixes in this build:
-- [Mevlock](https://github.com/Mevlock): freeze fixes, crash-safe saves, frame generation memory leak, Uncharted 3 cloth, flashlight and performance
-- [Umar-Qayyum-dev](https://github.com/Umar-Qayyum-dev): keyboard and mouse button prompts, keyboard layouts, Uncharted 2 performance
-- [iannitram](https://github.com/iannitram): crash guards, memory leak fix, FSR fixes, compute performance
-- [currantsforeyes](https://github.com/currantsforeyes): Itemzflow dumps, save and memory fixes, EU 1.02 support
-- [spacepepperoni](https://github.com/spacepepperoni), ngin: Uncharted 2 aiming blur, accurate GPU memory
-- [G3545](https://github.com/G3545): black weapons and brightness flicker, shader fix
-- [FelipePrado0](https://github.com/FelipePrado0): older Intel CPU support, adapted from [SpartanPort](https://github.com/FelipePrado0/SpartanPort)
-- [d4rksp4rt4n](https://github.com/d4rksp4rt4n): Uncharted 1 crash on newer Intel CPUs
-- [kuraeow](https://github.com/kuraeow): idle worker sleep (lower CPU load)
-- [poncho-ajmv](https://github.com/poncho-ajmv): launcher error reporting, Stop button, vibration toggle
-- [Hugo Borges](https://github.com/hugouchoasborges): large compute dispatch fix, frame rate cap
-- [kj2223](https://github.com/kj2223): Uncharted 1 upscaler shimmer
-- [soni424](https://github.com/soni424): dark launcher title bar, null shader binding guard
-- [eduardoghi](https://github.com/eduardoghi): numpad bindings
-- [parsifal295](https://github.com/parsifal295), [devilismyfriend](https://github.com/devilismyfriend): texture memory growth
-- [drakolordx7](https://github.com/drakolordx7): community build maintainer; crash, mouse, video memory, resolution, ultrawide, surround and keyboard fixes
+Fixes and features in this build, by contributor. Pull request links go to the official repository; "fork" links go to the contributor's own fork the change came from.
+
+- [Mevlock](https://github.com/Mevlock) ([fork](https://github.com/Mevlock/uncharted_pc-dev)): Uncharted 2 and 3 freeze fixes (buffer cache range lock, end-of-pipe flips, precise read-back deadlock), crash-safe save writes, FSR 3 frame generation memory leak, frame generation crash on resized frames, exit hang, Uncharted 3 first-run shader hang, Uncharted 3 cloth (compute shared memory bounds), flashlight and shadow dropout (depth array layers, HTILE), shader cache meta/binary pairing, tight typed-buffer writes, barrier and register tracking speed-ups, ignored-predication drain, COND_EXEC fix, and the optional longer job-worker spin
+- [Umar-Qayyum-dev](https://github.com/Umar-Qayyum-dev): keyboard and mouse button prompts in all three games with automatic switching and keyboard layouts ([#420](https://github.com/Supermedo/uncharted_pc/pull/420)), the "execute access to 0" / red zone crash fix for all three games ([#559](https://github.com/Supermedo/uncharted_pc/pull/559)), Uncharted 2 aim blur ([#528](https://github.com/Supermedo/uncharted_pc/pull/528)), Ivy Bridge support ([#336](https://github.com/Supermedo/uncharted_pc/pull/336)), tiny render result read-back, Uncharted 2 texture set and skinning reuse, draw pipe sleep waits, wave-local shared memory barriers (optional)
+- [spacepepperoni](https://github.com/spacepepperoni) ([fork](https://github.com/spacepepperoni/uncharted_Linux)): Uncharted 2 turret and aiming blur ([#381](https://github.com/Supermedo/uncharted_pc/pull/381)), accurate GPU memory for Uncharted 2, fixing chapter 21 and other physics problems ([#382](https://github.com/Supermedo/uncharted_pc/pull/382)), NaN guard for black squares in Uncharted 2
+- [ngin](https://github.com/ngin): accurate GPU memory by default with a cheaper read-back, compute fences in order with the draw pipe (+42% in the U2 convoy) and written through backing memory (fixes Uncharted 3 freezing about 15 s in), compute queue drains only where needed, turret blur read-back, PS4 FPU state for guest threads, Linux build fixes
+- [iannitram](https://github.com/iannitram) ([fork](https://github.com/iannitram/uncharted_pc)): nested indirect buffer leak fix ([#387](https://github.com/Supermedo/uncharted_pc/pull/387)), title number from AppContent ([#353](https://github.com/Supermedo/uncharted_pc/pull/353)), GCN NaN compare semantics (from shadPS4 #5257), missing CE task guard, early flip IRQ, FSR 3.1 protected memory and patch fixes, FSR driver logging, crash guards for bad GPU commands, failed pipelines and null vertex tables, save mount and flexible memory reports (#496, #497)
+- [currantsforeyes](https://github.com/currantsforeyes) ([fork](https://github.com/currantsforeyes/uncharted_pc)): Itemzflow plain ELF dumps, save mount limit, flexible mapping split, EU CUSA02344 1.02 red zone tables, window title
+- garyth.hawkins: idle job workers on the retail 1.02 build, EU 1.02 red zone tables, fallback window title, mount table and flexible mapping fixes
+- [G3545](https://github.com/G3545): small compute-written buffers copied back to the game, fixing black weapons and brightness flicker ([#449](https://github.com/Supermedo/uncharted_pc/pull/449)), scalar instructions inside EXEC scopes ([#468](https://github.com/Supermedo/uncharted_pc/pull/468))
+- [kj2223](https://github.com/kj2223): Uncharted 1 upscaler shimmer, jittered full-screen passes, English in-game menu, Uncharted 2 grey screen on launch ([#261](https://github.com/Supermedo/uncharted_pc/pull/261))
+- [FelipePrado0](https://github.com/FelipePrado0): the load-time rewrite of BMI1, LZCNT, MOVBE and F16C instructions that runs the games on Sandy and Ivy Bridge, adapted from [SpartanPort](https://github.com/FelipePrado0/SpartanPort)
+- [d4rksp4rt4n](https://github.com/d4rksp4rt4n): Uncharted 1 crash at 0x63f5d0 on Intel 12th gen and newer ([#403](https://github.com/Supermedo/uncharted_pc/pull/403))
+- [kuraeow](https://github.com/kuraeow): idle job workers sleep, lowering CPU load on smaller CPUs ([#346](https://github.com/Supermedo/uncharted_pc/pull/346))
+- [poncho-ajmv](https://github.com/poncho-ajmv) ([fork](https://github.com/poncho-ajmv/uncharted_pc)): launcher error reporting (crash reason, input settings, shader cache), reliable Stop, controller vibration settings, launcher languages, custom artwork
+- [saulo benigno](https://github.com/saulob): Cheats page with infinite health and ammo ([#116](https://github.com/Supermedo/uncharted_pc/pull/116))
+- [Hugo Borges](https://github.com/hugouchoasborges) ([fork](https://github.com/hugouchoasborges/uncharted_pc)): compute dispatches above 65535 groups, sparse-capable queue selection, frame rate cap presets
+- [sid1552](https://github.com/sid1552) ([fork](https://github.com/sid1552/uncharted_pc)): MP3 audio decoding, GPU crash report on device loss, buffer cache per 64-byte block, current MSYS2 build
+- [EdouardSence](https://github.com/EdouardSence) ([fork](https://github.com/EdouardSence/uncharted_pc)): large command data no longer stops the game, GPU copies mark textures dirty, overlay cleanup, Linux window icon
+- [soni424](https://github.com/soni424) ([fork](https://github.com/soni424/uncharted_pc)): dark launcher title bar, null shader binding guard
+- [eduardoghi](https://github.com/eduardoghi): numpad bindings ([#473](https://github.com/Supermedo/uncharted_pc/pull/473)), zip that extracts on Linux ([#404](https://github.com/Supermedo/uncharted_pc/pull/404))
+- [parsifal295](https://github.com/parsifal295) and [devilismyfriend](https://github.com/devilismyfriend): texture collector frees textures again (video memory growth)
+- Pedro Delfino: more texture eviction under critical memory pressure
+- Rick: prepare.py on CP950 Windows systems
+- [gelibeanz](https://github.com/gelibeanz), [vander-x](https://github.com/vander-x): Linux file reads and build fixes; [lunar-me](https://github.com/lunar-me): documentation fixes
+- [drakolordx7](https://github.com/drakolordx7): maintains this build; render above 1080p and ultrawide ([#391](https://github.com/Supermedo/uncharted_pc/pull/391)), Xbox button prompts ([#469](https://github.com/Supermedo/uncharted_pc/pull/469)), trophies ([#472](https://github.com/Supermedo/uncharted_pc/pull/472)), XeSS ([#476](https://github.com/Supermedo/uncharted_pc/pull/476)), surround sound ([#392](https://github.com/Supermedo/uncharted_pc/pull/392)), per-GPU shader caches ([#412](https://github.com/Supermedo/uncharted_pc/pull/412)), pipeline compiling off the GPU thread ([#389](https://github.com/Supermedo/uncharted_pc/pull/389), [#416](https://github.com/Supermedo/uncharted_pc/pull/416)), 30 FPS option ([#544](https://github.com/Supermedo/uncharted_pc/pull/544)), PS4 thread priorities ([#547](https://github.com/Supermedo/uncharted_pc/pull/547)), direct game shortcuts ([#399](https://github.com/Supermedo/uncharted_pc/pull/399)), mouse hooks for 1.02 ([#348](https://github.com/Supermedo/uncharted_pc/pull/348)), memory leak and several crash fixes, keyboard stick rotation for valves, Uncharted 2 and 3 read-back fixes (black guns, aim blur), threaded movie scaling for older CPUs
 
 Testing and research: adrianeira, exyled, fidoboy, kloon15, tDevis, MrBboy95, rayer23, GameBunny77 and everyone who sent logs.
 
