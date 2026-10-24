@@ -4529,7 +4529,7 @@ static uint32_t u2_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
     { static int popup_last; if (popup!=popup_last) { popup_last=popup; printf("Runtime: U2 popup %s\n",popup ? "in" : "out"); } }
     int have_hov=0, have_sel=0, hi_n=0, have_slid=0, wide_n=0, ls_wide_n=0, on_cmd=0, ls_n[6]={0,0,0,0,0,0}, ls_sel[6]={0,0,0,0,0,0};
     float ls_miny[6]={1e9f,1e9f,1e9f,1e9f,1e9f,1e9f};
-    float hi_cy[16], wide_min=1e9f, wide_ys[6]; int wide_ys_n=0;
+    float hi_cy[16], wide_min=1e9f, wide_ys[16]; int wide_ys_n=0;
     pthread_mutex_lock(&menu_text_lock);
     for (int i=0;i<8;++i) {
         const U2Row *s=&u2_sliders[i];
@@ -4539,7 +4539,7 @@ static uint32_t u2_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
     for (int i=0;i<U2_ROWS;++i) {
         const U2Row *r=&u2_rows[i];
         if (!r->us || now-r->us>=100000) continue;
-        if (fabsf(r->x-405.0f)<1.0f && (fabsf(r->w-520.0f)<1.0f || r->w>=1100.0f) && r->h>=33.0f && r->h<=33.9f)   /* (the section titles are 34.2 tall and as wide) */ { ++wide_n; if (r->y<wide_min) wide_min=r->y; if (wide_ys_n<6) wide_ys[wide_ys_n++]=r->y; }   /* the two last rows of Commandes (three with ours) */
+        if (r->x>300.0f && r->x<500.0f && r->h>=33.0f && r->h<=33.9f)   /* (the section titles are 34.2 tall and as wide) */ { ++wide_n; if (r->y<wide_min) wide_min=r->y; { int dup=0; for (int q=0;q<wide_ys_n;++q) if (fabsf(wide_ys[q]-r->y)<0.5f) dup=1; if (!dup && wide_ys_n<16) wide_ys[wide_ys_n++]=r->y; } }   /* the two last rows of Commandes (three with ours) */
         if (fabsf(r->h-U2_LIST_ROW)<0.3f && fabsf(r->x-270.0f)<1.0f && fabsf(r->w-497.8f)<1.0f) ++ls_wide_n;   /* (a Statistiques row with a value) */
         if (fabsf(r->h-U2_LIST_ROW)<0.3f) for (int q=0;q<6;++q) if ((fabsf(r->x-u2_lists[q].x)<1.0f && fabsf(r->w-u2_lists[q].w)<1.0f) || (q==2 && fabsf(r->x-359.2f)<1.0f && fabsf(r->w-589.6f)<1.0f) || (q==0 && fabsf(r->x-270.0f)<1.0f && fabsf(r->w-497.8f)<1.0f))   /* (Statistiques has the rows of Trésors; those with a value are narrower, the value being in a second column) */ {   /* (Récompenses: the same list, its rows are 320 / 628.8 or 359.2 / 589.6 wide, same right edge) */ ++ls_n[q]; if (r->s5>=2.5f) ls_sel[q]=1; if (r->y<ls_miny[q]) ls_miny[q]=r->y; }   /* the rows of a long list */
         if (fabsf(r->h-34.2f)<0.2f) continue;   /* the section titles (Visée, Caméra...) and their bars: never selected */
@@ -4564,6 +4564,7 @@ static uint32_t u2_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
             if (fabsf(a->y-b->y)<1.0f && fabsf(a->w-b->w)<1.0f && fabsf(a->h-b->h)<1.0f && b->x>=a->x+a->w-1.0f && b->x-(a->x+a->w)<=150.0f && a->w<=260.0f) { da=*a; db=*b; dlg=1; break; }
         }
     }
+    if (!on_cmd && wide_n>=9) for (int i=0;i<8;++i) if (u2_sliders[i].us && now-u2_sliders[i].us<150000) on_cmd=1;   /* (the rail of the slider is not always at x 717: the language changes the layout; the screen is the one with many rows and a slider) */
     pthread_mutex_unlock(&menu_text_lock);
     if (dlg) {
         sel=da.a>db.a+0.05f ? da : db; have_sel=1;   /* (no sign yet: the right one, "Non", is the one the game starts on) */
@@ -4598,10 +4599,10 @@ static uint32_t u2_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
     if (ls_hover) h.active=0;   /* (the hover on a list is done above: no d-pad steps; a click still presses cross once the row is the selected one) */
     if (u2_row_inserted) {   /* Commandes, then ours, then Rétablir: ours is the middle one of the three wide rows */
         float mid=1e9f;
-        for (int a=0;a<wide_ys_n;++a) { int below=0; for (int b=0;b<wide_ys_n;++b) if (wide_ys[b]<wide_ys[a]-0.5f) ++below; if (below==1) mid=wide_ys[a]; }
-        u2_keys_row_sel=on_cmd && wide_n>=3 && have_sel && fabsf(sel.x-405.0f)<1.0f && fabsf(sel.y-mid)<1.0f;
+        for (int a=0;a<wide_ys_n;++a) { int below=0; for (int b=0;b<wide_ys_n;++b) if (wide_ys[b]>wide_ys[a]+0.5f) ++below; if (below==1) mid=wide_ys[a]; }   /* (the rows widths depend on the language: the middle one of the three lowest rows) */
+        u2_keys_row_sel=on_cmd && wide_n>=3 && have_sel && sel.x>300.0f && sel.x<500.0f && fabsf(sel.y-mid)<1.0f;
     } else
-    u2_keys_row_sel=on_cmd && wide_n>=2 && have_sel && fabsf(sel.x-405.0f)<1.0f && fabsf(sel.y-wide_min)<1.0f;
+    u2_keys_row_sel=on_cmd && wide_n>=2 && have_sel && sel.x>300.0f && sel.x<500.0f && fabsf(sel.y-wide_min)<1.0f;
     u2_sel_plain_row=have_sel && fabsf(sel.h-U2_LIST_ROW)<0.3f && fabsf(sel.x-270.0f)<1.0f && fabsf(sel.w-768.0f)<1.5f;
     if (u2_menu_reset) { u2_menu_reset=0; memset(skips,0,sizeof(skips)); h.active=0; h.click=0; h.presses=0; h.press_until=h.cross_until=0; }   /* a rebuilt menu (a language was chosen): wait for the cursor to move */
     if (!left) h.drag=0;
