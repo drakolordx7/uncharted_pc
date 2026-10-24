@@ -225,9 +225,12 @@ def main():
         if player_small is None:
             env['BB_READBACK_SMALL_BUFFERS'] = '1' if exe == EXECUTABLES['u2'] else '0'
         # Its mesh raycaster copies land in guest memory too (iSubMesh after checkpoints).
+        # U1 needs them as well (iSubMesh crashes in the Customs House and cutscenes, jet ski
+        # grenades). Off in U3: it cost 94 -> 54 FPS in the Cartagena square.
         if player_copy is None:
-            env['BB_SCALAR_COPY64_SYNC'] = '2' if exe == EXECUTABLES['u2'] else '0'
-            env['BB_SCALAR_COPY64_DEFER'] = '1' if exe == EXECUTABLES['u2'] else '0'
+            copy_on = exe in (EXECUTABLES['u1'], EXECUTABLES['u2'])
+            env['BB_SCALAR_COPY64_SYNC'] = '2' if copy_on else '0'
+            env['BB_SCALAR_COPY64_DEFER'] = '1' if copy_on else '0'
         game, file = locate(env, exe)
         if not game:
             fail('Set BB_GAME_DIR to the game folder (the one with eboot.bin).')
