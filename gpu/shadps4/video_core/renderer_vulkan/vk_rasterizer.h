@@ -138,6 +138,8 @@ public:
         scheduler.SignalAfterHostCopies(std::move(signal), landing_seq);
     }
     /// The GPU command thread or the draw recording thread (fault handling runs inline there).
+    /// The draw recording thread (stage B).
+    bool OnDrawRecThread() const;
     bool IsGpuSideThread() const;
     bool IsGpuSideThreadId(u32 tid) const;
     /// A guest write hit a protected page.

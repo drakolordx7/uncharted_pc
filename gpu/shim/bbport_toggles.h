@@ -102,6 +102,8 @@ inline std::atomic<std::uint64_t> gpu_merges{0};
 /// ... or read back on the second queue (GPU work done; BufferCache::DownloadOnSideQueue).
 inline std::atomic<std::uint64_t> gpu_side_downloads{0}, gpu_side_download_ns{0};
 inline std::atomic<std::int64_t> hot_pages{0};
+/// BB_READ_LOG: the guest instruction of the read fault being served (0: none; racy between threads).
+inline std::atomic<std::uint64_t> read_fault_rip{0}, read_fault_count{0};
 /// Stall diagnostics (BB_FRAME_STATS): per-frame deltas printed for frames over 40 ms.
 inline std::atomic<std::uint64_t> images_registered{0};
 inline std::atomic<std::uint64_t> image_upload_bytes{0};

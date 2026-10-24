@@ -593,6 +593,10 @@ void Rasterizer::DrainDrawPipe(u32 reason, u32 line, const char* function) {
     }
 }
 
+bool Rasterizer::OnDrawRecThread() const {
+    return DrawPipe::OnStageB();
+}
+
 bool Rasterizer::IsGpuSideThread() const {
     return OnStageA() || DrawPipe::OnStageB();
 }

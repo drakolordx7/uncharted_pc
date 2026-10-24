@@ -1023,6 +1023,54 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
     }
 }
 
+extern "C" int runtime_memory_read_backing(uintptr_t address, void* out, uint64_t size);
+namespace {
+// bbport diagnosis: BB_READ_LOG=1 -- what a read-back brings the guest. Each GPU range written
+// into guest memory is compared with the bytes the guest holds (read through the backing view);
+// ranges that differ are what the guest would have read stale without the read-back. Counted by
+// the guest instruction of the read fault that asked (BB_READBACKS=2; 0 = a guest write or the
+// port itself) and by 64 KiB block, printed every 10 s.
+struct ReadLog {
+    struct Entry { u64 ranges{}, differing{}, bytes{}, diff_bytes{}; };
+    std::mutex m;
+    std::map<std::pair<u64, u64>, Entry> by_site;   // (rip, 64 KiB block)
+    std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
+};
+bool ReadLogEnabled() {
+    static const bool on = [] { const char* e = std::getenv("BB_READ_LOG"); return e && e[0] == '1'; }();
+    return on;
+}
+ReadLog& ReadLogData() { static ReadLog l; return l; }
+void NoteDownload(VAddr guest, const u8* gpu, u64 size) {
+    if (!ReadLogEnabled()) return;
+    std::vector<u8> mine(size);
+    if (!runtime_memory_read_backing(guest, mine.data(), size)) return;
+    u64 diff = 0;
+    for (u64 i = 0; i < size; ++i) diff += mine[i] != gpu[i];
+    auto& l = ReadLogData();
+    std::scoped_lock lk{l.m};
+    auto& e = l.by_site[{BbStats::read_fault_rip.load(), guest >> 16}];
+    ++e.ranges; e.differing += diff != 0; e.bytes += size; e.diff_bytes += diff;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - l.window >= std::chrono::seconds(10)) {
+        std::vector<std::pair<std::pair<u64, u64>, ReadLog::Entry>> v(l.by_site.begin(), l.by_site.end());
+        std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.second.diff_bytes > b.second.diff_bytes; });
+        u64 tr = 0, td = 0, tb = 0, tdb = 0;
+        for (auto& [k, x] : v) { tr += x.ranges; td += x.differing; tb += x.bytes; tdb += x.diff_bytes; }
+        std::printf("READLOG 10s: %llu guest read faults so far; %llu ranges, %llu differ from guest memory, %llu bytes (%llu differing)\n",
+                    (unsigned long long)BbStats::read_fault_count.load(), (unsigned long long)tr, (unsigned long long)td, (unsigned long long)tb, (unsigned long long)tdb);
+        for (size_t i = 0; i < v.size() && i < 14; ++i) {
+            const auto& [k, x] = v[i];
+            std::printf("READLOG rip %#llx block %#llx: ranges %llu differing %llu bytes %llu differing bytes %llu\n",
+                        (unsigned long long)k.first, (unsigned long long)(k.second << 16),
+                        (unsigned long long)x.ranges, (unsigned long long)x.differing,
+                        (unsigned long long)x.bytes, (unsigned long long)x.diff_bytes);
+        }
+        l.by_site.clear(); l.window = now;
+    }
+}
+} // namespace
+
 void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size) {
     boost::container::small_vector<vk::BufferCopy, 1> copies;
     u64 total_size_bytes = 0;
@@ -1089,6 +1137,7 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
     for (const auto& copy : copies) {
         auto* dst_addr = std::bit_cast<u8*>(arena_base + copy.srcOffset);
         const u8* data = download.mapped + (copy.dstOffset - download.offset);
+        NoteDownload(reinterpret_cast<VAddr>(dst_addr), data, copy.size);
         if (download_check) {
             const VAddr address = reinterpret_cast<VAddr>(dst_addr);
             const bool cpu_modified = memory_tracker->IsRegionCpuModified(address, copy.size);

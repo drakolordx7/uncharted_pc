@@ -127,7 +127,11 @@ struct PageManager::Impl {
             // there waited for the GPU command thread, which was draining the draw pipe, whose
             // recording thread waited for those copies (U2 froze). They read guest memory as it
             // is, as without precise read-backs; the game's threads get the GPU data.
-            if (!is_gpu_thread && !runtime_thread_is_guest()) {
+            // The GPU command thread and the draw recording thread read guest memory for their
+            // draws too (host copies); a read-back there waits for the other one or for the
+            // GPU command thread's own queue (BB_READBACKS=2 froze U3 at the first load twice).
+            // They read guest memory as it is.
+            if (!runtime_thread_is_guest()) {
                 if (!rasterizer->IsMapped(addr, 8)) {
                     return false;
                 }
@@ -137,7 +141,14 @@ struct PageManager::Impl {
                 return true;
             }
             BbStats::Timer timer{BbStats::t_read_faults};
-            return rasterizer->ReadMemory(addr, 8, is_gpu_thread);
+#ifdef _WIN32
+            BbStats::read_fault_count.fetch_add(1, std::memory_order_relaxed);
+            BbStats::read_fault_rip.store(reinterpret_cast<std::uint64_t>(
+                reinterpret_cast<EXCEPTION_POINTERS*>(context)->ExceptionRecord->ExceptionAddress));
+#endif
+            const bool read_ok = rasterizer->ReadMemory(addr, 8, is_gpu_thread);
+            BbStats::read_fault_rip.store(0);
+            return read_ok;
         }
         return false;
     }
