@@ -71,6 +71,16 @@ struct UniqueImage {
     /// info inside a ReuseScope (call once the GPU is done with it), else destroys it.
     void Recycle();
 
+    /// bbport: destroys the images Recycle() keeps. The texture cache's collector calls it under
+    /// memory pressure (the pool is still counted as image memory but no image owns it), and at
+    /// teardown; ReleaseRecycledIfDisabled once recycling is turned off (BB_IMAGE_RECYCLE=0 or
+    /// toggle2 RecycledImages), so the pool is not stranded.
+    static void ReleaseRecycled();
+    static void ReleaseRecycledIfDisabled();
+    /// bbport: the collector's pressure verdict of its latest pass; Recycle() keeps nothing
+    /// while it holds.
+    static void SetMemoryPressure(bool pressure);
+
     /// bbport: Create() calls on this thread may take a recycled image. Only for images whose
     /// contents are overwritten before use: a recycled one holds its old contents.
     struct ReuseScope {

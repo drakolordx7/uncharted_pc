@@ -76,7 +76,10 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
     base_critical_gc_memory = critical_gc_memory;
 }
 
-TextureCache::~TextureCache() = default;
+TextureCache::~TextureCache() {
+    // bbport: the Vulkan images kept for reuse (UniqueImage::Recycle) belong to no image.
+    UniqueImage::ReleaseRecycled();
+}
 
 void TextureCache::ProcessDownloadImages() {
     std::unique_lock lk{download_images_mutex};
@@ -1270,6 +1273,7 @@ static bool LiveMarksOnBigCards() {
 
 void TextureCache::GarbageCollectImages() {
     bool urgent_pass = false;
+    UniqueImage::ReleaseRecycledIfDisabled();
     vmaSetCurrentFrameIndex(instance.GetAllocator(), static_cast<u32>(gc_tick));
     if (Vulkan::Vram::Log()) {
         static auto last = std::chrono::steady_clock::now();
@@ -1372,6 +1376,7 @@ void TextureCache::GarbageCollectImages() {
         gc_tick_at_second[second % gc_tick_at_second.size()] = gc_tick;
     }
     if (total_used_memory < trigger_gc_memory && !urgent_pass) {
+        UniqueImage::SetMemoryPressure(false);
         return;
     }
     static const u64 idle_seconds = [] {
@@ -1466,6 +1471,13 @@ void TextureCache::GarbageCollectImages() {
 
     // Try to remove anything old enough and not high priority.
     configure(false);
+    // bbport: the Vulkan images kept for reuse go first under pressure (still counted as image
+    // memory, owned by no image the collector could free), and none are kept meanwhile.
+    const bool under_pressure = pressured || aggresive || urgent_pass;
+    UniqueImage::SetMemoryPressure(under_pressure);
+    if (under_pressure) {
+        UniqueImage::ReleaseRecycled();
+    }
     gc_kept = gc_kept_bytes = 0;
     lru_cache.ForEachItemBelow(below_tick, clean_up);
 

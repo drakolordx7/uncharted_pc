@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "bbport_toggles.h"
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
@@ -114,6 +115,7 @@ std::mutex recycled_mutex;
 std::vector<RecycledImage> recycled_images; ///< oldest first
 vk::DeviceSize recycled_bytes = 0;
 thread_local u32 reuse_scopes = 0;
+std::atomic<bool> memory_pressure{false};
 
 bool RecyclingEnabled() {
     static const bool enabled = [] {
@@ -130,6 +132,28 @@ void DestroyRecycled(const RecycledImage& entry) {
 }
 } // namespace
 
+void UniqueImage::ReleaseRecycled() {
+    std::vector<RecycledImage> released;
+    {
+        std::scoped_lock lk{recycled_mutex};
+        released.swap(recycled_images);
+        recycled_bytes = 0;
+    }
+    for (const auto& entry : released) {
+        DestroyRecycled(entry);
+    }
+}
+
+void UniqueImage::ReleaseRecycledIfDisabled() {
+    if (!RecyclingEnabled()) {
+        ReleaseRecycled();
+    }
+}
+
+void UniqueImage::SetMemoryPressure(bool pressure) {
+    memory_pressure.store(pressure, std::memory_order_relaxed);
+}
+
 UniqueImage::ReuseScope::ReuseScope() {
     ++reuse_scopes;
 }
@@ -140,7 +164,8 @@ UniqueImage::ReuseScope::~ReuseScope() {
 
 void UniqueImage::Recycle() {
     if (!image || image_ci.pNext || size_bytes > MaxRecycledBytes / 2 || !RecyclingEnabled() ||
-        Vulkan::Vram::urgent.load(std::memory_order_relaxed)) {
+        Vulkan::Vram::urgent.load(std::memory_order_relaxed) ||
+        memory_pressure.load(std::memory_order_relaxed)) {
         Destroy();
         return;
     }
