@@ -1308,6 +1308,38 @@ static void patch_job_lock_wait(uint64_t image_size) {
     printf("Job wait: workers with a render context open wait for a job counter in place for up to %u ms before suspending their job (0x%" PRIx64 ")\n",
            job_lock_wait_ms,(uint64_t)at);
 }
+/* U2 chapter 21 (convoy), issue #638: assertion IsFinite(m_targetSpeed_mps) in SetTargetSpeed_mps
+ * (game/vehicle/rail-vehicle.cpp:1941). The convoy's rail controller divides the change of its
+ * distance error by the gameplay clock's frame time in whole 1/300 s ticks ([clocks+0x90],
+ * kGameplayClock), which the clock rounds down and carries over. A frame shorter than one tick
+ * gets 0 ticks while its time in seconds is not 0 (the controller only skips frames whose time is
+ * 0): x/0, an infinite or NaN speed. On PS4 a frame is 5 ticks (60 FPS); at 120 FPS it is 2.5 and
+ * at 240 FPS 1.25, so a short frame now reaches 0. The tick count the controller reads is taken as
+ * at least 1 (the 15 bytes of lea rax, clocks; vcvtsi2ss xmmN, xmm0, [rax+0x90]):
+ *   mov eax, [rip+clocks+0x90]; cmp eax, 1; adc al, 0; vcvtsi2ss xmmN, xmm0, eax
+ * Builds 102 (US and EU, 0xa8e732) and 100 (0x45d9d2). BB_CONVOY_TICKS=0: off. */
+static void patch_u2_convoy_ticks(uint64_t image_size) {
+    static const struct { const char *pattern; unsigned char modrm; } sites[]={
+        {"488d05???????? c5fa2a8890000000 c5f2590d???????? c4c17a105f40 c4c17a10574c",0xc8}, /* 102: xmm1 */
+        {"488d05???????? c5fa2a8090000000 c4c17a10542440 c4c17a104c244c",0xc0},             /* 100: xmm0 */
+    };
+    const char *env=getenv("BB_CONVOY_TICKS");
+    if (env && env[0]=='0') return;
+    for (size_t i=0;i<sizeof(sites)/sizeof(*sites);++i) {
+        const int64_t at=find_masked(sites[i].pattern,image_size);
+        if (at==-2) { printf("Convoy ticks: pattern not unique, not patched\n"); return; }
+        if (at<0) continue;
+        unsigned char *p=image+at;
+        int32_t lea; memcpy(&lea,p+3,4);
+        const int64_t field=at+7+lea+0x90;                 /* the clock's tick count, image offset */
+        const int32_t disp=(int32_t)(field-(at+6));
+        unsigned char code[15]={0x8b,0x05,0,0,0,0, 0x83,0xf8,0x01, 0x14,0x00, 0xc5,0xfa,0x2a,sites[i].modrm};
+        memcpy(code+2,&disp,4);
+        memcpy(p,code,sizeof(code));
+        printf("Convoy ticks: the convoy's speed controller counts at least one tick per frame (%#" PRIx64 ")\n",(uint64_t)at);
+        return;
+    }
+}
 /* Restarts the game through run.sh (the settings menu: a new render resolution is a patch
  * applied at start). Descriptors are closed first so the old GPU device and its memory are
  * released before the new process opens its own. */
@@ -1644,6 +1676,7 @@ int main(int argc, char **argv) {
         patch_job_sleep(image_end);
         patch_null_binding_handler(image_end);
         patch_job_lock_wait(image_end);
+        patch_u2_convoy_ticks(image_end);
     }
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
