@@ -42,6 +42,10 @@
 #undef MemoryBarrier // bbport: winnt.h macro (through fmt), clashes with vk::MemoryBarrier
 #endif
 
+namespace Libraries::VideoOut {
+void NoteRenderFrameWait(u64 ns); // driver.cpp, BB_CLOCK_LOG
+}
+
 namespace Vulkan {
 
 bool CanBlitToSwapchain(const vk::PhysicalDevice physical_device, vk::Format format) {
@@ -935,6 +939,7 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last) {
 }
 
 Frame* Presenter::GetRenderFrame() {
+    const auto wait_begin = std::chrono::steady_clock::now();
     // Wait for free presentation frames
     Frame* frame;
     {
@@ -964,6 +969,11 @@ Frame* Presenter::GetRenderFrame() {
             continue;
         }
     }
+
+    ::Libraries::VideoOut::NoteRenderFrameWait(static_cast<u64>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+                                                             wait_begin)
+            .count()));
 
     if (frame->width != expected_frame_width || frame->height != expected_frame_height ||
         frame->is_hdr != swapchain.GetHDR()) {

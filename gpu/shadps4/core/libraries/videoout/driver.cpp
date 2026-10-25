@@ -61,6 +61,139 @@ constexpr u32 PixelFormatBpp(PixelFormat pixel_format) {
     }
 }
 
+
+namespace {
+/// bbport diagnosis: BB_CLOCK_LOG=1 prints every 5 s what the guest sees of the display clock:
+/// the intervals of the vblank ticks and of the flips (steady clock, ms: <2, 2-8, 8-14, 14-19,
+/// 19-25, 25-40, 40+), runs of ticks closer than a quarter period (a burst after a stall), the
+/// age of the status the guest reads (now minus its process time), reads that went backwards,
+/// how long the present (swap) thread worked per frame and how many frames waited in its
+/// queue, and the waits for a free presentation frame.
+struct ClockLog {
+    struct Hist {
+        std::array<u32, 7> bucket{};
+        double max = 0, sum = 0;
+        u32 n = 0;
+        void Add(double ms) {
+            const size_t i = ms < 2 ? 0 : ms < 8 ? 1 : ms < 14 ? 2 : ms < 19 ? 3 : ms < 25 ? 4 : ms < 40 ? 5 : 6;
+            ++bucket[i];
+            max = std::max(max, ms);
+            sum += ms;
+            ++n;
+        }
+        void Print(const char* name) const {
+            std::printf(" %s n=%u avg %.2f max %.1f [%u %u %u %u %u %u %u];", name, n,
+                        n ? sum / n : 0.0, max, bucket[0], bucket[1], bucket[2], bucket[3],
+                        bucket[4], bucket[5], bucket[6]);
+        }
+    };
+    std::mutex m;
+    Hist tick, flip, submit, swap_work, frame_wait, vblank_age, flip_age;
+    s64 last_tick_ns = 0, last_flip_ns = 0, window_ns = 0;
+    u32 burst = 0, max_burst = 0, bursts = 0, queue_max = 0, backwards = 0;
+    u64 last_vblank_read_time = 0, last_flip_read_time = 0, last_vblank_count = 0, last_flip_count = 0;
+    u32 reads_v = 0, reads_f = 0, same_v = 0, same_f = 0;
+};
+ClockLog& Clock() {
+    static ClockLog* log = new ClockLog;
+    return *log;
+}
+bool ClockLogEnabled() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_CLOCK_LOG");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+s64 NowNs() {
+    return std::chrono::steady_clock::now().time_since_epoch().count();
+}
+void ClockNoteTick(s64 period_ns) {
+    auto& c = Clock();
+    std::scoped_lock lock{c.m};
+    const s64 now = NowNs();
+    if (c.last_tick_ns) {
+        const s64 gap = now - c.last_tick_ns;
+        c.tick.Add(gap / 1e6);
+        if (gap < period_ns / 4) {
+            if (++c.burst == 1) {
+                ++c.bursts;
+            }
+            c.max_burst = std::max(c.max_burst, c.burst);
+        } else {
+            c.burst = 0;
+        }
+    }
+    c.last_tick_ns = now;
+    if (!c.window_ns) {
+        c.window_ns = now;
+    }
+    if (now - c.window_ns >= 5'000'000'000) {
+        std::printf("CLOCKLOG 5s (present %s, vblank %u Hz):", EmulatorSettings.GetPresentMode().c_str(),
+                    EmulatorSettings.GetVblankFrequency());
+        c.tick.Print("vblank-ticks");
+        c.submit.Print("guest-submits");
+        c.flip.Print("flips");
+        c.swap_work.Print("swap-work");
+        c.frame_wait.Print("frame-wait");
+        c.vblank_age.Print("vblank-age");
+        c.flip_age.Print("flip-age");
+        std::printf(" bursts %u (longest %u ticks), swap queue max %u, reads vblank %u (same count %u) "
+                    "flip %u (same %u), backwards %u\n",
+                    c.bursts, c.max_burst, c.queue_max, c.reads_v, c.same_v, c.reads_f, c.same_f,
+                    c.backwards);
+        c.tick = c.flip = c.submit = c.swap_work = c.frame_wait = c.vblank_age = c.flip_age = {};
+        c.bursts = c.max_burst = c.queue_max = c.backwards = 0;
+        c.reads_v = c.reads_f = c.same_v = c.same_f = 0;
+        c.window_ns = now;
+    }
+}
+void ClockNoteSubmit(s64 gap_ns) {
+    auto& c = Clock();
+    std::scoped_lock lock{c.m};
+    c.submit.Add(gap_ns / 1e6);
+}
+void ClockNoteFlip() {
+    auto& c = Clock();
+    std::scoped_lock lock{c.m};
+    const s64 now = NowNs();
+    if (c.last_flip_ns) {
+        c.flip.Add((now - c.last_flip_ns) / 1e6);
+    }
+    c.last_flip_ns = now;
+}
+} // namespace
+
+void NoteGuestStatusRead(bool vblank, u64 count, u64 process_time_us) {
+    if (!ClockLogEnabled()) {
+        return;
+    }
+    auto& c = Clock();
+    std::scoped_lock lock{c.m};
+    const u64 now_us = Libraries::Kernel::sceKernelGetProcessTime();
+    u64& last_time = vblank ? c.last_vblank_read_time : c.last_flip_read_time;
+    u64& last_count = vblank ? c.last_vblank_count : c.last_flip_count;
+    (vblank ? c.vblank_age : c.flip_age).Add(now_us >= process_time_us ? (now_us - process_time_us) / 1e3 : 0.0);
+    ++(vblank ? c.reads_v : c.reads_f);
+    if (count == last_count) {
+        ++(vblank ? c.same_v : c.same_f);
+    }
+    if (process_time_us < last_time || count < last_count) {
+        ++c.backwards;
+    }
+    last_time = process_time_us;
+    last_count = count;
+}
+
+void NoteRenderFrameWait(u64 ns) {
+    if (!ClockLogEnabled()) {
+        return;
+    }
+    auto& c = Clock();
+    std::scoped_lock lock{c.m};
+    c.frame_wait.Add(ns / 1e6);
+}
+
 VideoOutDriver::VideoOutDriver(u32 width, u32 height) {
     main_port.resolution.full_width = width;
     main_port.resolution.full_height = height;
@@ -295,9 +428,22 @@ int VideoOutDriver::ChangeBufferAttribute(VideoOutPort* port, s32 attributeIndex
 
 void VideoOutDriver::Flip(const Request& req) {
     // Update HDR status before presenting, then present the frame (bbport: on the swap thread).
+    if (ClockLogEnabled()) {
+        ClockNoteFlip();
+        std::scoped_lock lock{swap_mutex};
+        auto& c = Clock();
+        std::scoped_lock clock_lock{c.m};
+        c.queue_max = std::max<u32>(c.queue_max, u32(swap_queue.size() + (swap_busy ? 1 : 0)));
+    }
     RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr] {
+        const s64 begin = ClockLogEnabled() ? NowNs() : 0;
         presenter->SetHDR(hdr);
         presenter->Present(frame);
+        if (begin) {
+            auto& c = Clock();
+            std::scoped_lock lock{c.m};
+            c.swap_work.Add((NowNs() - begin) / 1e6);
+        }
     });
     Vulkan::FrameCapture::OnFlip(req.index >= 0 ? req.port->buffer_slots[req.index].address_left
                                                 : 0);
@@ -572,6 +718,9 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
         const s64 last = last_flip_submit_ns.exchange(now, std::memory_order_relaxed);
         const s64 gap = last ? now - last : 0;
         last_flip_interval_ns.store(gap, std::memory_order_relaxed);
+        if (gap && ClockLogEnabled()) {
+            ClockNoteSubmit(gap); // the guest's frame time as the flips it submits show it
+        }
         // BB_FLIP_LOG=1: the gaps between the guest's flips (its frame times), every 5 s.
         static const bool flip_log = [] {
             const char* env = std::getenv("BB_FLIP_LOG");
@@ -752,11 +901,20 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     // bbport: prerecorded movies (Uncharted's cutscenes) show one video frame per vblank of
     // a 60 Hz display and played too fast at 120 Hz. While a movie is being decoded the guest
     // gets vblanks and flips at 60 Hz; gameplay keeps the configured rate.
+    // bbport: BB_VBLANK_MAX_DEBT_MS=N: after a stall of the present thread the vblank ticks do not run
+    // back to back for more than N ms of lateness (the guest sees steady ticks and no burst; its
+    // vblank count then lags the real time by what was dropped). 0 (default): all of it is caught up.
+    const std::chrono::nanoseconds max_debt = [] {
+        const char* env = std::getenv("BB_VBLANK_MAX_DEBT_MS");
+        return std::chrono::nanoseconds(static_cast<s64>(env ? std::strtod(env, nullptr) * 1e6 : 0.0));
+    }();
+    const bool clock_log = ClockLogEnabled();
     const bool fast_vblank = EmulatorSettings.GetVblankFrequency() > 60;
     constexpr std::chrono::nanoseconds movie_period{1000000000 / 60};
     auto next_movie_vblank = std::chrono::steady_clock::now();
 
     while (!token.stop_requested()) {
+        timer.LimitDebt(max_debt);
         timer.Start();
         const auto tick_deadline = std::chrono::steady_clock::now() + vblank_period;
 
@@ -819,6 +977,9 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             vblank_status.process_time = Libraries::Kernel::sceKernelGetProcessTime();
             vblank_status.tsc = Libraries::Kernel::sceKernelReadTsc();
             main_port.vblank_cv.notify_all();
+        }
+        if (clock_log) {
+            ClockNoteTick(vblank_period.count());
         }
 
         if (!immediate_flips || main_port.flip_rate != 0 || movie) {

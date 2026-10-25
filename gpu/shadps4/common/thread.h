@@ -45,6 +45,14 @@ public:
     std::chrono::nanoseconds GetTotalWait() const {
         return total_wait;
     }
+
+    /// bbport: forgets lateness beyond `max_debt`: after a stall the next ticks do not run back
+    /// to back to catch up (max_debt 0 keeps the whole lateness, the original behaviour).
+    void LimitDebt(std::chrono::nanoseconds max_debt) {
+        if (max_debt.count() > 0 && total_wait < -max_debt) {
+            total_wait = -max_debt;
+        }
+    }
 };
 
 std::string GetCurrentThreadName();

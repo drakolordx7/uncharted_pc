@@ -42,6 +42,12 @@ u64 GpuProgress();
 /// (0: never). A slow GPU side (shaders compiling) is waited for, however long it takes.
 bool WaitEopFlipsReached(u64 count, u32 stall_cap_ms, bool (*give_up)());
 
+/// bbport diagnosis (BB_CLOCK_LOG=1): what the guest sees of the display clock. A guest read of
+/// the vblank (true) or flip status: its count and process time (microseconds), and the
+/// present thread's waits for a free presentation frame.
+void NoteGuestStatusRead(bool vblank, u64 count, u64 process_time_us);
+void NoteRenderFrameWait(u64 ns);
+
 struct VideoOutPort {
     SceVideoOutResolutionStatus resolution;
     std::array<VideoOutBuffer, MaxDisplayBuffers> buffer_slots;
