@@ -2009,6 +2009,7 @@ bool Rasterizer::NoteSmallWrittenBuffers(const Shader::Info& stage) {
         return false;
     }
     bool wrote_small = false;
+    u32 dropped = 0;
     for (const auto& desc : stage.buffers) {
         if (desc.IsSpecial() || !desc.is_written) {
             continue;
@@ -2018,7 +2019,6 @@ bool Rasterizer::NoteSmallWrittenBuffers(const Shader::Info& stage) {
         if (!sharp.base_address || size == 0 || size > 64) {
             continue;
         }
-        wrote_small = true;
         std::scoped_lock lk{small_written_mutex};
         // BB_SC_LOG: which shaders write the small buffers, and where (first 40 distinct).
         static const bool sc_log = std::getenv("BB_SC_LOG") != nullptr;
@@ -2035,8 +2035,21 @@ bool Rasterizer::NoteSmallWrittenBuffers(const Shader::Info& stage) {
         });
         if (it != small_written_buffers.end()) {
             it->writer = stage.pgm_hash; // the last writer's result is what lands
+            wrote_small = true;
         } else if (small_written_buffers.size() < 16) {
             small_written_buffers.push_back({sharp.base_address, size, stage.pgm_hash});
+            wrote_small = true;
+        } else {
+            ++dropped;
+        }
+    }
+    if (dropped != 0) {
+        // Past 16 ranges a written range is not read back: said once per run.
+        static std::atomic<bool> told{false};
+        if (!told.exchange(true, std::memory_order_relaxed)) {
+            std::printf("SMALLBUF: 16 written ranges already recorded, %u more dropped by shader "
+                        "%016llx (not read back; later drops are not reported)\n",
+                        dropped, static_cast<unsigned long long>(stage.pgm_hash));
         }
     }
     return wrote_small && SmallWriterGated(stage.pgm_hash);
