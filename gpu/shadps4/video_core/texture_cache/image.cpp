@@ -4,7 +4,9 @@
 #include "bbport_toggles.h"
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
 #include <ranges>
+#include <vector>
 #include <string>
 #include "common/assert.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -93,6 +95,75 @@ UniqueImage::~UniqueImage() {
     Destroy();
 }
 
+namespace {
+// bbport: Uncharted 2 binds a 960x540 depth buffer as a storage image and back as a depth target
+// every frame, and TextureCache::ResolveDepthOverlap remakes it each way: two dedicated
+// allocations made and two freed per frame on the draw recording thread (~5% of it in Borneo).
+// The images it frees are kept here and taken by the next image it makes with the same create
+// info; the copy it makes into the new image overwrites the old contents.
+struct RecycledImage {
+    vk::ImageCreateInfo image_ci;
+    VmaAllocator allocator;
+    VmaAllocation allocation;
+    vk::Image image;
+    vk::DeviceSize size_bytes;
+};
+constexpr std::size_t MaxRecycledImages = 6;
+constexpr vk::DeviceSize MaxRecycledBytes = 64ull << 20;
+std::mutex recycled_mutex;
+std::vector<RecycledImage> recycled_images; ///< oldest first
+vk::DeviceSize recycled_bytes = 0;
+thread_local u32 reuse_scopes = 0;
+
+bool RecyclingEnabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_IMAGE_RECYCLE");
+        return !(env && env[0] == '0');
+    }();
+    return enabled && !BbToggle::Disabled2(BbToggle::RecycledImages);
+}
+
+void DestroyRecycled(const RecycledImage& entry) {
+    vmaDestroyImage(entry.allocator, entry.image, entry.allocation);
+    Vulkan::Vram::image_bytes.fetch_sub(entry.size_bytes, std::memory_order_relaxed);
+    Vulkan::Vram::image_count.fetch_sub(1, std::memory_order_relaxed);
+}
+} // namespace
+
+UniqueImage::ReuseScope::ReuseScope() {
+    ++reuse_scopes;
+}
+
+UniqueImage::ReuseScope::~ReuseScope() {
+    --reuse_scopes;
+}
+
+void UniqueImage::Recycle() {
+    if (!image || image_ci.pNext || size_bytes > MaxRecycledBytes / 2 || !RecyclingEnabled() ||
+        Vulkan::Vram::urgent.load(std::memory_order_relaxed)) {
+        Destroy();
+        return;
+    }
+    boost::container::small_vector<RecycledImage, 2> evicted;
+    {
+        std::scoped_lock lk{recycled_mutex};
+        // Still counted in Vram::image_bytes: the memory stays allocated.
+        recycled_images.push_back({image_ci, allocator, allocation, image, size_bytes});
+        recycled_bytes += size_bytes;
+        while (recycled_images.size() > MaxRecycledImages || recycled_bytes > MaxRecycledBytes) {
+            evicted.push_back(recycled_images.front());
+            recycled_bytes -= recycled_images.front().size_bytes;
+            recycled_images.erase(recycled_images.begin());
+        }
+    }
+    for (const auto& entry : evicted) {
+        DestroyRecycled(entry);
+    }
+    image = vk::Image{};
+    allocation = {};
+    size_bytes = 0;
+}
+
 void UniqueImage::Destroy() {
     if (image) {
         vmaDestroyImage(allocator, image, allocation);
@@ -107,6 +178,19 @@ void UniqueImage::Destroy() {
 void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
     this->image_ci = image_ci;
     ASSERT(!image);
+    if (reuse_scopes && !image_ci.pNext && RecyclingEnabled()) {
+        std::scoped_lock lk{recycled_mutex};
+        for (auto it = recycled_images.rbegin(); it != recycled_images.rend(); ++it) {
+            if (it->allocator == allocator && it->image_ci == image_ci) {
+                image = it->image;
+                allocation = it->allocation;
+                size_bytes = it->size_bytes;
+                recycled_bytes -= it->size_bytes;
+                recycled_images.erase(std::next(it).base());
+                return;
+            }
+        }
+    }
     const VmaAllocationCreateInfo alloc_ci = {
         .flags = VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT,
         .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
