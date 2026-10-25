@@ -330,6 +330,7 @@ private:
     void ResolveIndexBuffer(u32 index_offset);
     void EmitIndexBuffer();
 
+    bool IsHostStreamRead(const VideoCore::Buffer* buffer);
     void ResetBindings(bool is_compute);
 
     bool IsComputeMetaClear(const Pipeline* pipeline);
