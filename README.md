@@ -23,6 +23,8 @@ Settings, saves and logs are stored in `user\`. To update, use the launcher's up
 
 Controls are remapped on the Controls page. For prompts that ask you to rotate the left stick, hold R (or T for the other direction); the prompt on screen shows that key. Fixes that cost performance are on the Fixes page; Automatic enables each one only where it's needed.
 
+Save editor (close the game first; every edit backs up the old files to a `CUSA02320.backups` folder next to the saves in `user\savedata\`): `python scripts/save_editor.py describe user` shows each game's progress, difficulty, treasures and unlocks; `unlock-chapters`, `unlock-difficulties` (Crushing and Brutal), `unlock-rewards` (Uncharted 1) and `unlock-all` change the saves, with `--game u1|u2|u3` and `--dry-run`.
+
 ## Reporting problems
 
 [Open an issue](https://github.com/drakolordx7/uncharted_pc/issues/new/choose) with `user\last_run.log` from the session where it happened (the next run overwrites it). Releases on this page are the only source of fixes; don't run commands posted in issues.
@@ -58,6 +60,7 @@ Fixes and features in this build, by contributor. Pull request links go to the o
 - [d4rksp4rt4n](https://github.com/d4rksp4rt4n): Uncharted 1 crash at 0x63f5d0 on Intel 12th gen and newer ([#403](https://github.com/Supermedo/uncharted_pc/pull/403))
 - [kuraeow](https://github.com/kuraeow): idle job workers sleep, lowering CPU load on smaller CPUs ([#346](https://github.com/Supermedo/uncharted_pc/pull/346))
 - [poncho-ajmv](https://github.com/poncho-ajmv) ([fork](https://github.com/poncho-ajmv/uncharted_pc)): launcher error reporting (crash reason, input settings, shader cache), reliable Stop, controller vibration settings, launcher languages, custom artwork, update package verification ([#607](https://github.com/Supermedo/uncharted_pc/pull/607)), atomic settings writes ([#605](https://github.com/Supermedo/uncharted_pc/pull/605)), prepared executable cache check ([#606](https://github.com/Supermedo/uncharted_pc/pull/606)), previous process wait check ([#604](https://github.com/Supermedo/uncharted_pc/pull/604))
+- [bucanero](https://github.com/bucanero) ([save-decrypters](https://github.com/bucanero/save-decrypters), [Apollo Save Tool patches](https://github.com/bucanero/apollo-patches)), from Red-EyeX32 and aerosoul94's tlou_save_data_decrypter: the save encryption keys and checksum layout the save editor uses; Mevlock and BilalReloaded's "Unlock all chapters" toggle showed which menus Bluepoint's unlock flags control
 - [saulo benigno](https://github.com/saulob): Cheats page with infinite health and ammo ([#116](https://github.com/Supermedo/uncharted_pc/pull/116))
 - [Hugo Borges](https://github.com/hugouchoasborges) ([fork](https://github.com/hugouchoasborges/uncharted_pc)): compute dispatches above 65535 groups, sparse-capable queue selection, frame rate cap presets
 - [sid1552](https://github.com/sid1552) ([fork](https://github.com/sid1552/uncharted_pc)): MP3 audio decoding, GPU crash report on device loss, buffer cache per 64-byte block, current MSYS2 build
