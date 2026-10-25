@@ -2205,13 +2205,43 @@ void Rasterizer::DispatchDirect() {
     if (!pipeline) {
         return;
     }
-    if (pipelined &&
-        !IsGuestMemoryShaderHLE(pipeline->GetStage(Shader::SwStage::Compute).pgm_hash)) {
+    const auto& cs = pipeline->GetStage(Shader::SwStage::Compute);
+    if (pipelined && (!IsGuestMemoryShaderHLE(cs.pgm_hash) || GuestCopyOnStageB(cs))) {
         PostDraw(pipeline, nullptr, false, 0, &CsRegs());
         return;
     }
     DrainDrawPipe();
     DispatchRecord(pipeline);
+}
+
+bool Rasterizer::GuestCopyOnStageB(const Shader::Info& cs) {
+    // bbport: U2 runs ~10 raycaster copies a frame (a 64-dword copy shader). Done here, each
+    // drained the draw pipe: the GPU command thread waited for the recording thread to run dry
+    // (~30% of it in the Borneo jungle) and the recording thread then idled. A copy of GPU data
+    // (results of raycaster dispatches recorded or still queued) writes guest memory only for
+    // the record arrays the game's CPU code reads (DeferGuestCopy), never the constants the SRT
+    // walkers here read, so it runs in order on the recording thread. Copies of CPU data (the
+    // constant blocks) still run here. BB_HLE_PIPE=0 or toggle2 PipelinedRaycasterCopies: off.
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_HLE_PIPE");
+        return !(env && env[0] == '0');
+    }();
+    if (!enabled || BbToggle::Disabled2(BbToggle::PipelinedRaycasterCopies)) {
+        return false;
+    }
+    const auto copy = RaycasterCopyRange(cs, CsRegs());
+    if (!copy) {
+        return false;
+    }
+    if (copy->size != 0) {
+        if (!buffer_cache.IsRangeGpuWritten(copy->src, copy->size) &&
+            !PendingWriteOverlaps(copy->src, copy->size)) {
+            return false;
+        }
+        // Constants overlapping the destination are bound on the recording thread, after it.
+        NotePendingGpuWrite(copy->dst, copy->size);
+    }
+    return true;
 }
 
 void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
@@ -3069,7 +3099,9 @@ void Rasterizer::ResolveVertexBuffers(const GraphicsPipeline* pipeline,
         }
         std::tie(range.buffer, range.offset) =
             buffer_cache.ObtainBuffer(range.base_address, size, false);
-        needs_barrier |= runtime.IsBufferAccessed(range.buffer, range.offset, size);
+        if (!IsHostStreamRead(range.buffer)) {
+            needs_barrier |= runtime.IsBufferAccessed(range.buffer, range.offset, size);
+        }
     }
 
     // Bind vertex buffers
@@ -3131,8 +3163,19 @@ void Rasterizer::ResolveIndexBuffer(u32 index_offset) {
     }
     const auto [buffer, offset] =
         buffer_cache.ObtainBuffer(index_address, index_buffer_size, false);
-    needs_barrier |= runtime.IsBufferAccessed(buffer, offset, index_buffer_size);
+    if (!IsHostStreamRead(buffer)) {
+        needs_barrier |= runtime.IsBufferAccessed(buffer, offset, index_buffer_size);
+    }
     index_bind = {buffer->Handle(), offset, index_type};
+}
+
+// bbport: a read of a stream buffer range is a copy the CPU made for this command buffer
+// (ObtainBuffer): nothing the GPU wrote before is in it (a new ring range), and nothing it writes
+// later lands there (the ring keeps the range until the GPU is past it). The barrier tracker need
+// not hear of it: most bindings are such constants (~7% of the draw recording thread in Borneo).
+bool Rasterizer::IsHostStreamRead(const VideoCore::Buffer* buffer) {
+    return buffer == &buffer_cache.GetStreamBuffer() &&
+           !BbToggle::Disabled2(BbToggle::TrackedStreamReads);
 }
 
 void Rasterizer::ResetBindings(bool is_compute) {
@@ -3515,7 +3558,10 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                     }
                     return std::min<u64>(size, u64(stride) * (records - 1) + element);
                 }();
-                bound_buffers.emplace_back(buffer, offset, tracked_size, desc.is_written);
+                const bool host_stream_read = !desc.is_written && IsHostStreamRead(buffer);
+                if (!host_stream_read) {
+                    bound_buffers.emplace_back(buffer, offset, tracked_size, desc.is_written);
+                }
                 if (g_gpu_checkpoints && num_checkpoint_buffers < std::size(checkpoint_buffers)) {
                     checkpoint_buffers[num_checkpoint_buffers++] = {
                         vsharp.base_address, static_cast<u32>(size), desc.is_written};
@@ -3524,8 +3570,10 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                     // Raw storage-buffer writes can also make an aliased cached image stale.
                     texture_cache.InvalidateMemoryFromGPU(vsharp.base_address, size);
                 }
-                needs_barrier |=
-                    runtime.IsBufferAccessed(buffer, offset, tracked_size, desc.is_written);
+                if (!host_stream_read) {
+                    needs_barrier |=
+                        runtime.IsBufferAccessed(buffer, offset, tracked_size, desc.is_written);
+                }
                 if (const VAddr watch = WatchedGpuWrite();
                     watch && desc.is_written && vsharp.base_address < watch + 0x1000 &&
                     watch < vsharp.base_address + size) {

@@ -226,6 +226,11 @@ void TextureCache::UnmapMemory(VAddr cpu_addr, size_t size) {
 /// A depth image made at an address that has held a deeper array gets all those layers at once; the
 /// game draws each layer again every frame. BB_DEPTH_ARRAY_PAD=0: off.
 /// (Mevlock 670bf18.)
+/// bbport: the padded image stays within the memory the depth images at that address have
+/// covered. Padded by layer count alone, a 4096x4096 depth target at the address of U3's shadow
+/// array in the London pub became 8 layers, 512 MiB over memory the game's CPU code writes every
+/// frame: each frame's write made the texture cache hash all of it again (~10 GB a second, the
+/// draw recording thread busy at 20 FPS).
 void TextureCache::PadDepthLayers(ImageInfo& info) {
     static const bool pad = [] {
         const char* env = std::getenv("BB_DEPTH_ARRAY_PAD");
@@ -235,11 +240,16 @@ void TextureCache::PadDepthLayers(ImageInfo& info) {
         return;
     }
     auto& seen = depth_array_layers[info.guest_address];
-    if (info.resources.layers > seen) {
-        seen = info.resources.layers;
-    } else if (seen > info.resources.layers && seen > 1) {
-        info.resources.layers = seen;
-        info.UpdateSize();
+    seen.bytes = std::max<u64>(seen.bytes, info.guest_size);
+    if (info.resources.layers > seen.layers) {
+        seen.layers = info.resources.layers;
+    } else if (seen.layers > info.resources.layers && seen.layers > 1) {
+        auto padded = info;
+        padded.resources.layers = seen.layers;
+        padded.UpdateSize();
+        if (padded.guest_size <= seen.bytes) {
+            info = padded;
+        }
     }
 }
 
@@ -293,7 +303,15 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         new_info.resources = std::max(requested_info.resources, cache_image.info.resources);
         new_info.UpdateSize();
         PadDepthLayers(new_info);
+        // bbport: the copy below overwrites all of an image of the same size and resources, so it
+        // may take the Vulkan image of one freed here before (UniqueImage::Recycle).
+        std::optional<UniqueImage::ReuseScope> reuse;
+        if (new_info.size == cache_image.info.size &&
+            new_info.resources == cache_image.info.resources) {
+            reuse.emplace();
+        }
         const auto new_image_id = slot_images.insert(instance, runtime, slot_image_views, new_info);
+        reuse.reset();
         RegisterImage(new_image_id);
 
         // insert() may have grown slot_images and moved every image: `cache_image` would then
@@ -324,6 +342,7 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         runtime.CopyColorAndDepth(&old_image, &new_image);
 
         // Free the cache image.
+        old_image.recycle_on_delete = true;
         FreeImage(cache_image_id);
         return new_image_id;
     }
@@ -1555,6 +1574,9 @@ void TextureCache::DeleteImage(ImageId image_id) {
         for (auto& backing : image.backing_images) {
             for (const ImageViewId image_view_id : backing.image_view_ids) {
                 slot_image_views.erase(image_view_id);
+            }
+            if (image.recycle_on_delete) {
+                backing.image.Recycle();
             }
         }
         slot_images.erase(image_id);
