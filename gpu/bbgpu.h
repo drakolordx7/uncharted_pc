@@ -48,6 +48,12 @@ void bbgpu_mouse_configure(int look);
 int bbgpu_camera_yaw(float *yaw_degrees, double *age_seconds);
 /* 1 while the menu's Gyro aiming setting is on (bbport.ini gyro_aim). */
 int bbgpu_gyro_aim(void);
+/* The keys that open and close the in-game menu (input.ini key.overlay, two bindings: slot 0 and 1).
+ * kind: NONE unbound, SCANCODE a physical key (SDL_Scancode), KEYCODE a key by the character it
+ * types in the current layout (SDL_Keycode), MOUSE an SDL mouse button number (not left or right).
+ * Until this is called the menu opens with Insert in slot 0. */
+enum { BBGPU_OVERLAY_KEY_NONE, BBGPU_OVERLAY_KEY_SCANCODE, BBGPU_OVERLAY_KEY_KEYCODE, BBGPU_OVERLAY_KEY_MOUSE };
+void bbgpu_overlay_key_configure(int slot, int kind, int code);
 int bbgpu_mouse_sample(float *dx, float *dy, uint32_t *buttons, int *wheel);
 /* In-game trophy notice (the overlay draws it for a few seconds, one at a time): grade 1 platinum,
  * 2 gold, 3 silver, 4 bronze; png is the trophy's icon (a PNG file) or empty. */
