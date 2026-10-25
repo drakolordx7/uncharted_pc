@@ -34,12 +34,16 @@ namespace VideoCore::ButtonPrompts {
 namespace {
 
 // input.ini actions with a picture on the sheets, in runtime_pad.c's names.
-enum Action { Cross, Circle, Square, Triangle, L1, R1, L2, R2, L3, R3, Options, Touchpad, Actions };
+// RotCcw and RotCw (the keys that turn the left stick in circles) have no picture on the sheets;
+// the stick prompt of valves and wheels shows them.
+enum Action { Cross, Circle, Square, Triangle, L1, R1, L2, R2, L3, R3, Options, Touchpad, RotCcw, RotCw, Actions };
 constexpr const char* action_names[Actions] = {"cross", "circle", "square", "triangle",
                                                "l1",    "r1",     "l2",     "r2",
-                                               "l3",    "r3",     "options", "touchpad"};
+                                               "l3",    "r3",     "options", "touchpad",
+                                               "rotate_ccw", "rotate_cw"};
 constexpr const char* action_defaults[Actions] = {"Space", "C", "F", "E", "Q", "G", "Mouse Right",
-                                                  "Mouse Left", "Left Shift", "V", "Escape", "Tab"};
+                                                  "Mouse Left", "Left Shift", "V", "Escape", "Tab",
+                                                  "R", "T"};
 enum Icon { Move = Actions, Look };
 // The d-pad pictures: DPad plus the lit directions.
 enum : u8 { DPad = 16, LitUp = 1, LitDown = 2, LitLeft = 4, LitRight = 8 };
@@ -102,12 +106,80 @@ struct Picture {
 const Picture pictures[] = {
     {0x5db884aa1bae54f9ull, 256, RoundButton, Triangle, {55, 216, 104}, "Uncharted 2 triangle prompt"},
     {0x7af1abf688d8c824ull, 256, RoundButton, Circle, {230, 58, 35}, "Uncharted 2 circle prompt"},
+    {0x9edd4f2f0f64f6e5ull, 256, RoundButton, Square, {243, 160, 155}, "Uncharted 2 square prompt"},
     {0x25d954ce23a8f5e2ull, 512, Puck, Triangle, {55, 216, 104}, "Uncharted 2 triangle tapping prompt"},
     {0xc96e34fbb203279eull, 512, PressedPuck, Triangle, {55, 216, 104},
      "Uncharted 2 triangle hold prompt"},
     {0x705083db743dd2f9ull, 256, HudDPad, LitUp, {206, 185, 156}, "Uncharted 2 weapon d-pad"},
     {0x94d741f6b51815eeull, 512, Puck, Circle, {222, 32, 32}, "Uncharted 3 circle tapping prompt"},
     {0x93b46ba81469882cull, 512, PressedPuck, Circle, {222, 32, 32}, "Uncharted 3 circle hold prompt"},
+};
+
+// The "turn the left stick in circles" prompt (valves and wheels): the ring with its arrows over a
+// stick cap that tips around in its socket, one 256x512 BC1 picture per frame (stored upside down),
+// the cap's "L" facing the player in some of them. Only that "L" and the cap face around it are
+// replaced, by the bound rotate key; the rest of the game's picture stays. Frames in which the
+// cap's face is turned away have no "L" and are not listed.
+// The cap face around each "L" as the game drew it, without the "L": colours every 4 pixels
+// (19 x 19 points, the middle one at cx, cy), measured on the game's pictures.
+constexpr int stick_grid = 19, stick_grid_step = 4;
+const u8 stick_face_right[19 * 19 * 3] = {
+    89, 71, 51, 89, 70, 51, 87, 69, 51, 85, 68, 50, 83, 64, 48, 80, 63, 48, 76, 60, 46, 74, 59, 46, 73, 59, 45, 72, 58, 43, 72, 56, 41, 69, 55, 40, 64, 50, 38, 56, 45, 37, 61, 48, 38, 64, 50, 39, 64, 50, 39, 64, 50, 38, 64, 50, 38,
+    90, 71, 51, 90, 71, 51, 90, 69, 50, 87, 70, 53, 86, 68, 50, 82, 65, 49, 79, 62, 47, 75, 60, 46, 73, 59, 45, 72, 57, 43, 71, 56, 41, 68, 53, 40, 63, 50, 38, 57, 46, 37, 52, 41, 35, 55, 43, 36, 64, 50, 38, 64, 51, 38, 65, 51, 39,
+    90, 72, 51, 91, 72, 51, 93, 72, 52, 90, 73, 56, 86, 69, 54, 85, 68, 52, 82, 66, 50, 79, 63, 48, 74, 59, 45, 71, 57, 43, 68, 54, 41, 66, 52, 39, 62, 49, 38, 57, 46, 37, 53, 42, 35, 53, 43, 35, 54, 45, 34, 65, 51, 39, 67, 52, 40,
+    90, 72, 52, 90, 73, 53, 93, 74, 56, 94, 76, 57, 89, 73, 56, 89, 72, 55, 87, 70, 53, 83, 67, 51, 78, 62, 47, 73, 58, 44, 69, 55, 41, 66, 52, 40, 62, 49, 38, 58, 46, 37, 55, 44, 36, 52, 42, 34, 50, 41, 33, 57, 44, 36, 68, 54, 40,
+    89, 71, 55, 92, 74, 56, 96, 78, 57, 98, 80, 59, 94, 75, 57, 93, 75, 57, 92, 74, 56, 89, 72, 55, 83, 67, 51, 77, 61, 47, 74, 58, 45, 71, 56, 43, 67, 53, 41, 61, 49, 39, 57, 46, 36, 55, 44, 35, 51, 41, 33, 48, 40, 33, 66, 53, 41,
+    91, 72, 57, 97, 76, 57, 100, 81, 59, 101, 82, 64, 98, 80, 61, 97, 79, 60, 96, 78, 59, 94, 76, 58, 86, 70, 53, 81, 65, 50, 80, 64, 49, 79, 63, 48, 75, 60, 46, 69, 55, 43, 63, 50, 39, 59, 46, 36, 55, 43, 34, 54, 42, 33, 56, 46, 38,
+    92, 73, 57, 98, 77, 58, 103, 83, 62, 103, 86, 65, 101, 83, 64, 99, 82, 62, 98, 81, 61, 96, 78, 60, 88, 71, 55, 83, 67, 51, 82, 65, 51, 81, 65, 50, 79, 63, 49, 75, 60, 46, 69, 55, 42, 63, 50, 38, 60, 46, 36, 60, 45, 36, 50, 42, 35,
+    92, 73, 57, 99, 78, 58, 103, 85, 62, 104, 87, 65, 102, 85, 64, 101, 83, 63, 100, 82, 62, 95, 78, 60, 87, 70, 54, 84, 67, 52, 83, 66, 51, 81, 65, 50, 82, 65, 50, 79, 63, 48, 73, 58, 44, 67, 53, 41, 63, 49, 38, 63, 49, 37, 51, 42, 33,
+    92, 74, 57, 98, 79, 59, 103, 84, 63, 102, 85, 63, 101, 84, 63, 100, 83, 63, 99, 82, 62, 94, 76, 58, 86, 69, 53, 84, 67, 51, 84, 67, 52, 84, 67, 53, 84, 67, 52, 78, 63, 48, 73, 59, 45, 70, 54, 42, 66, 52, 41, 63, 50, 38, 52, 42, 33,
+    91, 73, 56, 97, 77, 57, 102, 82, 61, 100, 81, 62, 99, 81, 62, 99, 81, 61, 97, 80, 61, 91, 74, 56, 85, 68, 52, 84, 67, 51, 84, 67, 52, 85, 68, 52, 86, 69, 53, 82, 66, 49, 78, 62, 46, 74, 58, 41, 68, 53, 41, 62, 49, 38, 53, 42, 33,
+    88, 72, 54, 93, 75, 57, 98, 78, 58, 96, 77, 60, 96, 77, 60, 96, 78, 59, 94, 76, 58, 88, 71, 54, 83, 67, 50, 83, 67, 50, 84, 68, 50, 85, 69, 52, 84, 69, 51, 82, 65, 49, 78, 61, 45, 72, 57, 41, 67, 53, 41, 61, 48, 37, 52, 42, 33,
+    85, 69, 52, 91, 73, 56, 93, 74, 57, 91, 73, 57, 91, 73, 57, 92, 74, 57, 90, 72, 56, 84, 68, 51, 82, 65, 49, 82, 65, 49, 83, 66, 49, 84, 68, 49, 84, 66, 49, 80, 62, 47, 76, 58, 43, 70, 54, 41, 65, 51, 40, 60, 46, 36, 49, 40, 33,
+    83, 66, 49, 86, 69, 53, 87, 69, 54, 86, 68, 53, 87, 69, 53, 87, 70, 54, 85, 68, 52, 81, 64, 48, 79, 63, 47, 80, 63, 47, 81, 64, 48, 82, 65, 49, 82, 65, 49, 78, 60, 45, 74, 57, 41, 68, 53, 41, 64, 50, 37, 58, 45, 34, 44, 39, 33,
+    79, 62, 48, 82, 65, 49, 81, 64, 48, 81, 64, 49, 82, 65, 50, 82, 65, 50, 79, 63, 48, 76, 60, 45, 76, 60, 44, 76, 60, 45, 77, 61, 46, 79, 62, 48, 78, 61, 46, 74, 58, 42, 71, 54, 41, 65, 51, 38, 61, 47, 35, 54, 43, 32, 45, 41, 38,
+    77, 59, 45, 78, 61, 48, 77, 61, 46, 77, 61, 46, 76, 60, 46, 75, 59, 45, 72, 56, 43, 71, 55, 41, 72, 56, 42, 73, 57, 42, 73, 58, 42, 76, 61, 44, 74, 58, 42, 71, 55, 41, 66, 53, 39, 62, 49, 37, 56, 46, 33, 46, 39, 33, 65, 57, 52,
+    75, 57, 43, 74, 57, 44, 73, 57, 43, 72, 56, 43, 70, 55, 42, 67, 53, 41, 65, 51, 38, 65, 51, 38, 68, 53, 39, 71, 55, 40, 72, 55, 40, 73, 58, 41, 70, 55, 41, 66, 52, 38, 62, 50, 37, 59, 46, 34, 51, 42, 32, 48, 39, 36, 90, 75, 65,
+    73, 56, 42, 71, 54, 41, 68, 53, 41, 66, 52, 40, 65, 50, 39, 63, 49, 38, 61, 48, 36, 62, 48, 36, 63, 49, 37, 66, 51, 38, 69, 52, 38, 69, 53, 40, 65, 51, 39, 62, 48, 37, 59, 45, 34, 54, 42, 32, 42, 37, 33, 71, 61, 53, 85, 72, 61,
+    70, 54, 42, 68, 53, 41, 64, 51, 40, 62, 49, 39, 61, 47, 38, 60, 46, 36, 59, 46, 35, 59, 46, 34, 59, 46, 35, 61, 48, 37, 63, 50, 38, 63, 50, 39, 61, 47, 36, 57, 45, 33, 53, 41, 32, 42, 36, 32, 57, 50, 43, 76, 66, 56, 79, 68, 58,
+    68, 53, 41, 66, 51, 40, 63, 49, 40, 63, 48, 39, 61, 46, 37, 60, 46, 36, 59, 47, 36, 58, 46, 33, 58, 46, 34, 60, 46, 36, 60, 47, 36, 59, 46, 35, 54, 45, 33, 48, 40, 32, 39, 35, 33, 44, 39, 35, 55, 48, 42, 67, 58, 49, 70, 61, 51,
+};
+const u8 stick_face_left[19 * 19 * 3] = {
+    64, 51, 40, 64, 51, 40, 64, 51, 40, 64, 50, 39, 68, 53, 40, 70, 56, 43, 73, 58, 44, 75, 59, 45, 76, 60, 46, 76, 60, 46, 73, 58, 44, 67, 53, 41, 63, 51, 38, 61, 49, 37, 58, 46, 36, 59, 47, 36, 59, 48, 37, 60, 48, 38, 60, 49, 38,
+    64, 51, 40, 63, 50, 40, 63, 50, 40, 65, 51, 40, 67, 53, 40, 69, 55, 42, 72, 57, 43, 74, 58, 44, 75, 59, 45, 75, 59, 45, 72, 57, 44, 68, 54, 41, 65, 52, 40, 67, 53, 40, 73, 57, 44, 64, 51, 41, 57, 47, 37, 59, 48, 38, 60, 49, 38,
+    64, 51, 40, 64, 51, 40, 64, 51, 41, 64, 51, 40, 66, 52, 40, 69, 54, 41, 71, 56, 42, 72, 57, 43, 73, 58, 44, 73, 58, 44, 72, 58, 44, 71, 57, 43, 72, 57, 43, 74, 59, 45, 79, 61, 47, 84, 64, 48, 66, 53, 41, 58, 47, 37, 61, 49, 38,
+    64, 51, 40, 67, 52, 41, 66, 52, 41, 66, 52, 41, 67, 53, 41, 68, 54, 41, 70, 55, 42, 73, 57, 44, 76, 60, 46, 79, 63, 48, 81, 65, 50, 81, 66, 50, 81, 65, 50, 81, 65, 49, 83, 65, 50, 85, 66, 51, 86, 68, 50, 61, 50, 38, 61, 49, 38,
+    63, 50, 39, 68, 53, 41, 68, 53, 41, 68, 53, 40, 68, 54, 41, 69, 54, 41, 71, 56, 42, 76, 60, 46, 85, 69, 52, 94, 77, 58, 97, 80, 61, 96, 79, 61, 93, 76, 58, 90, 72, 55, 87, 69, 53, 86, 68, 52, 89, 70, 54, 79, 64, 48, 57, 47, 37,
+    64, 51, 40, 70, 54, 41, 71, 54, 40, 71, 55, 40, 70, 55, 41, 70, 55, 41, 73, 58, 43, 83, 67, 50, 99, 82, 62, 106, 88, 67, 106, 89, 67, 104, 87, 66, 101, 84, 64, 95, 78, 61, 91, 73, 56, 89, 71, 53, 91, 73, 56, 88, 70, 55, 64, 52, 42,
+    65, 52, 40, 72, 55, 41, 73, 58, 41, 72, 57, 40, 72, 57, 41, 72, 57, 41, 76, 60, 44, 91, 74, 56, 107, 89, 67, 109, 91, 69, 108, 90, 68, 108, 91, 68, 106, 89, 68, 100, 82, 65, 94, 77, 60, 96, 77, 58, 94, 75, 57, 89, 71, 56, 76, 61, 47,
+    66, 52, 40, 72, 56, 41, 74, 59, 41, 73, 58, 41, 73, 57, 42, 73, 57, 42, 77, 61, 45, 95, 78, 58, 108, 90, 68, 110, 92, 70, 109, 91, 69, 111, 93, 71, 111, 94, 72, 108, 89, 70, 104, 86, 65, 100, 81, 59, 95, 77, 57, 89, 72, 56, 84, 66, 49,
+    65, 51, 40, 72, 56, 41, 74, 58, 43, 74, 57, 43, 74, 57, 42, 74, 58, 42, 77, 61, 45, 94, 77, 58, 108, 89, 68, 110, 92, 70, 113, 93, 72, 116, 96, 75, 117, 98, 76, 113, 93, 72, 106, 88, 66, 101, 81, 61, 95, 76, 57, 90, 72, 56, 84, 66, 49,
+    65, 51, 40, 70, 55, 41, 74, 59, 44, 75, 58, 43, 74, 57, 43, 73, 57, 42, 76, 60, 44, 92, 74, 56, 106, 87, 67, 109, 90, 69, 111, 92, 70, 112, 93, 71, 114, 96, 73, 111, 90, 70, 105, 85, 64, 98, 79, 58, 93, 74, 57, 88, 71, 54, 83, 66, 48,
+    63, 50, 39, 68, 53, 41, 73, 58, 42, 73, 58, 42, 73, 57, 42, 72, 57, 42, 74, 58, 43, 87, 70, 53, 102, 84, 63, 106, 87, 66, 106, 87, 66, 106, 86, 65, 110, 89, 69, 106, 85, 65, 102, 81, 61, 96, 76, 57, 91, 72, 56, 88, 70, 51, 81, 65, 48,
+    61, 48, 37, 67, 52, 41, 73, 56, 41, 73, 57, 41, 72, 56, 41, 71, 56, 41, 72, 57, 42, 82, 65, 49, 97, 79, 59, 101, 82, 62, 100, 81, 61, 99, 80, 60, 102, 83, 61, 101, 81, 60, 96, 78, 57, 92, 75, 57, 88, 71, 55, 85, 67, 50, 79, 62, 48,
+    59, 46, 35, 65, 50, 40, 72, 54, 41, 72, 55, 41, 70, 54, 41, 69, 54, 41, 70, 55, 41, 76, 60, 45, 90, 73, 54, 95, 77, 57, 94, 76, 57, 93, 75, 55, 94, 77, 56, 95, 76, 57, 93, 74, 54, 89, 71, 53, 85, 68, 51, 81, 66, 48, 72, 58, 44,
+    58, 45, 34, 62, 48, 37, 66, 52, 40, 70, 54, 41, 68, 53, 41, 67, 52, 40, 67, 52, 39, 71, 56, 42, 82, 66, 49, 88, 71, 53, 88, 71, 52, 86, 69, 51, 87, 71, 53, 89, 72, 53, 88, 69, 52, 83, 67, 50, 81, 64, 48, 79, 61, 46, 62, 49, 39,
+    55, 43, 32, 59, 45, 35, 62, 49, 38, 66, 52, 41, 65, 51, 39, 64, 51, 38, 63, 50, 38, 65, 51, 39, 73, 59, 44, 80, 64, 48, 82, 66, 48, 81, 65, 47, 81, 64, 46, 85, 66, 49, 83, 65, 49, 80, 63, 47, 78, 60, 45, 72, 57, 44, 50, 42, 35,
+    54, 42, 32, 56, 44, 32, 59, 46, 35, 62, 49, 38, 61, 49, 36, 61, 48, 36, 59, 47, 35, 59, 47, 35, 63, 50, 38, 70, 56, 42, 74, 59, 44, 76, 60, 45, 76, 60, 45, 78, 62, 48, 78, 61, 46, 77, 59, 44, 72, 57, 41, 56, 45, 37, 49, 39, 34,
+    54, 42, 32, 54, 42, 32, 56, 44, 32, 59, 46, 35, 58, 46, 34, 57, 46, 33, 55, 44, 34, 54, 43, 33, 56, 45, 34, 61, 48, 37, 66, 52, 39, 69, 55, 41, 70, 56, 42, 73, 57, 43, 74, 57, 42, 71, 56, 41, 58, 48, 39, 40, 36, 34, 45, 38, 34,
+    53, 42, 32, 53, 42, 32, 53, 41, 32, 56, 43, 32, 56, 44, 32, 54, 43, 32, 52, 42, 32, 51, 41, 32, 52, 42, 33, 56, 44, 34, 59, 46, 35, 63, 49, 38, 66, 52, 40, 69, 54, 41, 68, 53, 39, 56, 46, 37, 39, 36, 34, 41, 37, 34, 43, 38, 34,
+    53, 42, 32, 53, 42, 32, 52, 41, 32, 50, 41, 32, 52, 41, 32, 50, 41, 32, 48, 40, 32, 48, 39, 32, 51, 41, 32, 54, 42, 32, 56, 44, 33, 59, 46, 35, 62, 49, 38, 59, 48, 39, 46, 41, 36, 39, 36, 33, 40, 37, 34, 41, 37, 34, 43, 38, 35,
+};
+
+struct StickFrame {
+    u64 hash;
+    bool clockwise;
+    float cx, cy;     ///< the middle of the "L", stored pixels
+    float m[4];       ///< x' = cx + m0 x + m1 y, y' = cy + m2 x + m3 y for a label drawn at size 100
+    const u8* face;   ///< the cap face there: stick_grid x stick_grid RGB points
+    const char* name;
+};
+constexpr u32 stick_width = 256, stick_height = 512;
+const StickFrame stick_frames[] = {
+    {0x349208a673329cceull, false, 181.63f, 185.76f, {0.6450f, 0.1113f, 0.1430f, -0.7140f},
+     stick_face_right, "Uncharted 1 stick prompt, cap right"},
+    {0x7515a2f4f6a1022dull, false, 80.62f, 185.84f, {0.6568f, -0.1355f, -0.1058f, -0.7059f},
+     stick_face_left, "Uncharted 1 stick prompt, cap left"},
 };
 
 struct Bindings {
@@ -284,7 +356,7 @@ public:
 
     /// Draws `text` (UTF-8) centred on (cx, cy), as large as fits `max_width` up to `size` px.
     void Draw(Canvas& c, const std::string& text, float cx, float cy, float max_width,
-              float size) const {
+              float size, Color color = text_color) const {
         if (!ok) {
             return;
         }
@@ -312,7 +384,7 @@ public:
                 for (int x = 0; x < w; ++x) {
                     // Slightly bold: each pixel also takes its left neighbour's coverage.
                     const float a = std::max(bitmap[y * w + x], x ? bitmap[y * w + x - 1] : u8(0));
-                    c.Blend(left + x, top + y, text_color, a / 255.0f);
+                    c.Blend(left + x, top + y, color, a / 255.0f);
                 }
             }
             stbtt_FreeBitmap(bitmap, nullptr);
@@ -1021,6 +1093,103 @@ std::vector<Patch> Build(const Sheet& sheet, u32 levels, Style style) {
     return patches;
 }
 
+/// The stick prompt's frame with the bound rotate key on the cap instead of the "L": the cap
+/// face's colour, a dark halo and the label, drawn into the blocks around the "L" (at the mip
+/// levels it is seen at).
+std::vector<Patch> BuildStick(const StickFrame& frame, u32 levels) {
+    const Bindings bindings = LoadBindings();
+    const Font font;
+    const std::string& key = bindings.keys[frame.clockwise ? RotCw : RotCcw];
+    // The label drawn upright around (100, 100) at size 100, with a halo plane.
+    constexpr int ref_size = 200;
+    Canvas ref{ref_size, ref_size};
+    if (key == "Mouse Left" || key == "Mouse Right" || key == "Mouse Middle") {
+        DrawMouse(ref, {74, 52, 126, 148, 0}, key == "Mouse Left" ? 1 : key == "Mouse Right" ? 2 : 4);
+    } else {
+        font.Draw(ref, KeyLabel(key), 100.0f, 100.0f, 84.0f, 100.0f, {0.957f, 0.941f, 0.792f});
+    }
+    std::vector<float> halo(size_t(ref_size) * ref_size);
+    for (size_t i = 0; i < halo.size(); ++i) {
+        halo[i] = ref.px[i * 4 + 3];
+    }
+    BoxBlur(halo, ref_size, ref_size, 3);
+    BoxBlur(halo, ref_size, ref_size, 3);
+    const float det = frame.m[0] * frame.m[3] - frame.m[1] * frame.m[2];
+    const float inv[4] = {frame.m[3] / det, -frame.m[1] / det, -frame.m[2] / det, frame.m[0] / det};
+    // Bilinear lookup of the label (colour, alpha) and halo at a picture pixel position.
+    const auto at = [&](int x, int y, int k) {
+        return k < 4 ? ref.px[(size_t(y) * ref_size + x) * 4 + k] : halo[size_t(y) * ref_size + x];
+    };
+    const auto sample = [&](float px, float py, float* out) {
+        const float dx = px - frame.cx, dy = py - frame.cy;
+        const float u = inv[0] * dx + inv[1] * dy + 100.0f - 0.5f;
+        const float v = inv[2] * dx + inv[3] * dy + 100.0f - 0.5f;
+        out[0] = out[1] = out[2] = out[3] = out[4] = 0.0f;
+        if (u < 0.0f || v < 0.0f || u >= ref_size - 1 || v >= ref_size - 1) {
+            return;
+        }
+        const int iu = int(u), iv = int(v);
+        const float fu = u - iu, fv = v - iv;
+        for (int k = 0; k < 5; ++k) {
+            out[k] = (at(iu, iv, k) * (1 - fu) + at(iu + 1, iv, k) * fu) * (1 - fv) +
+                     (at(iu, iv + 1, k) * (1 - fu) + at(iu + 1, iv + 1, k) * fu) * fv;
+        }
+    };
+    // The face colour at a picture position: bilinear between the measured points.
+    const auto face = [&](float px, float py, float* out) {
+        const float gx = std::clamp((px - frame.cx) / stick_grid_step + stick_grid / 2, 0.0f, stick_grid - 1.001f);
+        const float gy = std::clamp((py - frame.cy) / stick_grid_step + stick_grid / 2, 0.0f, stick_grid - 1.001f);
+        const int ix = int(gx), iy = int(gy);
+        const float fx = gx - ix, fy = gy - iy;
+        const auto point = [&](int x, int y, int k) { return float(frame.face[(y * stick_grid + x) * 3 + k]); };
+        for (int k = 0; k < 3; ++k) {
+            out[k] = ((point(ix, iy, k) * (1 - fx) + point(ix + 1, iy, k) * fx) * (1 - fy) +
+                      (point(ix, iy + 1, k) * (1 - fx) + point(ix + 1, iy + 1, k) * fx) * fy) / 255.0f;
+        }
+    };
+    constexpr float half_x = 27.0f, up = 33.0f, down = 38.0f; // the part of the face repainted: the "L" with its halo
+    std::vector<Patch> patches;
+    for (u32 mip = 0; mip < std::min(std::max(levels, 1u), 3u); ++mip) {
+        const float scale = float(1u << mip);
+        const int w = int(stick_width >> mip), h = int(stick_height >> mip);
+        const int x0 = std::max(int(std::floor((frame.cx - half_x) / scale / 4.0f)) * 4, 0);
+        const int y0 = std::max(int(std::floor((frame.cy - up) / scale / 4.0f)) * 4, 0);
+        const int x1 = std::min(int(std::ceil((frame.cx + half_x) / scale / 4.0f)) * 4, w);
+        const int y1 = std::min(int(std::ceil((frame.cy + down) / scale / 4.0f)) * 4, h);
+        if (x1 <= x0 || y1 <= y0) {
+            continue;
+        }
+        Canvas region{u32(x1 - x0), u32(y1 - y0)};
+        constexpr int taps = 4;
+        for (int y = y0; y < y1; ++y) {
+            for (int x = x0; x < x1; ++x) {
+                float sum[3]{};
+                for (int sy = 0; sy < taps; ++sy) {
+                    for (int sx = 0; sx < taps; ++sx) {
+                        const float px = (x + (sx + 0.5f) / taps) * scale;
+                        const float py = (y + (sy + 0.5f) / taps) * scale;
+                        float c[3];
+                        face(px, py, c);
+                        float s[5];
+                        sample(px, py, s);
+                        const float halo_a = std::min(s[4] * 1.8f, 1.0f) * 0.75f;
+                        for (int k = 0; k < 3; ++k) {
+                            c[k] *= 1.0f - halo_a;                     // dark halo
+                            c[k] = c[k] * (1.0f - s[3]) + s[k] * s[3]; // the label
+                            sum[k] += c[k];
+                        }
+                    }
+                }
+                float* out = &region.px[(size_t(y - y0) * region.width + (x - x0)) * 4];
+                out[0] = sum[0] / (taps * taps), out[1] = sum[1] / (taps * taps);
+                out[2] = sum[2] / (taps * taps), out[3] = 1.0f;
+            }
+        }
+        patches.push_back({mip, u32(x0), u32(y0), region.width, region.height, EncodeBc1(region)});
+    }
+    return patches;
+}
+
 } // namespace
 
 namespace {
@@ -1107,7 +1276,7 @@ bool Candidate(u32 width, u32 height, Format format) {
                 return true;
             }
         }
-        return false;
+        return width == stick_width && height == stick_height;
     }
     for (const Sheet& sheet : sheets) {
         if (sheet.width == width && sheet.height == height) {
@@ -1144,13 +1313,25 @@ const std::vector<Patch>* Find(u64 hash, u32 width, u32 height, u32 levels, Form
         }
         return nullptr;
     };
+    const auto known_stick = [&]() -> const StickFrame* {
+        for (const StickFrame& frame : stick_frames) {
+            if (format == Format::Bc1 && frame.hash == hash && width == stick_width &&
+                height == stick_height) {
+                return &frame;
+            }
+        }
+        return nullptr;
+    };
     const Sheet* sheet = known_sheet();
     const Picture* picture = sheet ? nullptr : known_picture();
-    if (!sheet && !picture) {
+    const StickFrame* stick = sheet || picture ? nullptr : known_stick();
+    if (!sheet && !picture && !stick) {
         return nullptr;
     }
-    if (style == Style::Original) {
-        return &original; // a known picture, shown as the game drew it
+    // A known picture is shown as the game drew it. The stick prompt keeps its "L" for Xbox
+    // controllers too (the left stick's own letter).
+    if (style == Style::Original || (stick && style == Style::Xbox)) {
+        return &original;
     }
     const auto key = std::make_tuple(hash, levels, style);
     if (const auto it = built.find(key); it != built.end()) {
@@ -1161,6 +1342,12 @@ const std::vector<Patch>* Find(u64 hash, u32 width, u32 height, u32 levels, Form
         auto& patches = built[key] = Build(*sheet, levels, style);
         std::printf("Button prompts: %s button pictures drawn as %s (%zu pictures, %u mip levels)\n",
                     sheet->name, look, sheet->slots.size(), levels);
+        return &patches;
+    }
+    if (stick) {
+        auto& patches = built[key] = BuildStick(*stick, levels);
+        std::printf("Button prompts: %s drawn with the rotate key (%u mip levels)\n", stick->name,
+                    levels);
         return &patches;
     }
     auto& patches = built[key] = BuildPicture(*picture, levels, style);

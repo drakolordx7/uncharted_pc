@@ -24,19 +24,29 @@ back after PlayStation controller input. It also makes the bindings follow the k
 | `ae0c06306763d424` | icon sheet mask, 512x512 RGBA8 (alpha in R, G, B) | U3 | yes |
 | `5db884aa1bae54f9` | big round △, 256x256 BC1 | U2, U3 | yes |
 | `7af1abf688d8c824` | big round ○, 256x256 BC1 | U2 | image only |
+| `9edd4f2f0f64f6e5` | big round □ (the flashing-border prompt of the last fight), 256x256 BC1 | U2 | yes |
 | `25d954ce23a8f5e2` | △ tapping "puck", 512x512 BC1 | U2 | yes |
 | `c96e34fbb203279e` | △ hold puck, 512x512 BC1 | U2 | yes |
 | `94d741f6b51815ee` | ○ tapping puck, 512x512 BC1 (sRGB) | U3 | image only |
 | `93b46ba81469882c` | ○ hold puck, 512x512 BC1 (sRGB) | U3 | image only |
 | `705083db743dd2f9` | weapon d-pad, 256x256 BC1 | U2 | image only |
+| `349208a673329cce`, `7515a2f4f6a1022d` | stick prompt frames (ring with arrows, stick cap showing its "L"), 256x512 BC1 | U1 | yes |
 
 The icon sheet has the same layout in all three games (`ps4_sheet` in `button_prompts.cpp`); it
 holds the face buttons, shoulder buttons, sticks, d-pad variants, OPTIONS and the touchpad, which
 menus and hints cut out. SHARE has no key and stays. Masks (BC4), glows, chevrons and weapon icons
 are not buttons and are left alone.
 
-Not collected yet: big ✕, □, L1 and R1 prompts, and pictures only some screens use. Adding one is
-one table row (below).
+The stick prompt of valves and wheels ("turn the left stick in circles") is a ring with arrows over a
+stick cap that tips around in its socket, one picture per frame. In the frames where the cap shows its
+"L", the "L" and the cap face around it are redrawn with the key bound to `rotate_ccw` (R) or
+`rotate_cw` (T); the rest of the game's picture stays, and Xbox controllers keep the "L". The frames
+with the cap turned away have no "L" and are not touched. `StickFrame` in `button_prompts.cpp` holds
+where the "L" sits in each frame, how it is tilted, and the cap face colours without it (measured on the
+game's pictures).
+
+Not collected yet: big ✕, L1 and R1 prompts, the stick prompt in Among Thieves and Drake's Deception
+(if they have one), and pictures only some screens use. Adding one is one table row (below).
 
 ## Switching
 
