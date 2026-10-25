@@ -851,6 +851,10 @@ static void *toggle_watcher(void *path) {
 }
 void runtime_memory_set_gpu_hooks(GpuRange map, GpuRange unmap, GpuRange invalidate) {
     const char *toggles=getenv("BB_TOGGLE_FILE");
+    /* BB_TOGGLE2: starting value of the second toggle number (run.py sets per-game defaults;
+     * a toggle file, when used, replaces it). */
+    const char *start2=getenv("BB_TOGGLE2");
+    if (start2 && *start2) __atomic_store_n(&runtime_disabled_optimizations2,(uint64_t)strtoull(start2,NULL,0),__ATOMIC_RELEASE);
     static pthread_t watcher;
     if (toggles && !watcher) pthread_create(&watcher,NULL,toggle_watcher,(void *)toggles);
     write_lock();
