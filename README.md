@@ -80,7 +80,7 @@ Fixes and features in this build, by contributor. Pull request links go to the o
 
 Testing and research: adrianeira, exyled, fidoboy, kloon15, tDevis, MrBboy95, rayer23, GameBunny77 and everyone who sent logs.
 
-Third-party: AMD FSR, NVIDIA DLSS, Intel XeSS, LibAtrac9, SDL3, FFmpeg, Dear ImGui, sirit, xbyak, Vulkan Memory Allocator, PyInstaller, Pillow, Cinzel font, Kenney Input Prompts. Licenses are in the `licenses` folder of the release.
+Third-party: AMD FSR, NVIDIA DLSS, Intel XeSS, LibAtrac9, SDL3, FFmpeg, Dear ImGui, sirit, xbyak, Vulkan Memory Allocator, PyInstaller, Pillow, Cinzel font, Kenney Input Prompts, [ambientCG](https://ambientcg.com/a/Paper003) Paper003 texture (CC0). Licenses are in the `licenses` folder of the release.
 
 ## License
 
