@@ -219,6 +219,11 @@ void TextureCache::UnmapMemory(VAddr cpu_addr, size_t size) {
         // TODO: Download image data back to host.
         FreeImage(id);
     }
+    // bbport: unmapped memory holds no depth array any more (PadDepthLayers).
+    for (auto it = depth_array_layers.begin(); it != depth_array_layers.end();) {
+        it = it->first >= cpu_addr && it->first < cpu_addr + size ? depth_array_layers.erase(it)
+                                                                  : std::next(it);
+    }
 }
 
 /// bbport: U3 keeps its shadow maps as one depth array (16 layers, one per light) at a fixed address
