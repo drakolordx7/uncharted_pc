@@ -136,6 +136,11 @@ public:
     /// the dispatch is then submitted at once, so that the landing waits for it alone and not
     /// for the rest of the frame recorded after it.
     bool NoteSmallWrittenBuffers(const Shader::Info& stage);
+    /// bbport (BB_COPY64_EOP_READBACK=1): the dwords a dispatch of the 64-dword copy shader
+    /// (6a6422a9) writes, when they total 64 KiB or less, are read back at the next end-of-pipe
+    /// event, and that event's label waits for them. True when the dispatch noted such a range
+    /// (it is then submitted at once, like a gated small result).
+    bool NoteCopy64Readback(const Shader::Info& stage);
     void ReadBackSmallWrittenBuffers();
     /// Whether the small results of compute shader `writer` are gated in the default mode
     /// (BB_READBACK_SMALL_GATE unset); `why` says which list it is on.
@@ -365,6 +370,7 @@ private:
         u64 writer; ///< pgm_hash of the compute shader that wrote it last
     };
     std::vector<SmallWritten> small_written_buffers;
+    std::vector<SmallWritten> copy64_readbacks; ///< NoteCopy64Readback; small_written_mutex
     AmdGpu::Liverpool* liverpool;
     Core::MemoryManager* memory;
     boost::icl::interval_set<VAddr> mapped_ranges;

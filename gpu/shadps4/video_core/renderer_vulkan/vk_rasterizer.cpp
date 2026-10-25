@@ -2075,6 +2075,116 @@ bool Rasterizer::NoteSmallWrittenBuffers(const Shader::Info& stage) {
 }
 
 namespace {
+/// BB_COPY64_EOP_READBACK=1 (off by default): based on BilalReloaded's GOW3_COPY64_EOP_READBACK
+/// (bc160201983/Uncharted-The-Nathan-Drake-Collection-PC-port bd3a22f). The 64-dword copy shader
+/// 6a6422a9 (the scalar copy HLE, vk_shader_hle.cpp) moves the mesh raycaster results into the
+/// record arrays the game's CPU code reads. Where its source holds GPU-written bytes it runs on
+/// the GPU only unless BB_SCALAR_COPY64_SYNC asks for a guest copy (off in U3: 94 -> 54 FPS), so
+/// the guest reads stale records (U3 characters sinking, NPCs floating). With this on, only the
+/// dwords such a dispatch writes (i < min(groups * 64, user data 6, records)) are read back, and
+/// only copies of 64 KiB or less (the game reads values in 0.5-1 KiB blocks; its two large copies
+/// a frame, ~0.2 and ~2.4 MB, are never read): they land on the landing thread and the next
+/// end-of-pipe label waits for them, whatever BB_READBACK_SMALL_GATE says.
+constexpr u64 Copy64ShaderHash = 0x6a6422a9;
+constexpr u64 Copy64ReadbackMax = 64_KB;
+constexpr size_t Copy64ReadbackRanges = 256; ///< per end-of-pipe event
+
+bool Copy64EopReadback() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_COPY64_EOP_READBACK");
+        const bool enabled = env && env[0] == '1';
+        if (enabled) {
+            std::printf("COPY64EOP: on (BB_COPY64_EOP_READBACK=1): what copy shader 6a6422a9 "
+                        "writes, up to 64 KiB a dispatch, lands before the next end-of-pipe "
+                        "label\n");
+            std::fflush(stdout);
+        }
+        return enabled;
+    }();
+    return on;
+}
+
+/// Counts for the BB_SC_LOG line, printed at most every 10 s (Copy64Stats::Note).
+struct Copy64Stats {
+    std::atomic<u64> noted{}, too_large{}, dropped{}, landed{}, dwords{}, waited{}, not_gpu{};
+    std::atomic<s64> window{};
+    std::atomic<bool> first{true};
+
+    void Note() {
+        static const bool on = std::getenv("BB_SC_LOG") != nullptr;
+        if (!on) {
+            return;
+        }
+        const s64 now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+        s64 last = window.load(std::memory_order_relaxed);
+        if (last == 0) {
+            window.compare_exchange_strong(last, now);
+            return;
+        }
+        if (now - last < 10000 || !window.compare_exchange_strong(last, now)) {
+            return;
+        }
+        auto take = [](std::atomic<u64>& v) {
+            return static_cast<unsigned long long>(v.exchange(0, std::memory_order_relaxed));
+        };
+        const double secs = (now - last) / 1000.0;
+        const auto n_landed = take(landed);
+        const auto n_dwords = take(dwords);
+        const auto n_waited = take(waited);
+        std::printf("COPY64EOP 10s: %llu copies noted, %.1f/s read back (%llu landed, %llu read "
+                    "with a wait), %.0f dwords/s (%.1f KiB/s); skipped: %llu over 64 KiB, %llu "
+                    "with no GPU-written bytes, %llu past %zu ranges an event\n",
+                    take(noted), (n_landed + n_waited) / secs, n_landed, n_waited,
+                    n_dwords / secs, n_dwords * 4 / 1024.0 / secs, take(too_large),
+                    take(not_gpu), take(dropped), Copy64ReadbackRanges);
+        std::fflush(stdout);
+    }
+};
+Copy64Stats copy64_stats;
+} // namespace
+
+bool Rasterizer::NoteCopy64Readback(const Shader::Info& stage) {
+    if (stage.pgm_hash != Copy64ShaderHash || !Copy64EopReadback() || stage.buffers.size() != 2) {
+        return false;
+    }
+    const auto ud = stage.UserData();
+    if (ud.size() <= 6) {
+        return false;
+    }
+    // dst[i] = src[i] for i < min(groups * 64, ud[6]); writes past dst's records are dropped.
+    const auto dst = stage.buffers[1].GetSharp(stage);
+    if (dst.GetStride() != 4 || !dst.base_address) {
+        return false;
+    }
+    const u64 count =
+        std::min<u64>({u64(CsRegs().dim_x) * 64, u64(ud[6]), u64(dst.num_records)});
+    const u64 size = count * 4;
+    if (size == 0) {
+        return false;
+    }
+    copy64_stats.noted.fetch_add(1, std::memory_order_relaxed);
+    if (size > Copy64ReadbackMax) {
+        copy64_stats.too_large.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    std::scoped_lock lk{small_written_mutex};
+    const auto it = std::ranges::find_if(copy64_readbacks, [&](const SmallWritten& w) {
+        return w.address == dst.base_address && w.size == size;
+    });
+    if (it != copy64_readbacks.end()) {
+        return true;
+    }
+    if (copy64_readbacks.size() >= Copy64ReadbackRanges) {
+        copy64_stats.dropped.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    copy64_readbacks.push_back({dst.base_address, static_cast<u32>(size), stage.pgm_hash});
+    return true;
+}
+
+namespace {
 /// BB_READBACK_SMALL_GATE: which small GPU results hold back the end-of-pipe label until they
 /// have landed (see ReadBackSmallWrittenBuffers).
 enum class SmallGate {
@@ -2159,9 +2269,11 @@ bool Rasterizer::SmallWriterGated(u64 writer, const char** why) const {
 
 void Rasterizer::ReadBackSmallWrittenBuffers() {
     std::vector<SmallWritten> ranges;
+    std::vector<SmallWritten> copy64;
     {
         std::scoped_lock lk{small_written_mutex};
         ranges.swap(small_written_buffers);
+        copy64.swap(copy64_readbacks);
     }
     // The read back waits for the whole GPU queue (U3 pub: 27 instead of 46 FPS with the other
     // run of the pair at the same time). The bytes land on the landing thread instead, once the
@@ -2208,6 +2320,28 @@ void Rasterizer::ReadBackSmallWrittenBuffers() {
             }
         }
         buffer_cache.ReadMemory(address, size, false, true);
+    }
+    // BB_COPY64_EOP_READBACK=1 (NoteCopy64Readback): always gated; the label waits for them.
+    for (const auto& [address, size, writer] : copy64) {
+        if (!buffer_cache.IsRangeGpuWritten(address, size)) {
+            copy64_stats.not_gpu.fetch_add(1, std::memory_order_relaxed);
+            continue; // nothing GPU-written there: the guest copy is current
+        }
+        if (copy64_stats.first.exchange(false, std::memory_order_relaxed)) {
+            std::printf("COPY64EOP: first readback: %#llx (%u bytes)\n",
+                        static_cast<unsigned long long>(address), size);
+            std::fflush(stdout);
+        }
+        if (defer && buffer_cache.DeferGuestCopy(address, address, size, false, true, 0)) {
+            copy64_stats.landed.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            buffer_cache.ReadMemory(address, size, false, true);
+            copy64_stats.waited.fetch_add(1, std::memory_order_relaxed);
+        }
+        copy64_stats.dwords.fetch_add(size / 4, std::memory_order_relaxed);
+    }
+    if (Copy64EopReadback()) {
+        copy64_stats.Note();
     }
 }
 
@@ -2342,7 +2476,8 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     if (!BindResources(pipeline)) {
         return;
     }
-    const bool gated_small_result = NoteSmallWrittenBuffers(cs);
+    // Both are noted (no short-circuit): either one makes the dispatch submit at once.
+    const bool gated_small_result = NoteSmallWrittenBuffers(cs) | NoteCopy64Readback(cs);
     if (StaleCheckEnabled()) {
         VAddr slot = ~VAddr{0};
         u64 slot_size = 0;
