@@ -6,7 +6,10 @@ profiles (SAVEDATA0xP, SAVEDATA0CC: finished difficulties, rewards, settings) st
 one game's autosave folders, as they lie under the user folder:
     <user>/save_slots/<game>/<slot id>/slot.json       name, created, last played, the game's texts
     <user>/save_slots/<game>/<slot id>/data/savedata/<user id>/<title id>/SAVEDATA0x0[.sce_sys]
-    <user>/save_slots/<game>/state.json                {"in_place": slot id, "pending": slot id or null}
+    <user>/save_slots/<game>/state.json                {"in_place": slot id, "pending": slot id or null,
+                                                        "counter": the highest slot number ever given}
+Slot ids are never used twice: a new id is "slot" + the next number of the counter, so restoring the
+backup made when a slot was deleted can never meet another slot with its id.
 The save in the saves folder always belongs to the slot `in_place` names, so it can be stored back at
 any time (after the game exits, or at the next start when the launcher was closed or crashed meanwhile);
 storing back only copies, so it is safe while a game runs. Swapping moves folders and is refused while
@@ -14,7 +17,8 @@ a game runs: the save in place is stored back into its slot first, the other slo
 to the saves, `pending` is written, then uncharted_saves.swap_units renames (rolling back on failure),
 and only then `in_place` changes. A swap cut short leaves `pending`; the next call compares the save in
 place with both slots and finishes or undoes it, so a slot is never overwritten with another one's save.
-The first call for a game turns the existing save into the slot "Main" (copied, nothing moves).
+The first call for a game turns the existing save into the slot "Main" (copied, nothing moves). A new
+slot is built in a hidden folder and renamed in, so a crash leaves no half-made slot.
 """
 from contextlib import contextmanager
 import json
@@ -32,7 +36,8 @@ GAME_SAVE = {'u1': 'SAVEDATA010', 'u2': 'SAVEDATA020', 'u3': 'SAVEDATA030'}
 DEFAULT_ID, DEFAULT_NAME = 'main', 'Main'
 MAX_NAME = 40
 ID_RE = re.compile(r'^[a-z0-9]{1,24}$')
-LOCK_STALE = 120  # seconds after which a lock left by a crashed launcher is ignored
+LOCK_STALE = 120  # seconds after which a lock is ignored even when its process seems alive (PID reused)
+LOCK_WAIT = 5     # seconds to wait for another slot change before giving up
 
 
 class SlotError(saves.SaveError):
@@ -138,35 +143,86 @@ def _copy_units(source_root, unit_list, dest_root):
         shutil.copytree(Path(source_root).joinpath(*unit.split('/')), Path(dest_root).joinpath(*unit.split('/')))
 
 
+def _pid_alive(pid):
+    """Whether a process with this id exists (never signals it: on Windows os.kill would end it)."""
+    if pid <= 0:
+        return False
+    if os.name == 'nt':
+        import ctypes
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.OpenProcess.restype = ctypes.c_void_p
+        handle = kernel.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5  # access denied: it exists; 87: no such process
+        try:
+            code = ctypes.c_ulong()
+            if kernel.GetExitCodeProcess(ctypes.c_void_p(handle), ctypes.byref(code)):
+                return code.value == 259  # STILL_ACTIVE
+            return True
+        finally:
+            kernel.CloseHandle(ctypes.c_void_p(handle))
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _lock_owner(path):
+    """The process id a lock file names, or None when it is empty or unreadable."""
+    try:
+        text = Path(path).read_text(encoding='ascii').strip()
+        return int(text) if text.isdigit() else None
+    except (OSError, ValueError):
+        return None
+
+
+def _lock_is_stale(path):
+    owner = _lock_owner(path)
+    if owner is not None and not _pid_alive(owner):
+        return True  # the launcher that took it is gone
+    try:
+        return time.time() - Path(path).stat().st_mtime > LOCK_STALE
+    except OSError:
+        return False
+
+
 @contextmanager
 def _lock(user_dir):
-    """One slot change at a time (the launcher window and a --play shortcut could overlap)."""
+    """One slot change at a time (the launcher window and a --play shortcut could overlap). The lock
+    file holds the owner's process id: a lock whose process is gone is taken over at once."""
     path = slots_root(user_dir) / '.lock'
     path.parent.mkdir(parents=True, exist_ok=True)
-    deadline = time.time() + 5
+    mine = str(os.getpid())
+    deadline = time.time() + LOCK_WAIT
     while True:
         try:
             handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(handle, str(os.getpid()).encode())
-            os.close(handle)
+            try:
+                os.write(handle, mine.encode())
+            finally:
+                os.close(handle)
             break
         except FileExistsError:
-            try:
-                if time.time() - path.stat().st_mtime > LOCK_STALE:
+            if _lock_is_stale(path) and _lock_is_stale(path):  # twice: a lock taken over meanwhile is fresh
+                try:
                     path.unlink()
-                    continue
-            except OSError:
+                except OSError:
+                    pass
                 continue
             if time.time() > deadline:
                 raise SlotError('the save slots are busy, try again in a moment')
-            time.sleep(0.1)
+            time.sleep(0.05)
     try:
         yield
     finally:
-        try:
-            path.unlink()
-        except OSError:
-            pass
+        if _lock_owner(path) == os.getpid():  # never remove a lock somebody else took over
+            try:
+                path.unlink()
+            except OSError:
+                pass
 
 
 # ---- slot records ----------------------------------------------------------------------------
@@ -197,18 +253,48 @@ def _fix_data(slot):
     data.mkdir(parents=True, exist_ok=True)
 
 
-def _new_id(user_dir, game):
+def _counter(user_dir, game):
+    """The highest slot number ever given out (the first slot, "main", is number 1)."""
+    value = (_state(user_dir, game) or {}).get('counter')
+    return value if isinstance(value, int) and value > 0 else 0
+
+
+def _bump_counter(user_dir, game, number):
+    raw = _state(user_dir, game) or {}
+    if number > _counter(user_dir, game):
+        raw['counter'] = number
+        _write_json(_game_dir(user_dir, game) / 'state.json', raw)
+
+
+def _next_number(user_dir, game):
     numbers = [int(i[4:]) for i in _slot_ids(user_dir, game) if i.startswith('slot') and i[4:].isdigit()]
-    return f'slot{max(numbers, default=1) + 1}'
+    return max([_counter(user_dir, game), 1] + numbers) + 1
 
 
-def _new_slot(user_dir, game, slot_id, name, now=None):
-    slot = _slot_dir(user_dir, game, slot_id)
-    (slot / 'data').mkdir(parents=True, exist_ok=True)
-    manifest = {'id': slot_id, 'game': game, 'name': name, 'created': _stamp(now), 'last_played': '',
-                'saved': None, 'title': '', 'subtitle': '', 'detail': ''}
-    _write_json(slot / 'slot.json', manifest)
-    return manifest
+def _new_id(user_dir, game):
+    """An id never used before for this game's slots (the counter only goes up, so the id of a deleted
+    slot stays free of any other slot, and restoring that slot's backup cannot clash)."""
+    number = _next_number(user_dir, game)
+    _bump_counter(user_dir, game, number)
+    return f'slot{number}'
+
+
+def allocate_id(user_dir, game):
+    """A fresh slot id for a slot restored from a backup whose own id is taken."""
+    with _lock(user_dir):
+        return _new_id(user_dir, game)
+
+
+def _publish(stage, slot):
+    """Moves a finished slot folder into place (a folder left there without slot.json is dropped)."""
+    if slot.exists():
+        shutil.rmtree(slot)
+    os.rename(stage, slot)
+
+
+def _slot_manifest(game, slot_id, name, now=None):
+    return {'id': slot_id, 'game': game, 'name': name, 'created': _stamp(now), 'last_played': '',
+            'saved': None, 'title': '', 'subtitle': '', 'detail': ''}
 
 
 def _state(user_dir, game):
@@ -216,8 +302,10 @@ def _state(user_dir, game):
 
 
 def _write_state(user_dir, game, state):
+    counter = max(int(state.get('counter') or 0), _counter(user_dir, game))
     _write_json(_game_dir(user_dir, game) / 'state.json', {'in_place': state['in_place'],
-                                                           'pending': state.get('pending')})
+                                                           'pending': state.get('pending'),
+                                                           'counter': counter})
 
 
 def _ensure(user_dir, game, now=None):
@@ -225,33 +313,37 @@ def _ensure(user_dir, game, now=None):
     A state whose slot vanished, or slots without a state, get a new slot for the save in place, so
     it is never written into a slot it may not belong to."""
     state = _state(user_dir, game)
-    if state and ID_RE.match(str(state.get('in_place') or '')) and \
-            (_slot_dir(user_dir, game, state['in_place']) / 'slot.json').is_file():
+    if state and ID_RE.match(str(state.get('in_place') or '')) and             (_slot_dir(user_dir, game, state['in_place']) / 'slot.json').is_file():
         pending = state.get('pending')
         if pending and not (ID_RE.match(str(pending)) and (_slot_dir(user_dir, game, pending) / 'slot.json').is_file()):
             pending = None  # the slot being swapped in is gone: the save in place stays with in_place
-        return {'in_place': state['in_place'], 'pending': pending}
+        return {'in_place': state['in_place'], 'pending': pending, 'counter': _counter(user_dir, game)}
     ids = _slot_ids(user_dir, game)
-    slot_id = DEFAULT_ID if DEFAULT_ID not in ids else _new_id(user_dir, game)
+    # "main" is only free while it is the one slot ever made (a counter above 1: it was deleted)
+    slot_id = DEFAULT_ID if DEFAULT_ID not in ids and _counter(user_dir, game) <= 1 else _new_id(user_dir, game)
     names = {(_manifest(user_dir, game, i) or {}).get('name', '').casefold() for i in ids}
     name = DEFAULT_NAME
     number = 2
     while name.casefold() in names:
         name = f'{DEFAULT_NAME} {number}'
         number += 1
+    # built in a hidden folder and renamed in last: a crash must not leave an empty slot behind
     slot = _slot_dir(user_dir, game, slot_id)
-    manifest = _new_slot(user_dir, game, slot_id, name, now)
-    current = game_units(user_dir, game)
-    stage = slot / '.data-new'
+    stage = _game_dir(user_dir, game) / f'.new-{slot_id}'
     shutil.rmtree(stage, ignore_errors=True)
-    _copy_units(user_dir, current, stage)
-    shutil.rmtree(slot / 'data')
-    stage.mkdir(exist_ok=True)
-    os.rename(stage, slot / 'data')
-    manifest.update(_texts(user_dir, current), saved=_newest(user_dir, current))
-    _write_json(slot / 'slot.json', manifest)
-    state = {'in_place': slot_id, 'pending': None}
-    _write_state(user_dir, game, state)
+    current = game_units(user_dir, game)
+    try:
+        (stage / 'data').mkdir(parents=True)
+        _copy_units(user_dir, current, stage / 'data')
+        manifest = _slot_manifest(game, slot_id, name, now)
+        manifest.update(_texts(user_dir, current), saved=_newest(user_dir, current))
+        _write_json(stage / 'slot.json', manifest)
+        # the state first: a crash before the rename only repeats this setup (slot_id is free again)
+        state = {'in_place': slot_id, 'pending': None, 'counter': max(_counter(user_dir, game), 1)}
+        _write_state(user_dir, game, state)
+        _publish(stage, slot)
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
     return state
 
 
@@ -467,22 +559,34 @@ def mark_played(user_dir, game, slot_id, now=None):
             _write_json(slot / 'slot.json', manifest)
 
 
-def _clean_name(user_dir, game, name, skip=None):
+def _taken(user_dir, game, name, skip=None, shown=None):
+    """Whether a slot (other than `skip`) already goes by this name: its stored name, or the name the
+    launcher shows for it (`shown`: stored name -> shown name, e.g. the translated "Main")."""
+    wanted = name.casefold()
+    for slot_id in _slot_ids(user_dir, game):
+        if slot_id == skip:
+            continue
+        stored = str((_manifest(user_dir, game, slot_id) or {}).get('name', ''))
+        if wanted in (stored.casefold(), str(shown(stored) if shown else stored).casefold()):
+            return True
+    return False
+
+
+def _clean_name(user_dir, game, name, skip=None, shown=None):
     name = ' '.join(str(name or '').split())[:MAX_NAME]
     if not name or any(ord(c) < 32 for c in name):
         raise SlotError('choose a name', 'name-empty')
-    for slot_id in _slot_ids(user_dir, game):
-        if slot_id != skip and str((_manifest(user_dir, game, slot_id) or {}).get('name', '')).casefold() == name.casefold():
-            raise SlotError('a slot with this name already exists', 'name-taken')
+    if _taken(user_dir, game, name, skip, shown):
+        raise SlotError('a slot with this name already exists', 'name-taken')
     return name
 
 
-def create_slot(user_dir, game, name, copy_from=None, now=None):
+def create_slot(user_dir, game, name, copy_from=None, now=None, shown=None):
     """A new slot: empty (the game starts a new campaign) or a copy of the slot `copy_from` (the save
-    in place when that slot is in place). Returns its id."""
+    in place when that slot is in place). Returns its id. `shown`: see _taken."""
     with _lock(user_dir):
         state = _ensure(user_dir, game, now)
-        name = _clean_name(user_dir, game, name)
+        name = _clean_name(user_dir, game, name, shown=shown)
         source = None
         if copy_from:
             if not (_slot_dir(user_dir, game, copy_from) / 'slot.json').is_file():
@@ -492,35 +596,66 @@ def create_slot(user_dir, game, name, copy_from=None, now=None):
             source = _slot_dir(user_dir, game, copy_from)
             _fix_data(source)
         slot_id = _new_id(user_dir, game)
-        slot = _slot_dir(user_dir, game, slot_id)
+        stage = _game_dir(user_dir, game) / f'.new-{slot_id}'  # renamed in when complete
+        shutil.rmtree(stage, ignore_errors=True)
         try:
-            manifest = _new_slot(user_dir, game, slot_id, name, now)
+            manifest = _slot_manifest(game, slot_id, name, now)
             if source:
-                shutil.rmtree(slot / 'data')
-                shutil.copytree(source / 'data', slot / 'data')
+                shutil.copytree(source / 'data', stage / 'data')
                 original = _read_json(source / 'slot.json', {})
                 manifest.update({k: original.get(k, '') for k in ('title', 'subtitle', 'detail')},
                                 saved=original.get('saved'))
-                _write_json(slot / 'slot.json', manifest)
-        except OSError:
-            shutil.rmtree(slot, ignore_errors=True)
-            raise
+            else:
+                (stage / 'data').mkdir(parents=True)
+            _write_json(stage / 'slot.json', manifest)
+            _publish(stage, _slot_dir(user_dir, game, slot_id))
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
         return slot_id
 
 
-def duplicate_slot(user_dir, game, slot_id, name, now=None):
-    return create_slot(user_dir, game, name, copy_from=slot_id, now=now)
+def duplicate_slot(user_dir, game, slot_id, name, now=None, shown=None):
+    return create_slot(user_dir, game, name, copy_from=slot_id, now=now, shown=shown)
 
 
-def rename_slot(user_dir, game, slot_id, name):
+def rename_slot(user_dir, game, slot_id, name, shown=None):
     with _lock(user_dir):
         slot = _slot_dir(user_dir, game, slot_id)
         manifest = _read_json(slot / 'slot.json')
         if manifest is None:
             raise SlotError('this save slot no longer exists', 'missing')
-        manifest['name'] = _clean_name(user_dir, game, name, skip=slot_id)
+        manifest['name'] = _clean_name(user_dir, game, name, skip=slot_id, shown=shown)
         _write_json(slot / 'slot.json', manifest)
         return manifest['name']
+
+
+def restore_slot(user_dir, game, slot_id, staged, rename=os.rename):
+    """Puts a slot out of a restored backup (`staged`: its folder, extracted next to the saves) back.
+    Its id is free: it comes back as it was. The id is taken by a slot with other content: it comes
+    back under a fresh id, named "<name> (restored)". Same content: nothing to do. Returns
+    ('restored', slot id, name), ('renamed', new id, new name) or ('unchanged', slot id, name)."""
+    staged = Path(staged)
+    name = str((_read_json(staged / 'slot.json', {}) or {}).get('name') or slot_id)
+    live = _slot_dir(user_dir, game, slot_id)
+    with _lock(user_dir):
+        if not (live / 'slot.json').is_file():
+            shutil.rmtree(live, ignore_errors=True)  # nothing but a leftover can be there
+            live.parent.mkdir(parents=True, exist_ok=True)
+            rename(staged, live)
+            _bump_counter(user_dir, game, int(slot_id[4:]) if slot_id.startswith('slot') and slot_id[4:].isdigit() else 1)
+            return 'restored', slot_id, name
+        if _digest(live / 'data', _data_units(live / 'data')) == _digest(staged / 'data', _data_units(staged / 'data')):
+            return 'unchanged', slot_id, name
+        new_id = _new_id(user_dir, game)
+        base, suffix, number = name[:MAX_NAME - 14].rstrip(), ' (restored)', 1
+        while _taken(user_dir, game, base + suffix):
+            number += 1
+            suffix = f' (restored {number})'
+        manifest = _read_json(staged / 'slot.json', {}) or {}
+        manifest.update(id=new_id, name=base + suffix)
+        _write_json(staged / 'slot.json', manifest)
+        rename(staged, _slot_dir(user_dir, game, new_id))
+        return 'renamed', new_id, base + suffix
 
 
 def delete_slot(user_dir, game, slot_id, active=None, now=None, backup=True):

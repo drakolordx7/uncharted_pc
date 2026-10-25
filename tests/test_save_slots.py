@@ -2,8 +2,10 @@
 from paths import ROOT
 import importlib.util
 import io
+import os
 from pathlib import Path
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -339,6 +341,193 @@ class SaveSlotTests(unittest.TestCase):
                 'files': [{'path': name, 'size': 2, 'sha256': hashlib.sha256(b'{}').hexdigest()}]}))
         with self.assertRaises(saves.SaveError):
             saves.validate_backup(path)
+
+    # ---- slot ids are never used twice -----------------------------------------------------------
+    def test_a_deleted_slots_id_is_never_given_again(self):
+        first = slots.create_slot(self.user, 'u1', 'First')
+        slots.delete_slot(self.user, 'u1', first)
+        second = slots.create_slot(self.user, 'u1', 'Second')
+        self.assertNotEqual(first, second)
+        slots.delete_slot(self.user, 'u1', second)
+        self.assertNotIn(slots.create_slot(self.user, 'u1', 'Third'), (first, second))
+        # a lost state.json cannot take the numbers back: the slots still on disk set the floor
+        keep = slots.create_slot(self.user, 'u1', 'Keep')
+        (slots.slots_root(self.user) / 'u1' / 'state.json').unlink()
+        self.assertGreater(int(slots.create_slot(self.user, 'u1', 'After')[4:]), int(keep[4:]))
+
+    def test_deleting_main_does_not_free_its_id_either(self):
+        other = slots.create_slot(self.user, 'u1', 'Other')
+        slots.activate(self.user, 'u1', other)
+        slots.delete_slot(self.user, 'u1', 'main')
+        state = slots._state(self.user, 'u1')
+        self.assertEqual(state['counter'], int(other[4:]))
+        state.update(in_place='gone')      # the slot in place vanished: a new one is made for the save
+        slots._write_json(slots.slots_root(self.user) / 'u1' / 'state.json', state)
+        ids = [s['id'] for s in slots.list_slots(self.user, 'u1')]
+        self.assertNotIn('main', ids)
+        self.assertEqual(len(ids), 2)
+
+    def test_restoring_a_deleted_slot_after_new_slots_were_made(self):
+        run = slots.create_slot(self.user, 'u1', 'Run 2')
+        slots.activate(self.user, 'u1', run)
+        make_save(self.user, 'SAVEDATA010', b'u1-run2')
+        slots.activate(self.user, 'u1', 'main')
+        made = slots.delete_slot(self.user, 'u1', run)
+        newer = slots.create_slot(self.user, 'u1', 'Newer', copy_from='main')
+        self.assertNotEqual(newer, run)
+        done, _before = saves.restore_backup(self.user, made)
+        self.assertEqual(done['slots_renamed'], [])
+        self.assertEqual(slot_usr(self.user, 'u1', run, 'SAVEDATA010'), b'u1-run2')
+        self.assertEqual(slot_usr(self.user, 'u1', newer, 'SAVEDATA010'), b'u1-main')
+        self.assertEqual(self.names('u1')[run]['name'], 'Run 2')
+
+    def test_restore_meets_an_existing_slot_id_and_keeps_both(self):
+        other = slots.create_slot(self.user, 'u1', 'Other', copy_from='main')
+        backup = saves.create_backup(self.user, 'u1')
+        slots.activate(self.user, 'u1', other)
+        make_save(self.user, 'SAVEDATA010', b'u1-other-new')
+        slots.store_back(self.user, 'u1')
+        done, _before = saves.restore_backup(self.user, backup)
+        self.assertEqual(len(done['slots_renamed']), 1)
+        moved = done['slots_renamed'][0]
+        self.assertEqual((moved['game'], moved['was'], moved['name']), ('u1', other, 'Other (restored)'))
+        self.assertNotIn(moved['id'], ('main', other))
+        found = self.names('u1')
+        self.assertEqual(found[moved['id']]['name'], 'Other (restored)')
+        self.assertEqual(slots._manifest(self.user, 'u1', moved['id'])['id'], moved['id'])
+        self.assertEqual(slot_usr(self.user, 'u1', moved['id'], 'SAVEDATA010'), b'u1-main')   # the backup's
+        self.assertEqual(done['slots_unchanged'], ['Main'])   # same content: nothing to add
+        self.assertEqual(sorted(found), sorted(['main', other, moved['id']]))
+        # restoring again names the second copy differently
+        again, _before = saves.restore_backup(self.user, backup)
+        self.assertEqual(again['slots_renamed'][0]['name'], 'Other (restored 2)')
+
+    # ---- backups made before deleting a slot are not pruned by "backups to keep" -----------------
+    def test_prune_keeps_every_before_delete_backup_up_to_the_generous_cap(self):
+        made = []
+        for number in range(4):
+            slot = slots.create_slot(self.user, 'u1', f'Gone {number}')
+            made.append(slots.delete_slot(self.user, 'u1', slot, now=1_700_000_000 + number * 60))
+        dest = saves.backup_dir(self.user)
+        self.assertEqual(saves.prune(dest, 1, kind='before-delete'), [])
+        self.assertTrue(all(path.is_file() for path in made))
+        with mock.patch.object(saves, 'DELETE_BACKUPS_KEEP', 2):
+            self.assertEqual(sorted(saves.prune(dest, 1, kind='before-delete')), sorted(made[:2]))   # oldest first
+        self.assertTrue(made[2].is_file() and made[3].is_file())
+
+    def test_other_kinds_still_follow_the_keep_count(self):
+        for number in range(3):
+            saves.create_backup(self.user, 'u1', kind='before-edit', now=1_700_000_000 + number * 60)
+        self.assertEqual(len(saves.prune(saves.backup_dir(self.user), 1, kind='before-edit')), 2)
+
+    # ---- first-time setup leaves no empty slot behind --------------------------------------------
+    def test_a_crash_while_making_main_leaves_no_slot_and_the_next_call_does_it(self):
+        with mock.patch.object(slots, '_copy_units', side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+            slots.list_slots(self.user, 'u1')
+        self.assertEqual(slots._slot_ids(self.user, 'u1'), [])
+        with mock.patch.object(slots, '_publish', side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+            slots.list_slots(self.user, 'u1')
+        self.assertEqual(slots._slot_ids(self.user, 'u1'), [])
+        found = slots.list_slots(self.user, 'u1')
+        self.assertEqual([(s['id'], s['name'], s['empty']) for s in found], [('main', 'Main', False)])
+        self.assertEqual(slot_usr(self.user, 'u1', 'main', 'SAVEDATA010'), b'u1-main')
+        hidden = [p.name for p in (slots.slots_root(self.user) / 'u1').iterdir() if p.name.startswith('.new')]
+        self.assertEqual(hidden, [])
+
+    def test_a_crash_while_copying_a_slot_leaves_no_half_slot(self):
+        slots.list_slots(self.user, 'u1')
+        with mock.patch.object(slots.shutil, 'copytree', side_effect=OSError('disk full')), self.assertRaises(OSError):
+            slots.create_slot(self.user, 'u1', 'Copy', copy_from='main')
+        self.assertEqual(list(self.names('u1')), ['main'])
+
+    # ---- the lock --------------------------------------------------------------------------------
+    def lock_file(self):
+        return slots.slots_root(self.user) / '.lock'
+
+    def test_the_lock_holds_our_pid_and_goes_away(self):
+        with slots._lock(self.user):
+            self.assertEqual(self.lock_file().read_text(), str(os.getpid()))
+        self.assertFalse(self.lock_file().exists())
+
+    def test_a_lock_of_a_dead_process_is_taken_over_at_once(self):
+        child = subprocess.Popen([sys.executable, '-c', 'pass'])
+        child.wait()
+        self.lock_file().parent.mkdir(parents=True, exist_ok=True)
+        self.lock_file().write_text(str(child.pid))   # fresh, but its owner is gone
+        with mock.patch.object(slots, 'LOCK_WAIT', 0):
+            with slots._lock(self.user):
+                self.assertEqual(self.lock_file().read_text(), str(os.getpid()))
+
+    def test_a_lock_of_a_live_process_is_respected(self):
+        self.lock_file().parent.mkdir(parents=True, exist_ok=True)
+        self.lock_file().write_text(str(os.getpid()))
+        with mock.patch.object(slots, 'LOCK_WAIT', 0.2), self.assertRaises(slots.SlotError):
+            with slots._lock(self.user):
+                self.fail('the lock was not ours to take')
+        self.assertEqual(self.lock_file().read_text(), str(os.getpid()))
+        self.lock_file().unlink()
+
+    def test_an_old_lock_is_ignored_even_when_its_pid_is_alive(self):
+        self.lock_file().parent.mkdir(parents=True, exist_ok=True)
+        self.lock_file().write_text(str(os.getpid()))
+        old = self.lock_file().stat().st_mtime - slots.LOCK_STALE - 5
+        os.utime(self.lock_file(), (old, old))
+        with mock.patch.object(slots, 'LOCK_WAIT', 0):
+            with slots._lock(self.user):
+                pass
+
+    def test_a_lock_somebody_else_took_over_is_not_removed(self):
+        with slots._lock(self.user):
+            self.lock_file().write_text('4000000000')   # another launcher's lock
+        self.assertEqual(self.lock_file().read_text(), '4000000000')
+
+    # ---- is a game running? ----------------------------------------------------------------------
+    @unittest.skipUnless(os.name == 'nt', 'tasklist is Windows only')
+    def test_game_process_running_is_true_when_tasklist_fails(self):
+        def result(code, out='', err=''):
+            return subprocess.CompletedProcess([], code, out, err)
+        for failure in (mock.Mock(side_effect=FileNotFoundError('tasklist')),
+                        mock.Mock(side_effect=subprocess.TimeoutExpired('tasklist', 10)),
+                        mock.Mock(return_value=result(1, '', 'Access is denied'))):
+            with mock.patch.object(saves.subprocess, 'run', failure), \
+                    self.assertLogs('uncharted.saves', 'WARNING') as logged:
+                self.assertTrue(saves.game_process_running())
+            self.assertIn('tasklist', logged.output[0])
+        with mock.patch.object(saves.subprocess, 'run', return_value=result(0, 'INFO: No tasks are running.')):
+            self.assertFalse(saves.game_process_running())
+        with mock.patch.object(saves.subprocess, 'run', return_value=result(0, '"bb-probe.exe","12","Console"')):
+            self.assertTrue(saves.game_process_running())
+
+    # ---- names ------------------------------------------------------------------------------------
+    def test_names_are_compared_as_shown_too(self):
+        def shown(name):
+            return 'Hauptslot' if name == 'Main' else name
+        with self.assertRaises(slots.SlotError) as caught:
+            slots.create_slot(self.user, 'u1', 'hauptslot', shown=shown)
+        self.assertEqual(caught.exception.code, 'name-taken')
+        with self.assertRaises(slots.SlotError):
+            slots.create_slot(self.user, 'u1', 'MAIN', shown=shown)    # the stored name still counts
+        other = slots.create_slot(self.user, 'u1', 'Other', shown=shown)
+        with self.assertRaises(slots.SlotError):
+            slots.rename_slot(self.user, 'u1', other, 'Hauptslot', shown=shown)
+        with self.assertRaises(slots.SlotError):
+            slots.duplicate_slot(self.user, 'u1', 'main', 'Hauptslot', shown=shown)
+        self.assertEqual(slots.rename_slot(self.user, 'u1', other, 'Other', shown=shown), 'Other')   # itself is fine
+        self.assertTrue(slots.create_slot(self.user, 'u1', 'Hauptslot'))   # no translation in play: fine
+
+    def test_the_launcher_names_the_slots_a_restore_replaces(self):
+        launcher = load_launcher()
+        other = slots.create_slot(self.user, 'u1', 'Crushing run')
+        cls = launcher.Launcher
+        fake = mock.Mock()
+        fake.slot_list = lambda game: slots.list_slots(self.user, game)
+        fake.active_slot = lambda game, found: other if game == 'u1' else next(s['id'] for s in found if s['in_place'])
+        fake.slot_name = lambda slot: cls.slot_name(fake, slot)
+        self.assertEqual(cls.restore_replaces(fake, {'format': saves.FORMAT, 'game': 'u1'}),
+                         "Drake's Fortune: Crushing run")
+        both = cls.restore_replaces(fake, {'format': saves.FORMAT, 'game': 'all'})
+        self.assertTrue(both.startswith("Drake's Fortune: Crushing run, Among Thieves: Main"))
+        self.assertEqual(cls.restore_replaces(fake, {'format': saves.FORMAT, 'game': 'shared'}), '')
 
     # ---- the launcher's launch paths -------------------------------------------------------------
     def test_empty_slot_launch_path_and_store_back(self):

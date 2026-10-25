@@ -174,42 +174,46 @@ MOUSE_SENS_MIN, MOUSE_SENS_MAX = 0.1, 10.0  # the Controls page slider (the game
 FIXES = {
     'fix_u2_gpu_results': (
         'Exact GPU results (Uncharted 2)',
-        'Fixes explosions, vehicle damage and the chapter 21 convoy. Costs FPS in busy scenes.',
+        'Helps with explosions, vehicle damage and the chapter 21 convoy. Costs FPS in busy scenes. '
+        'Automatic: on in Uncharted 2 only.',
         {'on': {'BB_GPU_MERGE': '0'}, 'off': {'BB_GPU_MERGE': '1'}}),
     'fix_u2_mesh': (
         'Checkpoint crash fix',
         'Fixes "iSubMesh < m_numSubMeshInstances" crashes in Uncharted 1 and 2 after checkpoints and cutscenes. '
-        'Costs a lot of FPS in Uncharted 3.',
+        'Costs a lot of FPS in Uncharted 3. Automatic: on in Uncharted 1 and 2, off in Uncharted 3.',
         {'on': {'BB_SCALAR_COPY64_SYNC': '2', 'BB_SCALAR_COPY64_DEFER': '1'},
          'off': {'BB_SCALAR_COPY64_SYNC': '0', 'BB_SCALAR_COPY64_DEFER': '0'}}),
     'fix_tiny_readback': (
         'Aim and turret focus',
-        'Keeps enemies sharp while you aim in Uncharted 2 and 3. No FPS cost.',
+        'Keeps enemies sharp while you aim in Uncharted 2 and 3. No measurable FPS cost. '
+        'Automatic: on in Uncharted 2 and 3.',
         {'on': {'BB_TINY_READBACK': '1'}, 'off': {'BB_TINY_READBACK': '0'}}),
     'fix_small_buffers': (
         'Brightness flicker fix',
-        'Fixes black weapons and brightness that flickers or gets stuck.',
+        'Fixes black weapons and brightness that flickers or gets stuck. Automatic: on in Uncharted 2 and 3.',
         {'on': {'BB_READBACK_SMALL_BUFFERS': '1'}, 'off': {'BB_READBACK_SMALL_BUFFERS': '0'}}),
     'fix_small_gate': (
         'Sinking characters fix',
         'Stops characters sinking into the ground or bouncing in Uncharted 2 and 3. '
-        'On is the full fix and costs FPS in heavy scenes.',
+        'On is the full fix and costs FPS in heavy scenes. Automatic: waits only for the GPU results the game rewrites.',
         {'on': {'BB_READBACK_SMALL_GATE': '1'}, 'off': {'BB_READBACK_SMALL_GATE': '0'}}),
     'fix_vram': (
         'Small video memory mode',
-        'Keeps the game within the video memory of 4 to 8 GB cards.',
+        'Aims to keep the game within the video memory of 4 to 8 GB cards. Automatic: on for cards up to 8 GB.',
         {'on': {'BB_VRAM_LEGACY': '0'}, 'off': {'BB_VRAM_LEGACY': '1'}}),
     'fix_job_sleep': (
         'Idle game workers sleep',
-        'Frees CPU time on processors with up to 12 threads. Slower on bigger ones.',
+        'Frees CPU time on processors with up to 12 threads. Slower on bigger ones. Automatic: on for up to 12 threads.',
         {'on': {'BB_JOB_SLEEP': '1'}, 'off': {'BB_JOB_SLEEP': '0'}}),
     'fix_thread_prio': (
         'PS4 thread priorities',
-        'Gives the game threads their PS4 priorities. Can stall Uncharted 1.',
+        'Gives the game threads their PS4 priorities. Can stall Uncharted 1. '
+        'Automatic: on for Uncharted 2 and 3, off for Uncharted 1.',
         {'on': {'BB_THREAD_PRIO': '1'}, 'off': {'BB_THREAD_PRIO': '0'}}),
     'fix_cs_split': (
         'GeForce GTX 10 driver reset fix',
-        'Stops the screen freezing and the display driver resetting on these cards.',
+        'Can stop the screen freezing and the display driver resetting on these cards. '
+        'Automatic: on for these cards, off for all others.',
         {'on': {'BB_CS_SPLIT_1024': '1'}, 'off': {'BB_CS_SPLIT_1024': '0'}}),
 }
 FIX_CHOICES = [('auto', 'Automatic'), ('on', 'On'), ('off', 'Off')]
@@ -422,6 +426,11 @@ def prepare_slots(s, running=None):
     if s['start'] in placed:
         uncharted_slots.mark_played(user, s['start'], placed[s['start']])
     return placed
+
+
+def shown_slot_name(name):
+    """The name a slot goes by on screen: the stored "Main" is shown translated."""
+    return _('Main') if name == uncharted_slots.DEFAULT_NAME else name
 
 
 _SAVE_EDITOR = []
@@ -2119,7 +2128,7 @@ class Launcher:
 
     # ---- save slots ----------------------------------------------------------------------------
     def slot_name(self, slot):
-        return _('Main') if slot['name'] == uncharted_slots.DEFAULT_NAME else slot['name']
+        return shown_slot_name(slot['name'])
 
     def slot_list(self, game):
         try:
@@ -2265,7 +2274,8 @@ class Launcher:
 
         def submit(name, copy):
             try:
-                made['id'] = uncharted_slots.create_slot(user, game, name, active['id'] if copy and active else None)
+                made['id'] = uncharted_slots.create_slot(user, game, name, active['id'] if copy and active else None,
+                                                         shown=shown_slot_name)
             except (OSError, uncharted_saves.SaveError) as error:
                 return self.slot_message(error)
             return None
@@ -2280,7 +2290,7 @@ class Launcher:
 
         def submit(name, _copy):
             try:
-                uncharted_slots.rename_slot(user, game, slot['id'], name)
+                uncharted_slots.rename_slot(user, game, slot['id'], name, shown=shown_slot_name)
             except (OSError, uncharted_saves.SaveError) as error:
                 return self.slot_message(error)
             return None
@@ -2293,7 +2303,7 @@ class Launcher:
         for number in range(1, 100):
             name = base if number == 1 else f'{base} {number}'
             try:
-                uncharted_slots.duplicate_slot(user, game, slot['id'], name)
+                uncharted_slots.duplicate_slot(user, game, slot['id'], name, shown=shown_slot_name)
                 break
             except uncharted_saves.SaveError as error:
                 if getattr(error, 'code', '') != 'name-taken':
@@ -2311,7 +2321,9 @@ class Launcher:
         user = saves_user_dir(s)
         try:
             made = uncharted_slots.delete_slot(user, game, slot['id'], self.active_slot(game, self.slot_list(game)))
-            uncharted_saves.prune(uncharted_saves.backup_dir(user), backup_keep(s), kind='before-delete')
+            # these backups are the only copy of the slot: not counted in "backups to keep"
+            uncharted_saves.prune(uncharted_saves.backup_dir(user), uncharted_saves.DELETE_BACKUPS_KEEP,
+                                  kind='before-delete')
             if made:
                 self.status.configure(text=_('Backup created: {}').format(made.name), fg=MUTED)
         except (OSError, uncharted_saves.SaveError) as error:
@@ -2385,8 +2397,11 @@ class Launcher:
         game = self.save_game_name('all' if manifest.get('format') == uncharted_saves.OLD_FORMAT
                                    else manifest.get('game'))
         created = str(manifest.get('created', '')).replace('T', ' ')
-        if not self.messagebox.askyesno(
-                NAME, _('Restore {}? The current saves of this game are backed up first.').format(f'{game} ({created})')):
+        replaced = self.restore_replaces(manifest)
+        question = _('Restore {}? The current saves of this game are backed up first.').format(f'{game} ({created})')
+        if replaced:
+            question += ' ' + _('The save in these slots is replaced: {}.').format(replaced)
+        if not self.messagebox.askyesno(NAME, question):
             return
         s = self.current()
         user = saves_user_dir(s)
@@ -2399,7 +2414,7 @@ class Launcher:
             self.slots_changed()
             return
         try:
-            _manifest, before = uncharted_saves.restore_backup(
+            done, before = uncharted_saves.restore_backup(
                 user, path, backup_keep(s), self.save_running, expected or None, info)
         except (OSError, uncharted_saves.SaveError) as error:
             self.messagebox.showerror(NAME, _('Could not restore the backup: {}').format(error))
@@ -2408,8 +2423,27 @@ class Launcher:
         for _game, error in uncharted_slots.store_back_all(user).items():
             self.messagebox.showerror(NAME, _('Could not store the save in its slot: {}').format(error))
         self.slots_changed()
-        self.messagebox.showinfo(NAME, _('Saves restored. The previous saves are in {}.').format(before.name)
-                                 if before else _('Saves restored.'))
+        text = _('Saves restored. The previous saves are in {}.').format(before.name) if before             else _('Saves restored.')
+        renamed = ', '.join(f"{item['name']}" for item in done.get('slots_renamed', []))
+        if renamed:
+            text += ' ' + _('Slots restored under a new name: {}.').format(renamed)
+        unchanged = ', '.join(shown_slot_name(name) for name in done.get('slots_unchanged', []))
+        if unchanged:
+            text += ' ' + _('Slots already there, left as they are: {}.').format(unchanged)
+        self.messagebox.showinfo(NAME, text)
+
+    def restore_replaces(self, manifest):
+        """The slots whose save a restore of this backup replaces, as text ("Drake's Fortune: Main"):
+        the active slot of every game the backup covers."""
+        scope = 'all' if manifest.get('format') == uncharted_saves.OLD_FORMAT else manifest.get('game')
+        names = []
+        for key, title, _subtitle, _exe in GAMES:
+            if scope in (key, 'all'):
+                slots = self.slot_list(key)
+                active = next((x for x in slots if x['id'] == self.active_slot(key, slots)), None)
+                if active:
+                    names.append(f'{title}: {self.slot_name(active)}')
+        return ', '.join(names)
 
     def delete_save_backup(self, backup):
         if not self.messagebox.askyesno(NAME, _('Delete the backup {}? This cannot be undone.').format(backup['name'])):

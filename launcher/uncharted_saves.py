@@ -16,6 +16,7 @@ Design after Canneli's launcher backup (a9dfae6): ZIP with a manifest, checked p
 """
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -40,6 +41,8 @@ NAME_RE = re.compile(r'^[A-Za-z0-9_][A-Za-z0-9_.\-]{0,63}$')
 MAX_TOTAL = 1 << 30          # uncompressed bytes a backup may hold (saves are a few MB)
 MAX_FILES = 20000
 STAMP = '%Y%m%d-%H%M%S'
+DELETE_BACKUPS_KEEP = 50     # backups made before deleting a slot: the only copy of that slot, so many
+log = logging.getLogger('uncharted.saves')
 
 
 class SaveError(Exception):
@@ -269,7 +272,11 @@ def auto_backup(user_dir, keep=10, game=None, now=None):
 
 
 def prune(dest, keep, kind='auto'):
-    """Deletes all but the newest `keep` backups of `kind`; returns the deleted paths."""
+    """Deletes all but the newest `keep` backups of `kind`; returns the deleted paths. The backups made
+    before deleting a slot are the only copy of that slot: the "backups to keep" setting does not apply
+    to them, only the generous DELETE_BACKUPS_KEEP does."""
+    if kind == 'before-delete':
+        keep = max(int(keep), DELETE_BACKUPS_KEEP)
     old = [b for b in list_backups(dest) if b['kind'] == kind][max(int(keep), 1):]
     for backup in old:
         try:
@@ -477,7 +484,10 @@ def restore_backup(user_dir, zip_path, keep=10, game_running=None, expected_titl
     """Restores a backup over the saves of its game; returns (manifest, path of the backup made first).
     Save folders of that game in the backup's title folders that the backup lacks are moved away too,
     so the game finds exactly the backed-up state. Trophy logs are merged. Save slots of the backup
-    that no longer exist come back (a deleted slot); existing slots are never overwritten."""
+    that no longer exist come back (a deleted slot); an existing slot is never overwritten: one with
+    other content comes back as a new slot named "<name> (restored)". The manifest returned lists them
+    under 'slots_renamed' ([{'game', 'id', 'name', 'was'}]) and 'slots_unchanged' (names of slots
+    already there with the same content)."""
     if game_running and game_running():
         raise SaveError('close the game first')
     manifest = validate_backup(zip_path, expected_titles)
@@ -510,11 +520,16 @@ def restore_backup(user_dir, zip_path, keep=10, game_running=None, expected_titl
             if getattr(error, 'kept', False):
                 aside = None  # keep the old saves where they are for a manual fix
             raise
+        import uncharted_slots  # here: uncharted_slots imports this module
+        manifest['slots_renamed'], manifest['slots_unchanged'] = [], []
         for unit in slots:
-            live = user_dir.joinpath(*unit.split('/'))
-            if not live.exists():
-                live.parent.mkdir(parents=True, exist_ok=True)
-                rename(stage.joinpath(*unit.split('/')), live)
+            _folder, slot_game, slot_id = unit.split('/')
+            outcome, new_id, name = uncharted_slots.restore_slot(
+                user_dir, slot_game, slot_id, stage.joinpath(*unit.split('/')), rename)
+            if outcome == 'renamed':
+                manifest['slots_renamed'].append({'game': slot_game, 'id': new_id, 'name': name, 'was': slot_id})
+            elif outcome == 'unchanged':
+                manifest['slots_unchanged'].append(name)
         with zipfile.ZipFile(zip_path) as archive:
             for unit in trophies:
                 live = user_dir.joinpath(*unit.split('/'))
@@ -552,13 +567,19 @@ def delete_backup(path, dest):
 
 
 def game_process_running():
-    """True while any port game process (bb-probe.exe) runs on this PC (conservative: any copy)."""
+    """True while any port game process (bb-probe.exe) runs on this PC (conservative: any copy, and
+    also when tasklist fails, so that nothing is swapped or restored while the answer is unknown)."""
     if os.name != 'nt':
         return False
     try:
-        out = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq bb-probe.exe', '/NH', '/FO', 'CSV'],
-                             capture_output=True, text=True, timeout=10,
-                             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)).stdout
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return 'bb-probe.exe' in out.lower()
+        done = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq bb-probe.exe', '/NH', '/FO', 'CSV'],
+                              capture_output=True, text=True, timeout=10,
+                              creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    except (OSError, subprocess.SubprocessError) as error:
+        log.warning('tasklist could not run (%s): taking it that a game runs', error)
+        return True  # unknown: refuse swaps and restores rather than touch the saves of a running game
+    if done.returncode != 0:
+        log.warning('tasklist failed (exit %s: %s): taking it that a game runs', done.returncode,
+                    (done.stderr or done.stdout or '').strip()[:200])
+        return True
+    return 'bb-probe.exe' in (done.stdout or '').lower()
