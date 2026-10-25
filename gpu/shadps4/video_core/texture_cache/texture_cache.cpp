@@ -299,7 +299,15 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         new_info.resources = std::max(requested_info.resources, cache_image.info.resources);
         new_info.UpdateSize();
         PadDepthLayers(new_info);
+        // bbport: the copy below overwrites all of an image of the same size and resources, so it
+        // may take the Vulkan image of one freed here before (UniqueImage::Recycle).
+        std::optional<UniqueImage::ReuseScope> reuse;
+        if (new_info.size == cache_image.info.size &&
+            new_info.resources == cache_image.info.resources) {
+            reuse.emplace();
+        }
         const auto new_image_id = slot_images.insert(instance, runtime, slot_image_views, new_info);
+        reuse.reset();
         RegisterImage(new_image_id);
 
         // insert() may have grown slot_images and moved every image: `cache_image` would then
@@ -330,6 +338,7 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         runtime.CopyColorAndDepth(&old_image, &new_image);
 
         // Free the cache image.
+        old_image.recycle_on_delete = true;
         FreeImage(cache_image_id);
         return new_image_id;
     }
@@ -1509,6 +1518,9 @@ void TextureCache::DeleteImage(ImageId image_id) {
         for (auto& backing : image.backing_images) {
             for (const ImageViewId image_view_id : backing.image_view_ids) {
                 slot_image_views.erase(image_view_id);
+            }
+            if (image.recycle_on_delete) {
+                backing.image.Recycle();
             }
         }
         slot_images.erase(image_id);
