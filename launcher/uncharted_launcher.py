@@ -219,7 +219,7 @@ RESERVED_KEYS = {'Insert': 'Insert is reserved for the in-game settings menu.',
                  'Alt_L': 'Left Alt is reserved for freeing the mouse cursor.'}
 
 APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'start': 'u1', 'language': '1', 'ui_language': '', 'player_name': '',
-                'fullscreen': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False,
+                'fullscreen': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'skip_intro': False,
                 'window_size': '1920x1080', 'render_height': '1080', 'aspect': '16:9', 'speakers': 'auto', 'scaler': 'fsr1', 'sharpening': '500',
                 'anti_aliasing': 'off', 'aa_sharpness': '0.2', 'frame_generation': 'off',
                 'frame_gen_multiplier': '2', 'extra_env': '', 'close_on_play': False,
@@ -572,6 +572,8 @@ def game_environment(s, start=None):
         env['BB_WINDOW_SIZE'] = f'{round(window[1] * shape[0] / shape[1] / 2) * 2}x{window[1]}'
     if str(s.get('speakers') or 'auto') != 'auto':
         env['BB_SPEAKERS'] = str(s['speakers'])
+    if s.get('skip_intro', False):
+        env['BB_SKIP_INTRO'] = '1'
     env['BB_FSR1'] = '1' if s.get('scaler', 'fsr1') == 'fsr1' else '0'
     sharpening = str(s.get('sharpening') or 'off')
     env['BB_RCAS'] = '0' if sharpening == 'off' else '1'
@@ -1457,6 +1459,9 @@ class Launcher:
                  _('Text and voices.'))
         name = self.ttk.Entry(f, textvariable=self.var('player_name'), width=30)
         self.row(f, _('Player name'), name)
+        self.check(f, 'skip_intro', _('Skip intro logos'),
+                   _('Starts at the title screen without the Sony, Naughty Dog and Bluepoint logos '
+                     'and their music (they cannot be skipped with a button). All three games.'))
 
     def build_display(self):
         f = self.page('display', _('Display'), '')
