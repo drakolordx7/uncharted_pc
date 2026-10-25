@@ -335,6 +335,7 @@ struct BufferCache::Landing {
     boost::container::small_vector<vk::BufferCopy, 4> copies; ///< dstOffset: in the side staging
     boost::container::small_vector<VAddr, 4> targets;         ///< guest address of each copy
     std::vector<u8> snapshot; ///< BB_SC_LOG: the guest's bytes at the targets when it was deferred
+    u64 writer{};             ///< small results: the compute shader that wrote them (learning)
 };
 
 namespace {
@@ -345,9 +346,51 @@ struct LandStats {
     // pending (the landing then overwrites newer guest data), and how many differ from what the
     // guest held at the landing (what it would have read stale).
     std::atomic<u64> small_landed{}, small_guest_changed{}, small_stale{};
+    // Small results deferred with the labels waiting for them (gated) and without.
+    std::atomic<u64> small_gated{}, small_open{};
     std::atomic<s64> window{};
 };
 LandStats land_stats;
+
+/// Small GPU results by the compute shader that wrote them: how often they landed and how often
+/// the guest had rewritten the bytes since the last landing there (with a value that is not the
+/// GPU's). A shader whose results the guest keeps rewriting is learned: the guest resets or
+/// refills them for the next pass and reads the GPU's answer after the end-of-pipe label, so
+/// reading before the landing gives it its own value back (U3 characters sinking: #601, #590).
+struct SmallWriters {
+    struct Entry {
+        u32 landed{}, rewritten{};
+        bool learned{};
+    };
+    std::mutex mutex;
+    std::unordered_map<u64, Entry> by_writer;
+    std::atomic<u32> learned{}; ///< fast path: nothing learned yet
+};
+SmallWriters small_writers;
+
+/// Learned after this many rewrites, when at least half of its landings were rewritten.
+constexpr u32 SmallLearnRewrites = 3;
+
+void NoteSmallLanding(u64 writer, VAddr target, u64 size, bool rewritten) {
+    std::scoped_lock lk{small_writers.mutex};
+    auto& e = small_writers.by_writer[writer];
+    if (e.learned) {
+        return;
+    }
+    e.landed = std::min<u32>(e.landed + 1, 1u << 30);
+    e.rewritten += rewritten;
+    if (e.rewritten >= SmallLearnRewrites && e.rewritten * 2 >= e.landed) {
+        e.learned = true;
+        small_writers.learned.fetch_add(1, std::memory_order_release);
+        // Rare (once per shader and run), so it is printed without BB_SC_LOG.
+        std::printf("SMALLGATE: learned shader %016llx: the guest rewrote its result at %#llx "
+                    "(%llu bytes) between landings %u of %u times; its results now land before "
+                    "the end-of-pipe label shows\n",
+                    static_cast<unsigned long long>(writer), static_cast<unsigned long long>(target),
+                    static_cast<unsigned long long>(size), e.rewritten, e.landed);
+        std::fflush(stdout);
+    }
+}
 
 bool LandLogEnabled() {
     static const bool on = std::getenv("BB_SC_LOG") != nullptr;
@@ -384,17 +427,29 @@ void LandStatsNote() {
     std::printf("SCLAND 10s: deferred %llu, landed %llu (worker waited %.1f ms for the GPU, %.1f ms "
                 "copying), gated labels: %llu queued (longest queue %llu), %llu inline; blocking "
                 "waits %llu (%.1f ms); small: %llu landed, %llu rewritten by the guest meanwhile, "
-                "%llu differ from the guest copy\n",
+                "%llu differ from the guest copy; small deferred: %llu gated, %llu not (%u shaders "
+                "learned)\n",
                 take(land_stats.deferred), take(land_stats.landed),
                 take(land_stats.gpu_wait_ns) / 1e6, take(land_stats.land_ns) / 1e6,
                 take(land_stats.gate_queued), take(land_stats.queue_max),
                 take(land_stats.gate_inline), take(land_stats.waits), take(land_stats.wait_ns) / 1e6,
                 take(land_stats.small_landed), take(land_stats.small_guest_changed),
-                take(land_stats.small_stale));
+                take(land_stats.small_stale), take(land_stats.small_gated),
+                take(land_stats.small_open), small_writers.learned.load(std::memory_order_relaxed));
 }
 } // namespace
 
-bool BufferCache::DeferGuestCopy(VAddr src, VAddr dst, u64 size, bool guest_part, bool gated) {
+bool BufferCache::SmallWriterLearned(u64 writer) const {
+    if (small_writers.learned.load(std::memory_order_acquire) == 0) {
+        return false;
+    }
+    std::scoped_lock lk{small_writers.mutex};
+    const auto it = small_writers.by_writer.find(writer);
+    return it != small_writers.by_writer.end() && it->second.learned;
+}
+
+bool BufferCache::DeferGuestCopy(VAddr src, VAddr dst, u64 size, bool guest_part, bool gated,
+                                 u64 writer) {
     static const bool enabled = [] {
         const char* env = std::getenv("BB_SCALAR_COPY64_DEFER");
         return env && env[0] == '1'; // run.py: on for Uncharted 2
@@ -444,7 +499,8 @@ bool BufferCache::DeferGuestCopy(VAddr src, VAddr dst, u64 size, bool guest_part
         return false; // page flags and written ranges disagree: nothing says when it lands
     }
     landing->tick = tick;
-    if (!guest_part && (LandLogEnabled() || LandingGuardEnabled())) {
+    landing->writer = guest_part ? 0 : writer;
+    if (!guest_part && (LandLogEnabled() || LandingGuardEnabled() || landing->writer != 0)) {
         // What the guest holds at the targets now, to see at the landing whether it rewrote them
         // meanwhile (BB_SC_LOG counts it, BB_LANDING_GUARD acts on it).
         for (size_t i = 0; i < landing->copies.size(); ++i) {
@@ -479,6 +535,10 @@ bool BufferCache::DeferGuestCopy(VAddr src, VAddr dst, u64 size, bool guest_part
     }
     landing_cv.notify_one();
     land_stats.deferred.fetch_add(1, std::memory_order_relaxed);
+    if (!guest_part) {
+        (gated ? land_stats.small_gated : land_stats.small_open)
+            .fetch_add(1, std::memory_order_relaxed);
+    }
     LandStatsNote();
     return true;
 }
@@ -612,10 +672,16 @@ bool BufferCache::ExecuteLanding(Landing& landing) {
                     const bool known = it != last_landed.end() && it->second.size() == size;
                     const u8* expected = known ? it->second.data() : landing.snapshot.data() + at;
                     const bool rewritten = std::memcmp(now.data(), expected, size) != 0;
+                    const bool stale = std::memcmp(now.data(), gpu, size) != 0;
                     land_stats.small_landed.fetch_add(1, std::memory_order_relaxed);
                     land_stats.small_guest_changed.fetch_add(rewritten, std::memory_order_relaxed);
-                    land_stats.small_stale.fetch_add(std::memcmp(now.data(), gpu, size) != 0,
-                                                     std::memory_order_relaxed);
+                    land_stats.small_stale.fetch_add(stale, std::memory_order_relaxed);
+                    if (landing.writer != 0) {
+                        // Rewritten with something other than the GPU's value: not one of the
+                        // port's own read backs of the same result.
+                        NoteSmallLanding(landing.writer, landing.targets[i], size,
+                                         rewritten && stale);
+                    }
                     if (rewritten && LandingGuardEnabled()) {
                         skip[i] = true;
                         last_landed[landing.targets[i]] = now; // the guest's value is the baseline now

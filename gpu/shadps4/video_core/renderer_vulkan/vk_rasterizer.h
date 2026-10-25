@@ -131,8 +131,14 @@ public:
     /// bbport: small buffers (up to 64 bytes) a compute shader writes are read by the game's CPU
     /// code (the auto-exposure multiplier of Uncharted, among others). The dispatch notes them and
     /// the next end-of-pipe event copies them to guest memory (BB_READBACK_SMALL_BUFFERS=0: off).
-    void NoteSmallWrittenBuffers(const Shader::Info& stage);
+    /// True when the shader wrote a small result whose landing holds back the label (gated):
+    /// the dispatch is then submitted at once, so that the landing waits for it alone and not
+    /// for the rest of the frame recorded after it.
+    bool NoteSmallWrittenBuffers(const Shader::Info& stage);
     void ReadBackSmallWrittenBuffers();
+    /// Whether the small results of compute shader `writer` are gated in the default mode
+    /// (BB_READBACK_SMALL_GATE unset); `why` says which list it is on.
+    bool SmallWriterGated(u64 writer, const char** why = nullptr) const;
     /// Before a guest-visible write: fences deferred earlier are written first.
     void WaitDeferredSignals() {
         scheduler.WaitDeferredSignals();
@@ -350,7 +356,12 @@ private:
     VideoCore::BufferCache buffer_cache;
     VideoCore::TextureCache texture_cache;
     std::mutex small_written_mutex;
-    std::vector<std::pair<VAddr, u32>> small_written_buffers;
+    struct SmallWritten {
+        VAddr address;
+        u32 size;
+        u64 writer; ///< pgm_hash of the compute shader that wrote it last
+    };
+    std::vector<SmallWritten> small_written_buffers;
     AmdGpu::Liverpool* liverpool;
     Core::MemoryManager* memory;
     boost::icl::interval_set<VAddr> mapped_ranges;

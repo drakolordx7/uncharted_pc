@@ -123,7 +123,16 @@ public:
     /// gated false: the labels the guest sees do not wait for this landing (it lands once the GPU
     /// work is done, in order with the others). guest_part false: only the GPU-written bytes of [src, src + size) land (dst == src, no
     /// guest copy): a GPU result the guest reads in place (Rasterizer::ReadBackSmallWrittenBuffers).
-    bool DeferGuestCopy(VAddr src, VAddr dst, u64 size, bool guest_part = true, bool gated = true);
+    /// writer (guest_part false, nonzero): the compute shader that wrote the result. Its landings
+    /// then check whether the guest rewrote the bytes between landings, and a shader whose results
+    /// the guest keeps rewriting is learned (SmallWriterLearned).
+    bool DeferGuestCopy(VAddr src, VAddr dst, u64 size, bool guest_part = true, bool gated = true,
+                        u64 writer = 0);
+    /// bbport: whether the guest was seen rewriting the small results of compute shader `writer`
+    /// between their landings (it resets or refills them for the next pass and reads the GPU's
+    /// answer after the end-of-pipe label): those results must land before the label shows
+    /// (Rasterizer::ReadBackSmallWrittenBuffers gates them). Any thread.
+    bool SmallWriterLearned(u64 writer) const;
     u64 PendingLanding() const;
     bool LandingGateActive() const;
     void WaitLanding(u64 seq);
