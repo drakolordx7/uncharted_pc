@@ -267,6 +267,7 @@ s32 PS4_SYSV_ABI sceVideoOutGetFlipStatus(s32 handle, FlipStatus* status) {
         std::unique_lock lock{port->port_mutex};
         *status = port->flip_status;
     }
+    NoteGuestStatusRead(false, status->count, status->process_time);
 
     LOG_TRACE(Lib_VideoOut,
               "count = {}, processTime = {}, tsc = {}, submitTsc = {}, flipArg = {}, gcQueueNum = "
@@ -291,6 +292,7 @@ s32 PS4_SYSV_ABI sceVideoOutGetVblankStatus(int handle, SceVideoOutVblankStatus*
 
     std::unique_lock lock{port->vo_mutex};
     *status = port->vblank_status;
+    NoteGuestStatusRead(true, status->count, status->process_time);
     return ORBIS_OK;
 }
 

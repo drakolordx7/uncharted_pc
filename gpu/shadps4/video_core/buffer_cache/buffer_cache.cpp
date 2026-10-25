@@ -323,6 +323,8 @@ bool BufferCache::DownloadOnSideQueue(VAddr page, u64 length) {
     return true;
 }
 
+extern "C" int runtime_memory_read_backing(uintptr_t address, void* out, uint64_t size);
+
 // bbport: deferred raycaster copies (see landing_gate.h). The guest part of the copy is made at
 // the dispatch; the GPU-written bytes of the source land in the destination on a worker thread
 // once the GPU work that wrote them has completed, in registration order.
@@ -332,18 +334,34 @@ struct BufferCache::Landing {
     vk::Buffer buffer;
     boost::container::small_vector<vk::BufferCopy, 4> copies; ///< dstOffset: in the side staging
     boost::container::small_vector<VAddr, 4> targets;         ///< guest address of each copy
+    std::vector<u8> snapshot; ///< BB_SC_LOG: the guest's bytes at the targets when it was deferred
 };
 
 namespace {
 struct LandStats {
     std::atomic<u64> deferred{}, landed{}, gate_queued{}, gate_inline{}, waits{};
     std::atomic<u64> gpu_wait_ns{}, land_ns{}, wait_ns{}, queue_max{};
+    // BB_SC_LOG: ranges landed without a guest part, how many the guest rewrote while they were
+    // pending (the landing then overwrites newer guest data), and how many differ from what the
+    // guest held at the landing (what it would have read stale).
+    std::atomic<u64> small_landed{}, small_guest_changed{}, small_stale{};
     std::atomic<s64> window{};
 };
 LandStats land_stats;
 
 bool LandLogEnabled() {
     static const bool on = std::getenv("BB_SC_LOG") != nullptr;
+    return on;
+}
+
+/// BB_LANDING_GUARD=1 (opt-in): a small GPU result (guest_part false) does not land over bytes
+/// the guest has rewritten since the last landing there (or since it was deferred): that result
+/// is older than what the guest holds, and landing it late hands the guest an older value back.
+bool LandingGuardEnabled() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_LANDING_GUARD");
+        return env && env[0] == '1';
+    }();
     return on;
 }
 
@@ -365,11 +383,14 @@ void LandStatsNote() {
     auto take = [](std::atomic<u64>& v) { return static_cast<unsigned long long>(v.exchange(0)); };
     std::printf("SCLAND 10s: deferred %llu, landed %llu (worker waited %.1f ms for the GPU, %.1f ms "
                 "copying), gated labels: %llu queued (longest queue %llu), %llu inline; blocking "
-                "waits %llu (%.1f ms)\n",
+                "waits %llu (%.1f ms); small: %llu landed, %llu rewritten by the guest meanwhile, "
+                "%llu differ from the guest copy\n",
                 take(land_stats.deferred), take(land_stats.landed),
                 take(land_stats.gpu_wait_ns) / 1e6, take(land_stats.land_ns) / 1e6,
                 take(land_stats.gate_queued), take(land_stats.queue_max),
-                take(land_stats.gate_inline), take(land_stats.waits), take(land_stats.wait_ns) / 1e6);
+                take(land_stats.gate_inline), take(land_stats.waits), take(land_stats.wait_ns) / 1e6,
+                take(land_stats.small_landed), take(land_stats.small_guest_changed),
+                take(land_stats.small_stale));
 }
 } // namespace
 
@@ -423,6 +444,19 @@ bool BufferCache::DeferGuestCopy(VAddr src, VAddr dst, u64 size, bool guest_part
         return false; // page flags and written ranges disagree: nothing says when it lands
     }
     landing->tick = tick;
+    if (!guest_part && (LandLogEnabled() || LandingGuardEnabled())) {
+        // What the guest holds at the targets now, to see at the landing whether it rewrote them
+        // meanwhile (BB_SC_LOG counts it, BB_LANDING_GUARD acts on it).
+        for (size_t i = 0; i < landing->copies.size(); ++i) {
+            const size_t at = landing->snapshot.size();
+            landing->snapshot.resize(at + landing->copies[i].size);
+            if (!runtime_memory_read_backing(landing->targets[i], landing->snapshot.data() + at,
+                                             landing->copies[i].size)) {
+                landing->snapshot.clear();
+                break;
+            }
+        }
+    }
     // The guest part of the copy now; the GPU-written bytes follow when they have landed.
     if (guest_part) {
         memory->TryWriteBacking(reinterpret_cast<void*>(dst), reinterpret_cast<const void*>(src), size);
@@ -499,6 +533,15 @@ bool BufferCache::ExecuteLanding(Landing& landing) {
     if (!WaitLandingTick(landing.tick)) {
         return false;
     }
+    // BB_LANDING_DELAY_MS=N (diagnosis): the bytes land N ms after the GPU is done, as when the GPU
+    // runs behind the guest (a heavy upscaler, frame generation).
+    static const u32 landing_delay_ms = [] {
+        const char* env = std::getenv("BB_LANDING_DELAY_MS");
+        return env ? static_cast<u32>(std::strtoul(env, nullptr, 10)) : 0u;
+    }();
+    if (landing_delay_ms) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(landing_delay_ms));
+    }
     const auto t1 = std::chrono::steady_clock::now();
     u64 total = 0;
     for (const auto& copy : landing.copies) {
@@ -553,7 +596,40 @@ bool BufferCache::ExecuteLanding(Landing& landing) {
         }
         Vulkan::Check(side.device.resetFences(*side.fence));
         side.staging.Invalidate(0, total);
+        // Small results (snapshot taken): did the guest rewrite the bytes since the last landing
+        // there, or since this one was deferred? Only the landing thread comes here.
+        static std::unordered_map<VAddr, std::vector<u8>> last_landed;
+        boost::container::small_vector<bool, 4> skip(landing.copies.size(), false);
+        if (!landing.snapshot.empty()) {
+            size_t at = 0;
+            std::vector<u8> now;
+            for (size_t i = 0; i < landing.copies.size(); ++i) {
+                const u64 size = landing.copies[i].size;
+                const u8* gpu = side.staging.mapped_data.data() + landing.copies[i].dstOffset;
+                now.resize(size);
+                if (runtime_memory_read_backing(landing.targets[i], now.data(), size)) {
+                    auto it = last_landed.find(landing.targets[i]);
+                    const bool known = it != last_landed.end() && it->second.size() == size;
+                    const u8* expected = known ? it->second.data() : landing.snapshot.data() + at;
+                    const bool rewritten = std::memcmp(now.data(), expected, size) != 0;
+                    land_stats.small_landed.fetch_add(1, std::memory_order_relaxed);
+                    land_stats.small_guest_changed.fetch_add(rewritten, std::memory_order_relaxed);
+                    land_stats.small_stale.fetch_add(std::memcmp(now.data(), gpu, size) != 0,
+                                                     std::memory_order_relaxed);
+                    if (rewritten && LandingGuardEnabled()) {
+                        skip[i] = true;
+                        last_landed[landing.targets[i]] = now; // the guest's value is the baseline now
+                    } else {
+                        last_landed[landing.targets[i]].assign(gpu, gpu + size);
+                    }
+                }
+                at += size;
+            }
+        }
         for (size_t i = 0; i < landing.copies.size(); ++i) {
+            if (skip[i]) {
+                continue;
+            }
             memory->TryWriteBacking(reinterpret_cast<void*>(landing.targets[i]),
                                     side.staging.mapped_data.data() + landing.copies[i].dstOffset,
                                     landing.copies[i].size);

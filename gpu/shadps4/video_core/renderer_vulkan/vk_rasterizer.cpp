@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <set>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -1963,6 +1964,16 @@ void Rasterizer::NoteSmallWrittenBuffers(const Shader::Info& stage) {
             continue;
         }
         std::scoped_lock lk{small_written_mutex};
+        // BB_SC_LOG: which shaders write the small buffers, and where (first 40 distinct).
+        static const bool sc_log = std::getenv("BB_SC_LOG") != nullptr;
+        if (sc_log) {
+            static std::set<std::pair<u64, u64>> seen;
+            if (seen.size() < 40 && seen.emplace(stage.pgm_hash, sharp.base_address).second) {
+                std::printf("SMALLBUF: shader %016llx writes %u bytes at %#llx\n",
+                            static_cast<unsigned long long>(stage.pgm_hash), size,
+                            static_cast<unsigned long long>(sharp.base_address));
+            }
+        }
         const std::pair<VAddr, u32> range{sharp.base_address, size};
         if (small_written_buffers.size() < 16 &&
             std::ranges::find(small_written_buffers, range) == small_written_buffers.end()) {
