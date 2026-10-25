@@ -200,7 +200,7 @@ FIXES = {
     'fix_cs_split': (
         'Driver reset on GeForce GTX 10 series',
         'The game can freeze the screen and reset the display driver on these cards. '
-        'Automatic: off; turn it on if it happens to you.',
+        'Automatic: on for these cards, off for all others.',
         {'on': {'BB_CS_SPLIT_1024': '1'}, 'off': {'BB_CS_SPLIT_1024': '0'}}),
 }
 FIX_CHOICES = [('auto', 'Automatic'), ('on', 'On'), ('off', 'Off')]

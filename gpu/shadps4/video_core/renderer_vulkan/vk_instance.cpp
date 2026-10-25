@@ -17,6 +17,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_vram.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
+#include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "bbport_hostmem.h"
 
 #include <vk_mem_alloc.h>
@@ -185,6 +186,12 @@ Instance::Instance(const Frontend::WindowSystemInfo& window_info, s32 physical_d
     format_properties = GetFormatProperties(physical_device);
     properties = physical_device.getProperties();
     memory_properties = physical_device.getMemoryProperties();
+    // bbport: GeForce GTX 10 series (Pascal, compute capability 6.x: GP100 0x15f0-0x15ff, GP10x
+    // 0x1b00-0x1d7f; Volta starts at 0x1d81) resets the display driver on the 1024-thread x 64
+    // register compute group of Uncharted (#400, #600): those cards run it as 2 x 512.
+    SetAutomaticWorkgroupSplit(properties.vendorID == 0x10de &&
+                               ((properties.deviceID >= 0x15f0 && properties.deviceID <= 0x15ff) ||
+                                (properties.deviceID >= 0x1b00 && properties.deviceID <= 0x1d7f)));
     CollectDeviceParameters();
     ASSERT_MSG(properties.apiVersion >= TargetVulkanApiVersion,
                "Vulkan {}.{} is required, but only {}.{} is supported by device!",

@@ -21,12 +21,19 @@ vk::ShaderModule CompileSPV(std::span<const u32> code, vk::Device device);
 /**
  * @brief bbport: the group size BB_CS_SPLIT_1024 asks a 1024-thread compute shader to run with.
  *
- * The variable is BB_CS_SPLIT_1024: unset or 0 leaves the shader alone (the split is off by
- * default), any non-zero value runs it as 512-thread groups.
+ * The variable is BB_CS_SPLIT_1024: 0 leaves the shader alone, any non-zero value runs it as
+ * 512-thread groups; unset, the split is on only for NVIDIA Pascal GPUs.
  *
  * @return The group size, or 0 when the split is disabled.
  */
 u32 SplitWorkgroupTarget();
+
+/**
+ * @brief bbport: turns the split on by itself for the GPU in use (called once by the Vulkan
+ * instance: NVIDIA Pascal, GeForce GTX 10 series, where a 1024-thread group of 64 registers per
+ * thread resets the display driver). BB_CS_SPLIT_1024 set to 0 or 1 overrides it.
+ */
+void SetAutomaticWorkgroupSplit(bool enabled);
 
 /**
  * @brief bbport: rewrites a 1024-thread compute shader to run `threads` threads per group.
