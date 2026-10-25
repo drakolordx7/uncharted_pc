@@ -36,7 +36,9 @@ Red-EyeX32 and aerosoul94's tlou_save_data_decrypter. Mevlock's "Unlock all chap
 save instead, so the unlocks stay without the toggle.
 
 Library use (the launcher's Saves page):
-  describe(path) -> dict            path: user dir, title folder, SAVEDATA dir or USR-DATA file
+  describe(path) -> str             one short line per save; path: user dir, title folder, SAVEDATA dir or file
+  details(path) -> dict             everything decoded, per save
+  open_editor(save_dir, game=, parent=)  modal Tk dialog with the edits that apply to that save
   unlock_chapters(path, dry_run=False, difficulty=None) -> list of changes
   unlock_difficulties(path, dry_run=False) -> list of changes
   unlock_rewards(path, dry_run=False) -> list of changes (Uncharted 1)
@@ -393,7 +395,7 @@ def _describe_one(s):
     return out
 
 
-def describe(path, game=None):
+def details(path, game=None):
     """Everything decodable about the saves under path, per file, keyed by slot folder name."""
     result = {'path': str(path), 'saves': {}, 'errors': []}
     for s in _open(path, game, full=False):
@@ -402,6 +404,44 @@ def describe(path, game=None):
             continue
         result['saves'][s.dir if s.dir not in result['saves'] else str(s.path)] = _describe_one(s)
     return result
+
+
+def _yes_no(flag):
+    return 'unlocked' if flag else 'locked'
+
+
+def summary_lines(info):
+    """Short plain lines for one save's details (the launcher list and the edit dialog)."""
+    lines = []
+    if info['kind'] == 'game':
+        if info.get('difficulty'):
+            lines.append('Difficulty: %s' % info['difficulty'])
+        if info.get('treasures_total'):
+            lines.append('Treasures: %d of %d' % (info['treasures_found'], info['treasures_total']))
+        lines.append('Chapter Select: %s' % ('all chapters' if info.get('all_chapters_selectable') else 'chapters played so far'))
+    elif info['kind'] == 'profile':
+        done = info.get('completed_difficulties')
+        if done is not None:
+            lines.append('Finished on: %s' % (', '.join(done) if done else 'none yet'))
+        if info.get('crushing_unlocked') is not None:
+            lines.append('Crushing: %s' % _yes_no(info['crushing_unlocked']))
+        if 'brutal_unlocked' in info:
+            lines.append('Brutal: %s' % _yes_no(info['brutal_unlocked']))
+        if 'rewards_total' in info:
+            lines.append('Rewards: %d of %d unlocked' % (info['rewards_unlocked'], info['rewards_total']))
+    elif info['kind'] == 'shared':
+        lines.append('Collection settings')
+    return lines
+
+
+def describe(path, game=None):
+    """One line per save under path (one line for a SAVEDATA folder), e.g.
+    "Difficulty: Easy · Treasures: 0 of 61 · Chapter Select: chapters played so far"."""
+    r = details(path, game)
+    out = [' · '.join(summary_lines(info)) for info in r['saves'].values()]
+    if not out and r['errors']:
+        return 'Cannot read this save'
+    return chr(10).join(x for x in out if x)
 
 
 # ---------------------------------------------------------------- edits
@@ -496,6 +536,117 @@ def unlock_rewards(path, dry_run=False, game=None):
     return _commit(saves, dry_run)
 
 
+# ---------------------------------------------------------------- edit dialog (launcher Saves page)
+
+DIALOG_COLORS = {'bg': '#17181b', 'panel': '#202226', 'text': '#f3efe6', 'muted': '#8e8a82', 'accent': '#e7c36a',
+                 'ok': '#9fd09a', 'error': '#e88b7d'}
+
+
+def actions_for(save_dir):
+    """[(label, confirm question, function(path, dry_run))] for the edits that apply to this save."""
+    s = Save(find_saves(save_dir)[0], full=False)
+    acts = []
+    if s.kind == 'game':
+        acts.append(('Unlock all chapters', 'Make every chapter selectable in Chapter Select?',
+                     lambda p, dry: unlock_chapters(p, dry)))
+    elif s.kind == 'profile':
+        acts.append(('Unlock Crushing and Brutal', 'Unlock the Crushing and Brutal difficulties?',
+                     lambda p, dry: unlock_difficulties(p, dry)))
+        if s.game == 'u1':
+            acts.append(('Unlock all rewards', 'Unlock all skins, weapons, render modes, art and cheats?',
+                         lambda p, dry: unlock_rewards(p, dry)))
+    if len(acts) > 1:
+        fns = [a[2] for a in acts]
+        acts.append(('Unlock everything', 'Unlock everything listed above?',
+                     lambda p, dry: [c for f in fns for c in f(p, dry)]))
+    return s, acts
+
+
+def open_editor(save_dir, game=None, parent=None, wait=True):
+    """Modal dialog on parent (a Tk window) for one SAVEDATA folder: what the save holds and a button per
+    edit, each asking first. Returns when the dialog is closed (wait=False: returns the dialog at once;
+    dialog.run(label, confirm=False, dry_run=True) runs an action without asking)."""
+    import tkinter as tk
+    from tkinter import messagebox
+    save, acts = actions_for(save_dir)
+    game = save.game or game
+    c = dict(DIALOG_COLORS)
+    try:
+        c['bg'] = parent.cget('bg') if parent is not None and parent.cget('bg').startswith('#') else c['bg']
+    except Exception:
+        pass
+    win = tk.Toplevel(parent)
+    kind = {'game': 'game save', 'profile': 'profile', 'shared': 'shared settings'}.get(save.kind, 'save')
+    win.title('Edit %s - %s' % (kind, GAME_NAMES.get(game, 'Uncharted')))
+    win.configure(bg=c['bg'], padx=18, pady=14)
+    win.resizable(False, False)
+    if parent is not None:
+        win.transient(parent)
+    tk.Label(win, text='%s · %s' % (GAME_NAMES.get(game, 'Uncharted'), kind), bg=c['bg'], fg=c['text'],
+             font=('Segoe UI', 12, 'bold'), anchor='w').pack(fill='x')
+    info = tk.Label(win, bg=c['bg'], fg=c['muted'], font=('Segoe UI', 10), anchor='w', justify='left')
+    info.pack(fill='x', pady=(4, 10))
+    result = tk.Label(win, text='', bg=c['bg'], fg=c['muted'], font=('Segoe UI', 10), anchor='w', justify='left',
+                      wraplength=420)
+
+    def refresh():
+        try:
+            r = details(save_dir)
+            one = next(iter(r['saves'].values()), None)
+            lines = []
+            if one:
+                if one.get('list_subtitle') and one['kind'] == 'game':
+                    lines.append(one['list_subtitle'])
+                lines += summary_lines(one)
+            info.configure(text='\n'.join(lines) or 'Cannot read this save')
+        except Exception as e:  # keep the dialog usable
+            info.configure(text='Cannot read this save: %s' % e)
+
+    def run(label, confirm=True, dry_run=False):
+        for name, question, fn in acts:
+            if name != label:
+                continue
+            if confirm and not messagebox.askyesno(label, question + '\n\nA backup is made first.', parent=win):
+                return None
+            try:
+                changes = fn(save_dir, dry_run)
+            except SaveError as e:
+                result.configure(text='Could not change the save: %s' % e, fg=c['error'])
+                return None
+            if dry_run:
+                text = 'Would change %d value(s).' % len(changes) if changes else 'Nothing to change.'
+            else:
+                text = 'Done.' if changes else 'Already unlocked, nothing to change.'
+            result.configure(text='%s: %s' % (label, text), fg=c['ok'] if changes else c['muted'])
+            refresh()
+            return changes
+        raise KeyError(label)
+
+    for name, _question, _fn in acts:
+        tk.Button(win, text=name, command=lambda n=name: run(n), bg=c['panel'], fg=c['text'],
+                  activebackground=c['accent'], activeforeground='#000000', relief='flat', bd=0, padx=14, pady=6,
+                  font=('Segoe UI', 10), cursor='hand2').pack(fill='x', pady=3)
+    if not acts:
+        tk.Label(win, text='Nothing to edit in this save.', bg=c['bg'], fg=c['muted'], font=('Segoe UI', 10),
+                 anchor='w').pack(fill='x')
+    result.pack(fill='x', pady=(10, 4))
+    tk.Button(win, text='Close', command=win.destroy, bg=c['bg'], fg=c['muted'], activebackground=c['panel'],
+              activeforeground=c['text'], relief='flat', bd=0, padx=14, pady=4, font=('Segoe UI', 10),
+              cursor='hand2').pack(anchor='e', pady=(6, 0))
+    win.bind('<Escape>', lambda _e: win.destroy())
+    refresh()
+    win.run = run
+    win.actions = [a[0] for a in acts]
+    if wait:
+        try:
+            win.grab_set()
+        except Exception:
+            pass
+        win.focus_set()
+        win.wait_window()
+    return win
+
+
 # ---------------------------------------------------------------- CLI
 
 def main(argv=None):
@@ -510,7 +661,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
     try:
         if a.command == 'describe':
-            r = describe(a.path, a.game)
+            r = details(a.path, a.game)
             if a.json:
                 print(json.dumps(r, indent=2))
             else:

@@ -66,7 +66,7 @@ class ParseTests(unittest.TestCase):
             self.assertIn(se.sid('create-type'), s.pairs)
 
     def test_describe(self):
-        r = se.describe(DATA)
+        r = se.details(DATA)
         self.assertEqual(r['errors'], [])
         u1, u1p = r['saves']['SAVEDATA010'], r['saves']['SAVEDATA01P']
         self.assertEqual((u1['game'], u1['kind'], u1['chapter'], u1['campaign_percent']), ('u1', 'game', 'The Search for El Dorado', 2))
@@ -128,7 +128,7 @@ class EditTests(unittest.TestCase):
             old = dict((e[0], e[7]) for _, e in se.Save(DATA / slot / 'USR-DATA').entries(300, 32))
             for _, e in s.entries(300, 32):
                 self.assertEqual(e[7], old[e[0]] if old[e[0]] != 0xFFFFFFFF else value)  # played tasks keep theirs
-            self.assertTrue(se.describe(self.title / slot)['saves'][slot]['all_chapters_selectable'])
+            self.assertTrue(se.details(self.title / slot)['saves'][slot]['all_chapters_selectable'])
         for slot in ('SAVEDATA01P', 'SAVEDATA02P', 'SAVEDATA03P', 'SAVEDATA0CC'):
             self.assertEqual((self.title / slot / 'USR-DATA').read_bytes(), self.before[slot])
         self.assertEqual(se.unlock_chapters(self.title), [])  # nothing left to do
@@ -141,7 +141,7 @@ class EditTests(unittest.TestCase):
 
     def test_unlock_difficulties(self):
         changes = se.unlock_difficulties(self.title)
-        r = se.describe(self.title)['saves']
+        r = se.details(self.title)['saves']
         for slot in ('SAVEDATA01P', 'SAVEDATA02P', 'SAVEDATA03P'):
             self.check_only(slot, changes)
             self.assertTrue(r[slot]['brutal_unlocked'] and r[slot]['crushing_unlocked'], slot)
@@ -156,7 +156,7 @@ class EditTests(unittest.TestCase):
         s = se.Save(self.title / 'SAVEDATA01P' / 'USR-DATA')
         for _, e in s.entries(312, 12):
             self.assertEqual(e[2] & 0x1F, 0x0F)  # unlocked, none turned on
-        self.assertEqual(se.describe(self.title)['saves']['SAVEDATA01P']['rewards_locked'], [])
+        self.assertEqual(se.details(self.title)['saves']['SAVEDATA01P']['rewards_locked'], [])
         with self.assertRaises(se.SaveError):
             se.unlock_rewards(self.title, game='u2')
 
@@ -167,6 +167,43 @@ class EditTests(unittest.TestCase):
         self.assertEqual((self.title / 'SAVEDATA010' / 'USR-DATA').read_bytes(), self.before['SAVEDATA010'])
         self.assertEqual(se.main(['describe', str(self.title / 'SAVEDATA030')]), 0)
         self.assertEqual(se.main(['describe', str(Path(self.tmp.name) / 'nothing')]), 0)
+
+
+class LauncherTests(unittest.TestCase):
+    def test_describe_is_one_short_line(self):
+        self.assertEqual(se.describe(DATA / 'SAVEDATA010'),
+                         'Difficulty: Easy · Treasures: 0 of 61 · Chapter Select: chapters played so far')
+        line = se.describe(DATA / 'SAVEDATA01P')
+        self.assertIn('Brutal: locked', line)
+        self.assertIn('Rewards: 0 of 48 unlocked', line)
+        self.assertEqual(se.describe(DATA / 'SAVEDATA0CC'), 'Collection settings')
+        for slot in SLOTS:
+            self.assertNotIn(chr(10), se.describe(DATA / slot))
+
+    def test_actions(self):
+        self.assertEqual([a[0] for a in se.actions_for(DATA / 'SAVEDATA020')[1]], ['Unlock all chapters'])
+        self.assertEqual([a[0] for a in se.actions_for(DATA / 'SAVEDATA03P')[1]], ['Unlock Crushing and Brutal'])
+        self.assertEqual([a[0] for a in se.actions_for(DATA / 'SAVEDATA01P')[1]],
+                         ['Unlock Crushing and Brutal', 'Unlock all rewards', 'Unlock everything'])
+        self.assertEqual(se.actions_for(DATA / 'SAVEDATA0CC')[1], [])
+
+    def test_dialog(self):
+        try:
+            import tkinter
+            root = tkinter.Tk()
+        except Exception as e:  # no display
+            self.skipTest('no Tk display: %s' % e)
+        root.withdraw()
+        try:
+            before = (DATA / 'SAVEDATA01P' / 'USR-DATA').read_bytes()
+            win = se.open_editor(str(DATA / 'SAVEDATA01P'), game='u1', parent=root, wait=False)
+            self.assertIn('Unlock everything', win.actions)
+            changes = win.run('Unlock everything', confirm=False, dry_run=True)
+            self.assertEqual(len(changes), 50)
+            self.assertEqual((DATA / 'SAVEDATA01P' / 'USR-DATA').read_bytes(), before)
+            win.destroy()
+        finally:
+            root.destroy()
 
 
 if __name__ == '__main__':
