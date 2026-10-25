@@ -32,7 +32,9 @@ MANIFEST = 'backup_info.json'
 GAME_KEYS = ('u1', 'u2', 'u3', 'shared')
 SCOPES = GAME_KEYS + ('all',)
 PREFIXES = {'u1': 'SAVEDATA01', 'u2': 'SAVEDATA02', 'u3': 'SAVEDATA03', 'shared': 'SAVEDATA0CC'}
-KINDS = ('manual', 'auto', 'before-restore', 'before-edit', 'imported')
+KINDS = ('manual', 'auto', 'before-restore', 'before-edit', 'before-delete', 'imported')
+SLOT_GAMES = ('u1', 'u2', 'u3')
+SLOT_RE = re.compile(r'^[a-z0-9]{1,24}$')   # save slot ids (uncharted_slots)
 TITLE_RE = re.compile(r'^[A-Z]{4}\d{5}$')
 NAME_RE = re.compile(r'^[A-Za-z0-9_][A-Za-z0-9_.\-]{0,63}$')
 MAX_TOTAL = 1 << 30          # uncompressed bytes a backup may hold (saves are a few MB)
@@ -79,8 +81,9 @@ def _title_dirs(user_dir):
 
 def units(user_dir, scope, titles=None):
     """Relative POSIX paths (from the user folder) of what a backup of `scope` holds: save folders
-    (each with its .sce_sys), for 'all' also .memory folders and trophy logs. `titles` limits the
-    save folders to these 'user/title' pairs."""
+    (each with its .sce_sys), the game's save slots (save_slots/<game>/<slot id>), for 'all' also
+    .memory folders and trophy logs. `titles` limits the save folders to these 'user/title' pairs
+    (and leaves out the slots)."""
     if scope not in SCOPES:
         raise SaveError(f'unknown game {scope!r}')
     found = []
@@ -96,10 +99,23 @@ def units(user_dir, scope, titles=None):
         memory = user / f'{title.name}.memory'
         if scope == 'all' and memory.is_dir():
             found.append(f'savedata/{user.name}/{memory.name}')
+    if titles is None:
+        found += slot_units(user_dir, scope)
     if scope == 'all' and titles is None:
         trophy = Path(user_dir) / 'trophy'
         if trophy.is_dir():
             found += [f'trophy/{p.name}' for p in sorted(trophy.glob('*.log')) if p.is_file()]
+    return found
+
+
+def slot_units(user_dir, scope):
+    """save_slots/<game>/<slot id> of every save slot of the game ('all': of every game)."""
+    found = []
+    for game in SLOT_GAMES if scope == 'all' else ((scope,) if scope in SLOT_GAMES else ()):
+        folder = Path(user_dir) / 'save_slots' / game
+        if folder.is_dir():
+            found += [f'save_slots/{game}/{p.name}' for p in sorted(folder.iterdir())
+                      if p.is_dir() and SLOT_RE.match(p.name) and (p / 'slot.json').is_file()]
     return found
 
 
@@ -192,12 +208,12 @@ def _unique(folder, stem):
     return path
 
 
-def create_backup(user_dir, scope, dest=None, kind='manual', game=None, now=None):
+def create_backup(user_dir, scope, dest=None, kind='manual', game=None, now=None, only=None):
     """Writes <dest>/<scope>-<YYYYMMDD-HHMMSS>[-kind].zip (dest: <user>/backups) and returns its path,
     or None when there is nothing to back up. `game`: {'id', 'version', 'title'} of the game folder."""
     if kind not in KINDS:
         raise SaveError(f'unknown backup kind {kind!r}')
-    found = units(user_dir, scope)
+    found = units(user_dir, scope) if only is None else list(only)   # only: these units of the game
     if not found:
         return None
     dest = Path(dest) if dest else backup_dir(user_dir)
@@ -302,7 +318,9 @@ def _safe_parts(name):
 
 def _unit_of(parts):
     """The restore unit a member path belongs to: savedata/<user>/<title>/<dir>, savedata/<user>/<t>.memory
-    or trophy/<name>.log; None for anything else."""
+    or trophy/<name>.log, save_slots/<game>/<slot id>; None for anything else."""
+    if parts[0] == 'save_slots' and len(parts) >= 4 and parts[1] in SLOT_GAMES and SLOT_RE.match(parts[2]):
+        return parts[:3]
     if parts[0] == 'trophy' and len(parts) == 2 and parts[1].endswith('.log') and NAME_RE.match(parts[1]):
         return parts
     if parts[0] != 'savedata' or len(parts) < 4 or not parts[1].isdigit():
@@ -357,7 +375,9 @@ def validate_backup(zip_path, expected_titles=None):
                 raise SaveError(f'the backup contains a file outside the save folders: {info.filename}')
             if unit[0] == 'savedata' and len(unit) == 4 and scope != 'all' and unit_game(unit[3]) != scope:
                 raise SaveError(f'the backup of {scope} contains another game\'s save: {info.filename}')
-            if unit[0] != 'savedata' or len(unit) == 3:
+            if unit[0] == 'save_slots' and scope not in ('all', unit[1]):
+                raise SaveError(f'the backup of {scope} contains another game\'s slot: {info.filename}')
+            if unit[0] == 'trophy' or (unit[0] == 'savedata' and len(unit) == 3):
                 if scope != 'all':
                     raise SaveError(f'the backup of {scope} contains {info.filename}')
             name = '/'.join(parts)
@@ -418,11 +438,46 @@ def _write_atomic(path, text):
     os.replace(temporary, path)
 
 
+def swap_units(user_dir, unit_list, incoming, stage, aside, rename=os.rename):
+    """Moves each unit of `unit_list` (relative POSIX paths from the user folder) that exists into
+    `aside` and, for those in `incoming`, the staged copy from `stage` into its place. Any failure
+    moves everything back and raises SaveError; when even that fails, the error has kept=True and
+    the old units stay in `aside` (named in the message) for a manual fix."""
+    user_dir, incoming, journal = Path(user_dir), set(incoming), []
+    try:
+        for unit in unit_list:
+            live = user_dir.joinpath(*unit.split('/'))
+            if live.exists():
+                away = Path(aside).joinpath(*unit.split('/'))
+                away.parent.mkdir(parents=True, exist_ok=True)
+                rename(live, away)
+                journal.append(('aside', live, away))
+            if unit in incoming:
+                new = Path(stage).joinpath(*unit.split('/'))
+                live.parent.mkdir(parents=True, exist_ok=True)
+                rename(new, live)
+                journal.append(('in', live, new))
+    except OSError as error:
+        failed = []
+        for action, live, other in reversed(journal):
+            try:
+                os.rename(live, other) if action == 'in' else os.rename(other, live)
+            except OSError:
+                failed.append(str(live))
+        if failed:
+            problem = SaveError('restoring failed ({}) and these could not be put back: {}; the old saves '
+                                'are in {}'.format(error, ', '.join(failed), aside))
+            problem.kept = True
+            raise problem
+        raise SaveError(f'restoring failed, nothing was changed ({error})')
+
+
 def restore_backup(user_dir, zip_path, keep=10, game_running=None, expected_titles=None, game=None,
                    rename=os.rename, now=None):
     """Restores a backup over the saves of its game; returns (manifest, path of the backup made first).
     Save folders of that game in the backup's title folders that the backup lacks are moved away too,
-    so the game finds exactly the backed-up state. Trophy logs are merged."""
+    so the game finds exactly the backed-up state. Trophy logs are merged. Save slots of the backup
+    that no longer exist come back (a deleted slot); existing slots are never overwritten."""
     if game_running and game_running():
         raise SaveError('close the game first')
     manifest = validate_backup(zip_path, expected_titles)
@@ -430,6 +485,7 @@ def restore_backup(user_dir, zip_path, keep=10, game_running=None, expected_titl
     user_dir = Path(user_dir)
     saves = [u for u in manifest['units'] if u.startswith('savedata/')]
     trophies = [u for u in manifest['units'] if u.startswith('trophy/')]
+    slots = [u for u in manifest['units'] if u.startswith('save_slots/')]
     pairs = {'/'.join(u.split('/')[1:3]) for u in saves if len(u.split('/')) == 4}
     current = [u for u in units(user_dir, scope, titles=pairs)]
     if scope == 'all':  # .memory folders of the backup's users
@@ -441,7 +497,6 @@ def restore_backup(user_dir, zip_path, keep=10, game_running=None, expected_titl
     stamp = time.strftime(STAMP, time.localtime(now))
     stage = Path(tempfile.mkdtemp(prefix=f'.restore-{stamp}-', dir=user_dir))
     aside = Path(tempfile.mkdtemp(prefix=f'.restore-old-{stamp}-', dir=user_dir))
-    journal = []
     try:
         with zipfile.ZipFile(zip_path) as archive:
             for item in manifest['files']:
@@ -450,30 +505,16 @@ def restore_backup(user_dir, zip_path, keep=10, game_running=None, expected_titl
                 with archive.open(item['path']) as source, open(target, 'wb') as out:
                     shutil.copyfileobj(source, out)
         try:
-            for unit in sorted(set(current) | set(saves)):
-                live = user_dir.joinpath(*unit.split('/'))
-                if live.exists():
-                    away = aside.joinpath(*unit.split('/'))
-                    away.parent.mkdir(parents=True, exist_ok=True)
-                    rename(live, away)
-                    journal.append(('aside', live, away))
-                if unit in saves:
-                    new = stage.joinpath(*unit.split('/'))
-                    live.parent.mkdir(parents=True, exist_ok=True)
-                    rename(new, live)
-                    journal.append(('in', live, new))
-        except OSError as error:
-            failed = []
-            for action, live, other in reversed(journal):
-                try:
-                    os.rename(live, other) if action == 'in' else os.rename(other, live)
-                except OSError:
-                    failed.append(str(live))
-            if failed:
-                kept, aside = aside, None  # keep the old saves where they are for a manual fix
-                raise SaveError('restoring failed ({}) and these could not be put back: {}; the old saves '
-                                'are in {}'.format(error, ', '.join(failed), kept))
-            raise SaveError(f'restoring failed, nothing was changed ({error})')
+            swap_units(user_dir, sorted(set(current) | set(saves)), saves, stage, aside, rename)
+        except SaveError as error:
+            if getattr(error, 'kept', False):
+                aside = None  # keep the old saves where they are for a manual fix
+            raise
+        for unit in slots:
+            live = user_dir.joinpath(*unit.split('/'))
+            if not live.exists():
+                live.parent.mkdir(parents=True, exist_ok=True)
+                rename(stage.joinpath(*unit.split('/')), live)
         with zipfile.ZipFile(zip_path) as archive:
             for unit in trophies:
                 live = user_dir.joinpath(*unit.split('/'))
