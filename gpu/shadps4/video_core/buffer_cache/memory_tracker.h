@@ -160,6 +160,25 @@ public:
                             });
     }
 
+    /// bbport: func(manager) with the region manager of [cpu_addr, cpu_addr + size) locked, for
+    /// checks and changes that must not interleave with the GPU side marking writes. False when
+    /// the range has no manager or spans two (4 MiB regions).
+    template <typename Func>
+    bool WithRegionLocked(VAddr cpu_addr, u64 size, Func&& func) {
+        const u64 first = cpu_addr >> TRACKER_HIGHER_PAGE_BITS;
+        const u64 last = (cpu_addr + size - 1) >> TRACKER_HIGHER_PAGE_BITS;
+        if (size == 0 || first != last || first >= NUM_HIGH_PAGES) {
+            return false;
+        }
+        auto* manager = top_tier[first];
+        if (!manager) {
+            return false;
+        }
+        std::scoped_lock lk{manager->lock};
+        func(*manager);
+        return true;
+    }
+
 private:
     /**
      * @brief IteratePages Iterates L2 word manager page table.

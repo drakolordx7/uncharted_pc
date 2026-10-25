@@ -67,6 +67,27 @@ struct UniqueImage {
 
     void Destroy();
 
+    /// bbport: keeps the Vulkan image and its memory for a later Create() with the same create
+    /// info inside a ReuseScope (call once the GPU is done with it), else destroys it.
+    void Recycle();
+
+    /// bbport: destroys the images Recycle() keeps. The texture cache's collector calls it under
+    /// memory pressure (the pool is still counted as image memory but no image owns it), and at
+    /// teardown; ReleaseRecycledIfDisabled once recycling is turned off (BB_IMAGE_RECYCLE=0 or
+    /// toggle2 RecycledImages), so the pool is not stranded.
+    static void ReleaseRecycled();
+    static void ReleaseRecycledIfDisabled();
+    /// bbport: the collector's pressure verdict of its latest pass; Recycle() keeps nothing
+    /// while it holds.
+    static void SetMemoryPressure(bool pressure);
+
+    /// bbport: Create() calls on this thread may take a recycled image. Only for images whose
+    /// contents are overwritten before use: a recycled one holds its old contents.
+    struct ReuseScope {
+        ReuseScope();
+        ~ReuseScope();
+    };
+
     operator vk::Image() const {
         return image;
     }
@@ -154,6 +175,9 @@ public:
         u32 vo_surface : 1;
     } usage{};
     bool scene_proxy = false; ///< bbport: SceneTargets holds a reduced-size proxy of it
+    /// bbport: remade by format (TextureCache::ResolveDepthOverlap): its Vulkan image is recycled
+    /// when it is deleted.
+    bool recycle_on_delete = false;
     VAddr track_addr = 0;
     VAddr track_addr_end = 0;
     VAddr guest_begin = 0; ///< info.guest_address

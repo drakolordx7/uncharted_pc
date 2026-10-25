@@ -283,26 +283,85 @@ static void sc_note(u64 group_size, u64 src, u64 dst, u64 size, bool src_written
     }
 }
 
-static bool ExecuteScalarCopyHLE(const Shader::Info& info, const AmdGpu::ComputeProgram& cs_program,
-                                 Rasterizer& rasterizer, u64 group_size) {
+/// The buffers and byte count of a scalar copy; nullopt when the HLE does not take it.
+struct ScalarCopy {
+    AmdGpu::Buffer src;
+    AmdGpu::Buffer dst;
+    u64 size;
+};
+static std::optional<ScalarCopy> ScalarCopyOf(const Shader::Info& info,
+                                              const AmdGpu::ComputeProgram& cs_program,
+                                              u64 group_size) {
     if (info.buffers.size() != 2 || BbToggle::Disabled(BbToggle::MultiCopyShader)) {
-        return false;
+        return std::nullopt;
     }
     const auto ud = info.UserData();
     if (ud.size() <= 6) {
-        return false;
+        return std::nullopt;
     }
     const auto src = info.buffers[0].GetSharp(info);
     const auto dst = info.buffers[1].GetSharp(info);
     if (src.GetStride() != 4 || dst.GetStride() != 4 || !src.base_address || !dst.base_address) {
-        return false;
+        return std::nullopt;
     }
     const u64 count =
         std::min<u64>({u64(cs_program.dim_x) * group_size, ud[6], src.num_records, dst.num_records});
-    if (count == 0) {
+    return ScalarCopy{src, dst, count * 4};
+}
+
+std::optional<ScalarCopyRange> RaycasterCopyRange(const Shader::Info& info,
+                                                  const AmdGpu::ComputeProgram& cs_program) {
+    if (info.pgm_hash != SCALAR_COPY64_SHADER_HASH) {
+        return std::nullopt;
+    }
+    const auto copy = ScalarCopyOf(info, cs_program, 64);
+    if (!copy) {
+        return std::nullopt;
+    }
+    return ScalarCopyRange{copy->src.base_address, copy->dst.base_address, copy->size};
+}
+
+bool RaycasterCopyLeavesGuestMemory(unsigned long long size) {
+    // The same switches ExecuteScalarCopyHLE reads, for a 64-dword copy whose source holds
+    // GPU-written bytes: it writes guest memory unless it is copied on the GPU only or its guest
+    // part is deferred to the landing thread (BB_SCALAR_COPY64_SYNC=2 with
+    // BB_SCALAR_COPY64_DEFER=1, the U2 profile).
+    const auto env_is = [](const char* name, char value) {
+        const char* env = std::getenv(name);
+        return env && env[0] == value;
+    };
+    static const bool both = !env_is("BB_SCALAR_COPY_BOTH", '0');
+    static const bool sync_all = env_is("BB_SCALAR_COPY_SYNC", '1');
+    static const bool small_sync = env_is("BB_SCALAR_COPY_SMALL_SYNC", '1');
+    static const int sync_64 = [] {
+        const char* env = std::getenv("BB_SCALAR_COPY64_SYNC");
+        return !env ? 0 : env[0] == '0' ? 0 : env[0] == '1' ? 1 : 2;
+    }();
+    static const bool defer = env_is("BB_SCALAR_COPY64_DEFER", '1');
+    if (size >= 1_MB) {
+        return true; // copied on the GPU only
+    }
+    if (small_sync) {
+        return false;
+    }
+    if (!both) {
         return true;
     }
-    const u64 size = count * 4;
+    return !sync_all && (sync_64 == 0 || (sync_64 == 2 && defer));
+}
+
+static bool ExecuteScalarCopyHLE(const Shader::Info& info, const AmdGpu::ComputeProgram& cs_program,
+                                 Rasterizer& rasterizer, u64 group_size) {
+    const auto copy = ScalarCopyOf(info, cs_program, group_size);
+    if (!copy) {
+        return false;
+    }
+    if (copy->size == 0) {
+        return true;
+    }
+    const auto& src = copy->src;
+    const auto& dst = copy->dst;
+    const u64 size = copy->size;
     // BB_COPY_SHADER_LOG=1: the large copies (depth surfaces among them).
     static const bool copy_log = std::getenv("BB_COPY_SHADER_LOG") != nullptr;
     if (copy_log && size >= 65536) {
@@ -310,7 +369,7 @@ static bool ExecuteScalarCopyHLE(const Shader::Info& info, const AmdGpu::Compute
                     static_cast<unsigned long long>(info.pgm_hash),
                     static_cast<unsigned long long>(src.base_address),
                     static_cast<unsigned long long>(dst.base_address),
-                    static_cast<unsigned long long>(size), cs_program.dim_x, ud[6],
+                    static_cast<unsigned long long>(size), cs_program.dim_x, info.UserData()[6],
                     src.num_records, dst.num_records);
     }
     auto& buffer_cache = rasterizer.GetBufferCache();

@@ -76,7 +76,10 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
     base_critical_gc_memory = critical_gc_memory;
 }
 
-TextureCache::~TextureCache() = default;
+TextureCache::~TextureCache() {
+    // bbport: the Vulkan images kept for reuse (UniqueImage::Recycle) belong to no image.
+    UniqueImage::ReleaseRecycled();
+}
 
 void TextureCache::ProcessDownloadImages() {
     std::unique_lock lk{download_images_mutex};
@@ -224,22 +227,52 @@ void TextureCache::UnmapMemory(VAddr cpu_addr, size_t size) {
 /// that frame (ten times in a frame): the layers drawn before were lost, so those lights lost their
 /// shadow maps (the flashlight's light vanished for a frame, then came back in blocky tiles).
 /// A depth image made at an address that has held a deeper array gets all those layers at once; the
-/// game draws each layer again every frame. BB_DEPTH_ARRAY_PAD=0: off.
+/// game draws each layer again every frame.
 /// (Mevlock 670bf18.)
-void TextureCache::PadDepthLayers(ImageInfo& info) {
-    static const bool pad = [] {
+/// bbport: the padded image stays within the memory the depth images at that address have
+/// covered. Padded by layer count alone, a 4096x4096 depth target at the address of U3's shadow
+/// array in the London pub became 8 layers, 512 MiB over memory the game's CPU code writes every
+/// frame: each frame's write made the texture cache hash all of it again (~10 GB a second, the
+/// draw recording thread busy at 20 FPS). The memory seen only covers what was requested, though:
+/// the first 1280 request after the array ran at 1024 (16 layers of 1024: 64 MiB seen, 16 of
+/// 1280: 100 MiB) would not be padded and the flashlight dropout above came back for that frame.
+/// So a layer up to twice the size of a layer of the deepest array seen there is padded too
+/// (1280 over 1024: 1.56x); the London target (16x) is not. What is recorded is what the game
+/// requested (`requested`), never a padded or merged size, so the cap does not lift itself.
+/// BB_DEPTH_ARRAY_PAD: 0 = no padding, 2 = padding by layer count alone (uncapped, as before
+/// the cap), unset or anything else = capped as above.
+void TextureCache::PadDepthLayers(ImageInfo& info, const ImageInfo* requested) {
+    static const int mode = [] {
         const char* env = std::getenv("BB_DEPTH_ARRAY_PAD");
-        return !(env && env[0] == '0');
+        if (env && env[0] == '0') {
+            return 0;
+        }
+        return env && env[0] == '2' ? 2 : 1;
     }();
-    if (!pad || !info.props.is_depth) {
+    if (mode == 0 || !info.props.is_depth) {
         return;
     }
+    const ImageInfo& asked = requested ? *requested : info;
+    const u32 asked_layers = std::max(asked.resources.layers, 1u);
+    const u64 asked_bytes = asked.guest_size;
+    const u64 asked_layer_bytes = asked_bytes / asked_layers;
     auto& seen = depth_array_layers[info.guest_address];
-    if (info.resources.layers > seen) {
-        seen = info.resources.layers;
-    } else if (seen > info.resources.layers && seen > 1) {
-        info.resources.layers = seen;
-        info.UpdateSize();
+    seen.bytes = std::max<u64>(seen.bytes, asked_bytes);
+    if (asked_layers > seen.layers) {
+        seen.layers = asked_layers;
+        seen.layer_bytes = asked_layer_bytes;
+    } else if (asked_layers == seen.layers) {
+        seen.layer_bytes = std::max(seen.layer_bytes, asked_layer_bytes);
+    }
+    if (seen.layers > info.resources.layers && seen.layers > 1) {
+        auto padded = info;
+        padded.resources.layers = seen.layers;
+        padded.UpdateSize();
+        const u64 layer_bytes = info.guest_size / std::max(info.resources.layers, 1u);
+        if (mode == 2 || padded.guest_size <= seen.bytes ||
+            layer_bytes <= 2 * seen.layer_bytes) {
+            info = padded;
+        }
     }
 }
 
@@ -292,8 +325,16 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         auto new_info = requested_info;
         new_info.resources = std::max(requested_info.resources, cache_image.info.resources);
         new_info.UpdateSize();
-        PadDepthLayers(new_info);
+        PadDepthLayers(new_info, &requested_info);
+        // bbport: the copy below overwrites all of an image of the same size and resources, so it
+        // may take the Vulkan image of one freed here before (UniqueImage::Recycle).
+        std::optional<UniqueImage::ReuseScope> reuse;
+        if (new_info.size == cache_image.info.size &&
+            new_info.resources == cache_image.info.resources) {
+            reuse.emplace();
+        }
         const auto new_image_id = slot_images.insert(instance, runtime, slot_image_views, new_info);
+        reuse.reset();
         RegisterImage(new_image_id);
 
         // insert() may have grown slot_images and moved every image: `cache_image` would then
@@ -324,6 +365,7 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         runtime.CopyColorAndDepth(&old_image, &new_image);
 
         // Free the cache image.
+        old_image.recycle_on_delete = true;
         FreeImage(cache_image_id);
         return new_image_id;
     }
@@ -1231,6 +1273,7 @@ static bool LiveMarksOnBigCards() {
 
 void TextureCache::GarbageCollectImages() {
     bool urgent_pass = false;
+    UniqueImage::ReleaseRecycledIfDisabled();
     vmaSetCurrentFrameIndex(instance.GetAllocator(), static_cast<u32>(gc_tick));
     if (Vulkan::Vram::Log()) {
         static auto last = std::chrono::steady_clock::now();
@@ -1333,6 +1376,7 @@ void TextureCache::GarbageCollectImages() {
         gc_tick_at_second[second % gc_tick_at_second.size()] = gc_tick;
     }
     if (total_used_memory < trigger_gc_memory && !urgent_pass) {
+        UniqueImage::SetMemoryPressure(false);
         return;
     }
     static const u64 idle_seconds = [] {
@@ -1427,6 +1471,13 @@ void TextureCache::GarbageCollectImages() {
 
     // Try to remove anything old enough and not high priority.
     configure(false);
+    // bbport: the Vulkan images kept for reuse go first under pressure (still counted as image
+    // memory, owned by no image the collector could free), and none are kept meanwhile.
+    const bool under_pressure = pressured || aggresive || urgent_pass;
+    UniqueImage::SetMemoryPressure(under_pressure);
+    if (under_pressure) {
+        UniqueImage::ReleaseRecycled();
+    }
     gc_kept = gc_kept_bytes = 0;
     lru_cache.ForEachItemBelow(below_tick, clean_up);
 
@@ -1555,6 +1606,9 @@ void TextureCache::DeleteImage(ImageId image_id) {
         for (auto& backing : image.backing_images) {
             for (const ImageViewId image_view_id : backing.image_view_ids) {
                 slot_image_views.erase(image_view_id);
+            }
+            if (image.recycle_on_delete) {
+                backing.image.Recycle();
             }
         }
         slot_images.erase(image_id);
