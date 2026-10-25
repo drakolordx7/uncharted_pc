@@ -837,6 +837,9 @@ void ConfigureToggleKey(int slot, int kind, int code) {
     }
     std::scoped_lock lock{imgui_mutex};
     toggle_keys[slot] = {kind, code};
+    if (slot == 1) { // the runtime sets both slots in order: log the result once
+        std::printf("Overlay: menu key %s\n", ToggleHint().c_str());
+    }
 }
 
 bool HandleEvent(const SDL_Event& event) {
