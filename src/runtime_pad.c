@@ -635,6 +635,8 @@ static void u2_cover_camera(uint64_t camera, uint64_t entry) {
         const float sum=dir[0]+dir[1]+dir[2]+*pitch+pos[0]+pos[1]+pos[2]+pivot[0]+pivot[1]+pivot[2];
         if (!(sum>-1e6f && sum<1e6f) || shape<0x10000) return;
     }
+    float limits[2];   /* pitch limits: up to [shape+8], down to -[shape+0xc] (a bad shape pointer: no turn) */
+    if (!safe_read(limits,shape+8,sizeof(limits)) || !(limits[0]>-360.0f && limits[0]<360.0f && limits[1]>-360.0f && limits[1]<360.0f)) return;
     u2_native_us=now_us();
     {
         /* two cover cameras are updated together when one cover leads to another: one slot per camera */
@@ -675,7 +677,7 @@ static void u2_cover_camera(uint64_t camera, uint64_t entry) {
         pos[2]=pivot[2]+px*s+pz*c;
     }
     if (step_pitch!=0.0f) {
-        const float v=*pitch-step_pitch, lo=-*(const float *)(uintptr_t)(shape+0xc), hi=*(const float *)(uintptr_t)(shape+8);
+        const float v=*pitch-step_pitch, lo=-limits[1], hi=limits[0];
         *pitch=v<lo ? lo : v>hi ? hi : v;
     }
     if (mouse_debug() && (step!=0.0f || step_pitch!=0.0f))
