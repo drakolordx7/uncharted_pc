@@ -266,6 +266,15 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
             target_height = h;
         }
     }
+    // The games' render size (run.py, src/runtime_display.c: the same bounds, made even).
+    if (const char* res = std::getenv("BB_GAME_RES")) {
+        u32 w = 0, h = 0;
+        if (std::sscanf(res, "%ux%u", &w, &h) == 2 && w >= 640 && h >= 360 && w <= 7680 &&
+            h <= 4320) {
+            game_width = w & ~1u;
+            game_height = h & ~1u;
+        }
+    }
     // Explicit resolution overrides retain the old compatibility path. Normal presets
     // keep guest allocations/UI native and change only host raster targets at frame boundaries.
     scaled_session = std::getenv("BB_RENDER_RES") && std::getenv("BB_RENDER_RES")[0];
@@ -437,8 +446,18 @@ bool TemporalUpscaler::OnFrameStart() {
                                   upscaler == BbSettings::UpscalerFsr3);
         }
     }
-    BbSettings::Get().active_render_width = Scaled() ? render_width : scene_targets.Size().width;
-    BbSettings::Get().active_render_height = Scaled() ? render_height : scene_targets.Size().height;
+    BbSettings::Get().game_size_render = camera_motion.VelocityMode();
+    if (camera_motion.VelocityMode()) {
+        // The scene renders at the game's own size whatever the preset: report the size the
+        // upscaler last took it at, or the game's size before that / with the upscaler off.
+        const bool ran = active && run_width != 0;
+        BbSettings::Get().active_render_width = ran ? run_width : game_width;
+        BbSettings::Get().active_render_height = ran ? run_height : game_height;
+    } else {
+        BbSettings::Get().active_render_width = Scaled() ? render_width : scene_targets.Size().width;
+        BbSettings::Get().active_render_height =
+            Scaled() ? render_height : scene_targets.Size().height;
+    }
     if (changed || !dispatched_last_frame) reset = true;
     if (changed) jitter_index = 0;
     applied_preset = preset;
@@ -1162,6 +1181,15 @@ void TemporalUpscaler::Run() {
     if (!EnsureResources(w, h, ow, oh, true)) {
         failed = true;
         return;
+    }
+    if (w != run_width || h != run_height || ow != run_out_width || oh != run_out_height) {
+        run_width = w;
+        run_height = h;
+        run_out_width = ow;
+        run_out_height = oh;
+        std::printf("Upscaler: input %ux%u -> output %ux%u (provider %d, preset %d, %s)\n", w, h,
+                    ow, oh, BbSettings::Get().upscaler.load(), applied_preset,
+                    camera_motion.VelocityMode() ? "game size" : "live preset");
     }
     const auto depth_format = depth.info.pixel_format;
     const auto depth_view =

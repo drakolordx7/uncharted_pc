@@ -82,6 +82,9 @@ struct Values {
     std::atomic<bool> fsr4_auto_exposure{true};
     std::atomic<bool> fsr4_invert_jitter{false};
     std::atomic<int> active_render_width{1920}, active_render_height{1080};
+    /// The scene renders at the game's own size (Uncharted, velocity mode): the upscaler runs
+    /// as Native AA there, the preset and output resolution do not apply. Set by the renderer.
+    std::atomic<bool> game_size_render{false};
     /// Applied at start (patches.py); the menu shows when a restart is needed.
     std::atomic<bool> effects[EffectCount]{};
     std::atomic<int> model_lod{0}; ///< -2 highest .. 2 lowest, 0 the game's
