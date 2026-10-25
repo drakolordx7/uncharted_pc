@@ -4,6 +4,7 @@
 #include "bbport_settings.h"
 #include "bbport_copy.h"
 #ifndef _WIN32
+#include <cstdlib>
 #include <sys/resource.h>
 #endif
 #include "bbport_toggles.h"
@@ -398,6 +399,12 @@ extern "C" void bbgpu_trophy_notify(int grade, const char* game, const char* nam
     BbOverlay::NotifyTrophy(grade, game ? game : "", name ? name : "",
                             bytes && png_size ? std::vector<unsigned char>(bytes, bytes + png_size)
                                               : std::vector<unsigned char>());
+}
+
+extern "C" int bbgpu_gyro_aim(void) {
+    static const char* env = std::getenv("BB_GYRO_AIM");  // A/B tests: BB_GYRO_AIM=0 or 1 overrides the setting
+    if (env && *env) return *env != '0' ? 1 : 0;
+    return BbSettings::Get().gyro_aim.load(std::memory_order_relaxed) ? 1 : 0;
 }
 
 extern "C" int bbgpu_overlay_captures_input(void) {
