@@ -474,8 +474,13 @@ private:
         ImageId owner{};
     };
     tsl::robin_map<VAddr, MetaDataInfo> surface_metas;
-    /// bbport: most layers seen for a depth array at an address (PadDepthLayers).
-    tsl::robin_map<VAddr, u32> depth_array_layers;
+    /// bbport: most layers seen for a depth array at an address, and the most memory a depth
+    /// image requested there covered (PadDepthLayers).
+    struct DepthArraySeen {
+        u32 layers{};
+        u64 bytes{};
+    };
+    tsl::robin_map<VAddr, DepthArraySeen> depth_array_layers;
     void PadDepthLayers(ImageInfo& info);
 };
 
