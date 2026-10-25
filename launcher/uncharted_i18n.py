@@ -2,7 +2,7 @@
 import locale
 
 from bbport_lang import table as shared_translations
-from uncharted_i18n_extra import EXTRA_TRANSLATIONS
+from uncharted_i18n_extra import EXTRA_TRANSLATIONS, SAVES_TRANSLATIONS
 
 
 LANGUAGES = [
@@ -385,6 +385,8 @@ TRANSLATIONS = {
 
 for _code, _translations in EXTRA_TRANSLATIONS.items():
     TRANSLATIONS[_code] = {**shared_translations(_code), **_translations}
+for _code, _translations in SAVES_TRANSLATIONS.items():
+    TRANSLATIONS.setdefault(_code, {}).update(_translations)
 
 
 def translate(language, text):

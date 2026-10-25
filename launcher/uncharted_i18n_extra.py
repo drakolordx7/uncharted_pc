@@ -309,3 +309,213 @@ EXTRA_TRANSLATIONS = {
         'version {}': 'バージョン {}',
     },
 }
+
+
+# The Saves page (backups, restore, save editor).
+SAVES_TRANSLATIONS = {
+    'es': {
+        'Saves': 'Partidas', 'Your saves': 'Tus partidas', 'Backups': 'Copias de seguridad',
+        'Back up your saves, undo a save damaged by a crash, keep extra copies.':
+        'Haz copias de tus partidas, recupera una partida dañada por un cierre inesperado y guarda copias extra.',
+        'Each game keeps one autosave and a profile; back up to keep more than one point in a game.':
+        'Cada juego guarda una sola partida automática y un perfil; haz copias para conservar más de un punto de un juego.',
+        'Back up the saves before every game start': 'Hacer copia de las partidas antes de cada inicio del juego',
+        'Skipped when nothing changed since the last automatic backup.':
+        'Se omite si nada cambió desde la última copia automática.',
+        'Automatic backups to keep': 'Copias automáticas a conservar', 'Back up': 'Hacer copia',
+        'Back up all': 'Copiar todo', 'Import backup…': 'Importar copia…',
+        'Open the backups folder': 'Abrir carpeta de copias', 'Edit': 'Editar', 'Restore': 'Restaurar',
+        'Delete': 'Eliminar', 'All games': 'Todos los juegos', 'Shared collection profile': 'Perfil compartido de la colección',
+        'Other saves': 'Otras partidas', 'Modified {}': 'Modificada {}',
+        'No saves yet. They appear here once a game has saved.':
+        'Aún no hay partidas. Aparecen aquí cuando un juego guarda.',
+        'No backups yet.': 'Aún no hay copias.', 'manual': 'manual', 'automatic': 'automática',
+        'before a restore': 'antes de restaurar', 'before editing': 'antes de editar', 'imported': 'importada',
+        'Automatic backup: {}': 'Copia automática: {}', 'Automatic backup failed: {}': 'Falló la copia automática: {}',
+        'Backup created: {}': 'Copia creada: {}', 'Backup imported: {}': 'Copia importada: {}',
+        'Close the game first.': 'Cierra primero el juego.',
+        'Could not create the backup: {}': 'No se pudo crear la copia: {}',
+        'Could not delete the backup: {}': 'No se pudo eliminar la copia: {}',
+        'Could not import the backup: {}': 'No se pudo importar la copia: {}',
+        'Could not restore the backup: {}': 'No se pudo restaurar la copia: {}',
+        'Could not open the save editor: {}': 'No se pudo abrir el editor de partidas: {}',
+        'Delete the backup {}? This cannot be undone.': '¿Eliminar la copia {}? No se puede deshacer.',
+        'Restore {}? The current saves of this game are backed up first.':
+        '¿Restaurar {}? Antes se hace una copia de las partidas actuales de este juego.',
+        'Saves restored.': 'Partidas restauradas.',
+        'Saves restored. The previous saves are in {}.': 'Partidas restauradas. Las anteriores están en {}.',
+        'Import a save backup': 'Importar una copia de partidas', 'Save backup': 'Copia de partidas',
+        'The save editor is not part of this build yet.': 'El editor de partidas aún no está en esta versión.',
+    },
+    'pt': {
+        'Saves': 'Saves', 'Your saves': 'Seus saves', 'Backups': 'Backups',
+        'Back up your saves, undo a save damaged by a crash, keep extra copies.':
+        'Faça backup dos seus saves, recupere um save danificado por um travamento e guarde cópias extras.',
+        'Each game keeps one autosave and a profile; back up to keep more than one point in a game.':
+        'Cada jogo guarda um único save automático e um perfil; faça backups para manter mais de um ponto de um jogo.',
+        'Back up the saves before every game start': 'Fazer backup dos saves antes de cada início do jogo',
+        'Skipped when nothing changed since the last automatic backup.':
+        'Ignorado quando nada mudou desde o último backup automático.',
+        'Automatic backups to keep': 'Backups automáticos a manter', 'Back up': 'Fazer backup',
+        'Back up all': 'Backup de tudo', 'Import backup…': 'Importar backup…',
+        'Open the backups folder': 'Abrir pasta de backups', 'Edit': 'Editar', 'Restore': 'Restaurar',
+        'Delete': 'Excluir', 'All games': 'Todos os jogos', 'Shared collection profile': 'Perfil compartilhado da coleção',
+        'Other saves': 'Outros saves', 'Modified {}': 'Modificado {}',
+        'No saves yet. They appear here once a game has saved.':
+        'Ainda não há saves. Eles aparecem aqui quando um jogo salva.',
+        'No backups yet.': 'Ainda não há backups.', 'manual': 'manual', 'automatic': 'automático',
+        'before a restore': 'antes de restaurar', 'before editing': 'antes de editar', 'imported': 'importado',
+        'Automatic backup: {}': 'Backup automático: {}', 'Automatic backup failed: {}': 'Falha no backup automático: {}',
+        'Backup created: {}': 'Backup criado: {}', 'Backup imported: {}': 'Backup importado: {}',
+        'Close the game first.': 'Feche o jogo primeiro.',
+        'Could not create the backup: {}': 'Não foi possível criar o backup: {}',
+        'Could not delete the backup: {}': 'Não foi possível excluir o backup: {}',
+        'Could not import the backup: {}': 'Não foi possível importar o backup: {}',
+        'Could not restore the backup: {}': 'Não foi possível restaurar o backup: {}',
+        'Could not open the save editor: {}': 'Não foi possível abrir o editor de saves: {}',
+        'Delete the backup {}? This cannot be undone.': 'Excluir o backup {}? Isso não pode ser desfeito.',
+        'Restore {}? The current saves of this game are backed up first.':
+        'Restaurar {}? Antes é feito um backup dos saves atuais deste jogo.',
+        'Saves restored.': 'Saves restaurados.',
+        'Saves restored. The previous saves are in {}.': 'Saves restaurados. Os anteriores estão em {}.',
+        'Import a save backup': 'Importar um backup de saves', 'Save backup': 'Backup de saves',
+        'The save editor is not part of this build yet.': 'O editor de saves ainda não faz parte desta versão.',
+    },
+    'fr': {
+        'Saves': 'Sauvegardes', 'Your saves': 'Vos sauvegardes', 'Backups': 'Copies de secours',
+        'Back up your saves, undo a save damaged by a crash, keep extra copies.':
+        'Copiez vos sauvegardes, récupérez une sauvegarde abîmée par un plantage, gardez des copies en plus.',
+        'Each game keeps one autosave and a profile; back up to keep more than one point in a game.':
+        "Chaque jeu garde une seule sauvegarde automatique et un profil ; faites des copies pour garder plusieurs points d'un jeu.",
+        'Back up the saves before every game start': 'Copier les sauvegardes avant chaque lancement du jeu',
+        'Skipped when nothing changed since the last automatic backup.':
+        "Ignoré si rien n'a changé depuis la dernière copie automatique.",
+        'Automatic backups to keep': 'Copies automatiques à garder', 'Back up': 'Copier',
+        'Back up all': 'Tout copier', 'Import backup…': 'Importer une copie…',
+        'Open the backups folder': 'Ouvrir le dossier des copies', 'Edit': 'Modifier', 'Restore': 'Restaurer',
+        'Delete': 'Supprimer', 'All games': 'Tous les jeux', 'Shared collection profile': 'Profil partagé de la collection',
+        'Other saves': 'Autres sauvegardes', 'Modified {}': 'Modifiée {}',
+        'No saves yet. They appear here once a game has saved.':
+        "Pas encore de sauvegarde. Elles apparaissent ici dès qu'un jeu a sauvegardé.",
+        'No backups yet.': 'Pas encore de copie.', 'manual': 'manuelle', 'automatic': 'automatique',
+        'before a restore': 'avant une restauration', 'before editing': 'avant modification', 'imported': 'importée',
+        'Automatic backup: {}': 'Copie automatique : {}', 'Automatic backup failed: {}': 'Échec de la copie automatique : {}',
+        'Backup created: {}': 'Copie créée : {}', 'Backup imported: {}': 'Copie importée : {}',
+        'Close the game first.': "Fermez d'abord le jeu.",
+        'Could not create the backup: {}': 'Impossible de créer la copie : {}',
+        'Could not delete the backup: {}': 'Impossible de supprimer la copie : {}',
+        'Could not import the backup: {}': "Impossible d'importer la copie : {}",
+        'Could not restore the backup: {}': 'Impossible de restaurer la copie : {}',
+        'Could not open the save editor: {}': "Impossible d'ouvrir l'éditeur de sauvegardes : {}",
+        'Delete the backup {}? This cannot be undone.': 'Supprimer la copie {} ? Action irréversible.',
+        'Restore {}? The current saves of this game are backed up first.':
+        "Restaurer {} ? Les sauvegardes actuelles de ce jeu sont d'abord copiées.",
+        'Saves restored.': 'Sauvegardes restaurées.',
+        'Saves restored. The previous saves are in {}.': 'Sauvegardes restaurées. Les précédentes sont dans {}.',
+        'Import a save backup': 'Importer une copie de sauvegardes', 'Save backup': 'Copie de sauvegardes',
+        'The save editor is not part of this build yet.': "L'éditeur de sauvegardes n'est pas encore dans cette version.",
+    },
+    'de': {
+        'Saves': 'Spielstände', 'Your saves': 'Deine Spielstände', 'Backups': 'Sicherungen',
+        'Back up your saves, undo a save damaged by a crash, keep extra copies.':
+        'Sichere deine Spielstände, stelle einen durch einen Absturz beschädigten Spielstand wieder her, behalte zusätzliche Kopien.',
+        'Each game keeps one autosave and a profile; back up to keep more than one point in a game.':
+        'Jedes Spiel hat nur einen automatischen Spielstand und ein Profil; sichere, um mehr als einen Punkt eines Spiels zu behalten.',
+        'Back up the saves before every game start': 'Spielstände vor jedem Spielstart sichern',
+        'Skipped when nothing changed since the last automatic backup.':
+        'Entfällt, wenn sich seit der letzten automatischen Sicherung nichts geändert hat.',
+        'Automatic backups to keep': 'Aufzubewahrende automatische Sicherungen', 'Back up': 'Sichern',
+        'Back up all': 'Alles sichern', 'Import backup…': 'Sicherung importieren…',
+        'Open the backups folder': 'Sicherungsordner öffnen', 'Edit': 'Bearbeiten', 'Restore': 'Wiederherstellen',
+        'Delete': 'Löschen', 'All games': 'Alle Spiele', 'Shared collection profile': 'Gemeinsames Profil der Sammlung',
+        'Other saves': 'Andere Spielstände', 'Modified {}': 'Geändert {}',
+        'No saves yet. They appear here once a game has saved.':
+        'Noch keine Spielstände. Sie erscheinen hier, sobald ein Spiel gespeichert hat.',
+        'No backups yet.': 'Noch keine Sicherungen.', 'manual': 'manuell', 'automatic': 'automatisch',
+        'before a restore': 'vor einer Wiederherstellung', 'before editing': 'vor dem Bearbeiten', 'imported': 'importiert',
+        'Automatic backup: {}': 'Automatische Sicherung: {}',
+        'Automatic backup failed: {}': 'Automatische Sicherung fehlgeschlagen: {}',
+        'Backup created: {}': 'Sicherung erstellt: {}', 'Backup imported: {}': 'Sicherung importiert: {}',
+        'Close the game first.': 'Beende zuerst das Spiel.',
+        'Could not create the backup: {}': 'Sicherung konnte nicht erstellt werden: {}',
+        'Could not delete the backup: {}': 'Sicherung konnte nicht gelöscht werden: {}',
+        'Could not import the backup: {}': 'Sicherung konnte nicht importiert werden: {}',
+        'Could not restore the backup: {}': 'Sicherung konnte nicht wiederhergestellt werden: {}',
+        'Could not open the save editor: {}': 'Der Spielstand-Editor konnte nicht geöffnet werden: {}',
+        'Delete the backup {}? This cannot be undone.': 'Sicherung {} löschen? Das kann nicht rückgängig gemacht werden.',
+        'Restore {}? The current saves of this game are backed up first.':
+        '{} wiederherstellen? Die aktuellen Spielstände dieses Spiels werden vorher gesichert.',
+        'Saves restored.': 'Spielstände wiederhergestellt.',
+        'Saves restored. The previous saves are in {}.': 'Spielstände wiederhergestellt. Die vorherigen liegen in {}.',
+        'Import a save backup': 'Spielstand-Sicherung importieren', 'Save backup': 'Spielstand-Sicherung',
+        'The save editor is not part of this build yet.': 'Der Spielstand-Editor ist noch nicht in dieser Version.',
+    },
+    'it': {
+        'Saves': 'Salvataggi', 'Your saves': 'I tuoi salvataggi', 'Backups': 'Backup',
+        'Back up your saves, undo a save damaged by a crash, keep extra copies.':
+        'Fai il backup dei salvataggi, recupera un salvataggio danneggiato da un crash, conserva copie in più.',
+        'Each game keeps one autosave and a profile; back up to keep more than one point in a game.':
+        'Ogni gioco ha un solo salvataggio automatico e un profilo; fai backup per conservare più punti di un gioco.',
+        'Back up the saves before every game start': 'Backup dei salvataggi prima di ogni avvio del gioco',
+        'Skipped when nothing changed since the last automatic backup.':
+        "Saltato se nulla è cambiato dall'ultimo backup automatico.",
+        'Automatic backups to keep': 'Backup automatici da conservare', 'Back up': 'Backup',
+        'Back up all': 'Backup di tutto', 'Import backup…': 'Importa backup…',
+        'Open the backups folder': 'Apri la cartella dei backup', 'Edit': 'Modifica', 'Restore': 'Ripristina',
+        'Delete': 'Elimina', 'All games': 'Tutti i giochi', 'Shared collection profile': 'Profilo condiviso della raccolta',
+        'Other saves': 'Altri salvataggi', 'Modified {}': 'Modificato {}',
+        'No saves yet. They appear here once a game has saved.':
+        'Nessun salvataggio. Compaiono qui quando un gioco ha salvato.',
+        'No backups yet.': 'Nessun backup.', 'manual': 'manuale', 'automatic': 'automatico',
+        'before a restore': 'prima di un ripristino', 'before editing': 'prima della modifica', 'imported': 'importato',
+        'Automatic backup: {}': 'Backup automatico: {}', 'Automatic backup failed: {}': 'Backup automatico non riuscito: {}',
+        'Backup created: {}': 'Backup creato: {}', 'Backup imported: {}': 'Backup importato: {}',
+        'Close the game first.': 'Chiudi prima il gioco.',
+        'Could not create the backup: {}': 'Impossibile creare il backup: {}',
+        'Could not delete the backup: {}': 'Impossibile eliminare il backup: {}',
+        'Could not import the backup: {}': 'Impossibile importare il backup: {}',
+        'Could not restore the backup: {}': 'Impossibile ripristinare il backup: {}',
+        'Could not open the save editor: {}': "Impossibile aprire l'editor dei salvataggi: {}",
+        'Delete the backup {}? This cannot be undone.': 'Eliminare il backup {}? Non si può annullare.',
+        'Restore {}? The current saves of this game are backed up first.':
+        'Ripristinare {}? Prima viene fatto un backup dei salvataggi attuali di questo gioco.',
+        'Saves restored.': 'Salvataggi ripristinati.',
+        'Saves restored. The previous saves are in {}.': 'Salvataggi ripristinati. I precedenti sono in {}.',
+        'Import a save backup': 'Importa un backup dei salvataggi', 'Save backup': 'Backup dei salvataggi',
+        'The save editor is not part of this build yet.': "L'editor dei salvataggi non è ancora in questa versione.",
+    },
+    'ja': {
+        'Saves': 'セーブデータ', 'Your saves': 'セーブデータ一覧', 'Backups': 'バックアップ',
+        'Back up your saves, undo a save damaged by a crash, keep extra copies.':
+        'セーブデータをバックアップし、クラッシュで壊れたセーブを元に戻し、追加のコピーを保存します。',
+        'Each game keeps one autosave and a profile; back up to keep more than one point in a game.':
+        '各ゲームのセーブはオートセーブ1つとプロフィールのみです。複数の地点を残すにはバックアップを使います。',
+        'Back up the saves before every game start': 'ゲーム起動のたびにセーブデータをバックアップする',
+        'Skipped when nothing changed since the last automatic backup.':
+        '前回の自動バックアップから変更がない場合は行いません。',
+        'Automatic backups to keep': '保持する自動バックアップ数', 'Back up': 'バックアップ',
+        'Back up all': 'すべてバックアップ', 'Import backup…': 'バックアップを読み込む…',
+        'Open the backups folder': 'バックアップフォルダーを開く', 'Edit': '編集', 'Restore': '復元',
+        'Delete': '削除', 'All games': 'すべてのゲーム', 'Shared collection profile': 'コレクション共通プロフィール',
+        'Other saves': 'その他のセーブ', 'Modified {}': '更新 {}',
+        'No saves yet. They appear here once a game has saved.':
+        'セーブデータはまだありません。ゲームがセーブするとここに表示されます。',
+        'No backups yet.': 'バックアップはまだありません。', 'manual': '手動', 'automatic': '自動',
+        'before a restore': '復元前', 'before editing': '編集前', 'imported': '読み込み',
+        'Automatic backup: {}': '自動バックアップ: {}', 'Automatic backup failed: {}': '自動バックアップに失敗しました: {}',
+        'Backup created: {}': 'バックアップを作成しました: {}', 'Backup imported: {}': 'バックアップを読み込みました: {}',
+        'Close the game first.': '先にゲームを終了してください。',
+        'Could not create the backup: {}': 'バックアップを作成できませんでした: {}',
+        'Could not delete the backup: {}': 'バックアップを削除できませんでした: {}',
+        'Could not import the backup: {}': 'バックアップを読み込めませんでした: {}',
+        'Could not restore the backup: {}': 'バックアップを復元できませんでした: {}',
+        'Could not open the save editor: {}': 'セーブエディターを開けませんでした: {}',
+        'Delete the backup {}? This cannot be undone.': 'バックアップ {} を削除しますか? 元に戻せません。',
+        'Restore {}? The current saves of this game are backed up first.':
+        '{} を復元しますか? 先にこのゲームの現在のセーブをバックアップします。',
+        'Saves restored.': 'セーブデータを復元しました。',
+        'Saves restored. The previous saves are in {}.': 'セーブデータを復元しました。以前のセーブは {} にあります。',
+        'Import a save backup': 'セーブのバックアップを読み込む', 'Save backup': 'セーブのバックアップ',
+        'The save editor is not part of this build yet.': 'セーブエディターはこのビルドにはまだありません。',
+    },
+}

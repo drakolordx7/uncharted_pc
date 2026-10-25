@@ -34,6 +34,7 @@ sys.path.insert(0, str(PORT_DIR / 'scripts'))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import trophies  # noqa: E402  (scripts/trophies.py: the games' trophy lists)
 import uncharted_i18n
+import uncharted_saves
 
 DATA_DIR = Path(os.environ.get('BB_DATA_DIR', PORT_DIR))
 CONFIG_DIR = Path(os.environ.get('APPDATA', Path.home())) / 'uncharted-launcher'
@@ -226,7 +227,7 @@ APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_
                 'mouse_look': True, 'mouse_sensitivity': '1.0', 'mouse_invert_y': False,
                 'pad_invert_y': False, 'art_banner': '', 'art_u1': '', 'art_u2': '', 'art_u3': '', 'steam_art': '', 'art_crops': {},
                 'shortcut_name': 'Uncharted: The Nathan Drake Collection', 'shortcut_icon': '', 'trophy_game': 'u1',
-                'pad_vibration': True, 'pad_vibration_strength': '100', 'button_prompts': 'auto', 'aim_assist': 'on', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True,
+                'auto_backup': True, 'backup_keep': '10', 'pad_vibration': True, 'pad_vibration_strength': '100', 'button_prompts': 'auto', 'aim_assist': 'on', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True,
                 **{key: 'auto' for key in FIXES},
                 **{f'{game}_infinite_{cheat}': False for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')}}
 
@@ -384,6 +385,49 @@ def game_available(s, key):
     exe = next(e for k, _t, _s, e in GAMES if k == key)
     own = str(s.get(f'game_dir_{key}') or '').strip()
     return (Path(folder) / exe).is_file() or bool(own and (Path(folder) / 'eboot.bin').is_file())
+
+
+def saves_user_dir(s):
+    """The folder the game keeps its saves in (Game page, else user/ beside the launcher)."""
+    return Path(str(s.get('user_dir') or '').strip() or DATA_DIR / 'user')
+
+
+def backup_keep(s):
+    try:
+        return max(1, min(100, int(str(s.get('backup_keep') or '10'))))
+    except ValueError:
+        return 10
+
+
+def backup_before_launch(s):
+    """The automatic backup of every save before a game starts (Saves page), so a crash that damages
+    a save can be undone; None when it is off, there are no saves or nothing changed."""
+    if not s.get('auto_backup', True):
+        return None
+    return uncharted_saves.auto_backup(saves_user_dir(s), backup_keep(s), game=game_info(game_folder(s, s['start'])))
+
+
+_SAVE_EDITOR = []
+
+
+def load_save_editor():
+    """scripts/save_editor.py (BB_SAVE_EDITOR names another copy), or None. The launcher uses
+    describe(save_dir) -> str or dict for the Saves list and open_editor(save_dir, game=, parent=)
+    for the Edit button."""
+    if not _SAVE_EDITOR:
+        module = None
+        for path in (os.environ.get('BB_SAVE_EDITOR'), PORT_DIR / 'scripts' / 'save_editor.py'):
+            if path and Path(path).is_file():
+                try:
+                    import importlib.util
+                    spec = importlib.util.spec_from_file_location('save_editor', str(path))
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    break
+                except Exception:  # a broken editor must not break the launcher
+                    module = None
+        _SAVE_EDITOR.append(module)
+    return _SAVE_EDITOR[0]
 
 
 def mouse_sensitivity(s):
@@ -611,7 +655,7 @@ COLORS = {'surface': SURFACE, 'card': CARD, 'card_hi': CARD_HI, 'line': LINE, 't
           'button': '#25272b', 'button_hi': '#30333a'}
 # Sidebar icons (Segoe Fluent Icons on Windows 11, Segoe MDL2 Assets on Windows 10).
 NAV_ICONS = {'play': '\ue768', 'game': '\ue7fc', 'display': '\ue7f4', 'controls': '\ue765',
-             'cheats': '\ue945', 'fixes': '\ue90f', 'trophies': '\ue734', 'advanced': '\ue713', 'log': '\ue8a5'}
+             'cheats': '\ue945', 'fixes': '\ue90f', 'trophies': '\ue734', 'saves': '\ue74e', 'advanced': '\ue713', 'log': '\ue8a5'}
 # Trophy grades as the console colours them (the platinum cool white-blue, the rest metal).
 TROPHY_COLORS = {'P': '#9fd0f5', 'G': GOLD, 'S': '#cfd3da', 'B': '#cf8548'}
 RUST, RUST_HI = GOLD, GOLD_HI
@@ -1124,7 +1168,7 @@ class Launcher:
         tk.Frame(side, bg=LINE, height=1).pack(fill='x', padx=18, pady=(16, 14))
         self.nav, self.nav_pills, self.nav_icons, self.nav_marks, self.current_page = {}, {}, {}, {}, None
         for name, title in (('play', _('Play')), ('game', _('Game')), ('cheats', _('Cheats')), ('display', _('Display')),
-                            ('controls', _('Controls')), ('fixes', _('Fixes')), ('trophies', _('Trophies')), ('advanced', _('Advanced')),
+                            ('controls', _('Controls')), ('fixes', _('Fixes')), ('trophies', _('Trophies')), ('saves', _('Saves')), ('advanced', _('Advanced')),
                             ('log', _('Log'))):
             row = tk.Frame(side, bg=BG, cursor='hand2')
             row.pack(fill='x', padx=(0, 12), pady=2)
@@ -1185,6 +1229,7 @@ class Launcher:
         self.build_controls()
         self.build_fixes()
         self.build_trophies()
+        self.build_saves()
         self.build_cheats()
         self.build_advanced()
         self.build_log()
@@ -1228,6 +1273,8 @@ class Launcher:
             self.trophy_info.clear()  # the game folder or the language may have changed
             self.trophy_state = None
             self.render_trophies()
+        elif name == 'saves':
+            self.render_saves()
 
     def build_play(self):
         tk, ttk = self.tk, self.ttk
@@ -1856,6 +1903,217 @@ class Launcher:
                 pass
         self.root.after(1500, self.poll_trophies)
 
+    # ---- saves ---------------------------------------------------------------------------------
+    def build_saves(self):
+        f = self.page('saves', _('Saves'), _('Back up your saves, undo a save damaged by a crash, keep extra copies.'))
+        self.save_details = {}
+        self.save_card = self.new_card(f, _('Your saves'))
+        self.save_body = self.tk.Frame(self.save_card.inner, bg=CARD)
+        self.save_body.grid(row=1, column=0, columnspan=4, sticky='we')
+        self.save_body.columnconfigure(0, weight=1)
+        self.note(f, _('Each game keeps one autosave and a profile; back up to keep more than one point in a game.'),
+                  top=10)
+        self.section(f, _('Backups'))
+        self.check(f, 'auto_backup', _('Back up the saves before every game start'),
+                   _('Skipped when nothing changed since the last automatic backup.'))
+        self.row(f, _('Automatic backups to keep'),
+                 self.choice(f, 'backup_keep', [(n, n) for n in ('3', '5', '10', '20', '50')], width=8))
+        inner = self.target(f)
+        holder = self.tk.Frame(inner, bg=CARD)
+        holder.grid(row=self.next_row(inner), column=0, columnspan=2, sticky='w', pady=(14, 4))
+        self.pill(holder, _('Back up all'), lambda: self.backup_saves('all'), kind='primary').pack(side='left')
+        self.pill(holder, _('Import backup…'), self.import_save_backup).pack(side='left', padx=(8, 0))
+        self.pill(holder, _('Open the backups folder'), self.open_backups).pack(side='left', padx=(8, 0))
+        self.backup_card = self.page_cards[f]
+        self.backup_body = self.tk.Frame(inner, bg=CARD)
+        self.backup_body.grid(row=self.next_row(inner), column=0, columnspan=4, sticky='we', pady=(8, 0))
+        self.backup_body.columnconfigure(0, weight=1)
+
+    def save_game_name(self, key):
+        names = {k: f'{t} · {s}' for k, t, s, _e in GAMES}
+        names.update(shared=_('Shared collection profile'), all=_('All games'))
+        return names.get(key, key or '?')
+
+    def save_running(self):
+        return bool(self.process) or uncharted_saves.game_process_running()
+
+    def render_saves(self):
+        tk = self.tk
+        user = saves_user_dir(self.current())
+        describe = getattr(load_save_editor(), 'describe', None)
+        for child in self.save_body.winfo_children():
+            child.destroy()
+        try:
+            found = uncharted_saves.list_saves(user)
+        except OSError:
+            found = []
+        if not found:
+            tk.Label(self.save_body, text=_('No saves yet. They appear here once a game has saved.'), bg=CARD,
+                     fg=MUTED, font=self.font_ui, anchor='w').grid(row=0, column=0, sticky='w', pady=(4, 0))
+        row = 0
+        for key in ('u1', 'u2', 'u3', 'shared', None):
+            group = [s for s in found if s['game'] == key]
+            if not group:
+                continue
+            head = tk.Frame(self.save_body, bg=CARD)
+            head.grid(row=row, column=0, sticky='we', pady=(10 if row else 2, 4))
+            tk.Label(head, text=self.save_game_name(key) if key else _('Other saves'), bg=CARD, fg=TEXT,
+                     font=self.font_ui_md, anchor='w').pack(side='left')
+            if key:
+                self.pill(head, _('Back up'), lambda k=key: self.backup_saves(k), padding=(14, 6)).pack(side='right')
+            row += 1
+            for save in group:
+                line = tk.Frame(self.save_body, bg=CARD_HI)
+                line.grid(row=row, column=0, sticky='we', pady=(0, 4))
+                row += 1
+                text = tk.Frame(line, bg=CARD_HI)
+                text.pack(side='left', fill='x', expand=True, padx=12, pady=6)
+                tk.Label(text, text=save['subtitle'] or save['dir'], bg=CARD_HI, fg=TEXT, font=self.font_ui,
+                         anchor='w').pack(anchor='w')
+                when = time.strftime('%d %b %Y %H:%M', time.localtime(save['modified'])) if save['modified'] else '?'
+                extra = ' · '.join(x for x in (save['detail'].replace('\n', ' · ').strip(' ·'), save['dir'],
+                                               _('Modified {}').format(when)) if x)
+                details = self.save_describe(describe, save)
+                if details:
+                    extra += '\n' + details
+                tk.Label(text, text=extra, bg=CARD_HI, fg=MUTED, font=self.font_ui_sm, anchor='w', justify='left',
+                         wraplength=self.px(560)).pack(anchor='w')
+                if key in ('u1', 'u2', 'u3'):
+                    self.pill(line, _('Edit'), lambda s=save: self.edit_save(s), background=CARD_HI,
+                              padding=(14, 6)).pack(side='right', padx=10)
+        self.save_card.refit()
+        self.render_backups()
+
+    def save_describe(self, describe, save):
+        """save_editor.describe() of a save as one line (cached per save and modification time)."""
+        if not describe:
+            return ''
+        key = (str(save['path']), save['modified'])
+        if key not in self.save_details:
+            try:
+                value = describe(str(save['path']))
+            except Exception:  # the editor cannot read this save: show the time only
+                value = None
+            if isinstance(value, dict):
+                value = ' · '.join(f'{k}: {v}' for k, v in value.items() if v not in (None, ''))
+            self.save_details[key] = str(value)[:200] if value else ''
+        return self.save_details[key]
+
+    def render_backups(self):
+        tk = self.tk
+        for child in self.backup_body.winfo_children():
+            child.destroy()
+        backups = uncharted_saves.list_backups(uncharted_saves.backup_dir(saves_user_dir(self.current())))
+        kinds = {'manual': _('manual'), 'auto': _('automatic'), 'before-restore': _('before a restore'),
+                 'before-edit': _('before editing'), 'imported': _('imported')}
+        if not backups:
+            tk.Label(self.backup_body, text=_('No backups yet.'), bg=CARD, fg=MUTED, font=self.font_ui,
+                     anchor='w').grid(row=0, column=0, sticky='w')
+        for row, backup in enumerate(backups[:40]):
+            line = tk.Frame(self.backup_body, bg=CARD_HI)
+            line.grid(row=row, column=0, sticky='we', pady=(0, 4))
+            text = tk.Frame(line, bg=CARD_HI)
+            text.pack(side='left', fill='x', expand=True, padx=12, pady=6)
+            usable = backup['manifest'] is not None
+            tk.Label(text, text=self.save_game_name(backup['game']) if usable else backup['name'], bg=CARD_HI,
+                     fg=TEXT if usable else MUTED, font=self.font_ui, anchor='w').pack(anchor='w')
+            when = backup['created'].replace('T', ' ')[:16] or \
+                time.strftime('%Y-%m-%d %H:%M', time.localtime(backup['mtime']))
+            tk.Label(text, text=f"{when} · {kinds.get(backup['kind'], backup['kind'])} · "
+                                f"{max(1, backup['size'] // 1024)} KB · {backup['name']}",
+                     bg=CARD_HI, fg=MUTED, font=self.font_ui_sm, anchor='w').pack(anchor='w')
+            self.pill(line, _('Delete'), lambda b=backup: self.delete_save_backup(b), background=CARD_HI,
+                      padding=(14, 6)).pack(side='right', padx=(4, 10))
+            if usable:
+                self.pill(line, _('Restore'), lambda b=backup: self.restore_save_backup(b['path']),
+                          background=CARD_HI, padding=(14, 6)).pack(side='right')
+        self.backup_card.refit()
+
+    def backup_saves(self, key):
+        s = self.current()
+        try:
+            made = uncharted_saves.create_backup(saves_user_dir(s), key, game=game_info(game_folder(s, s['start'])))
+        except (OSError, uncharted_saves.SaveError) as error:
+            self.messagebox.showerror(NAME, _('Could not create the backup: {}').format(error))
+            return
+        if not made:
+            self.messagebox.showinfo(NAME, _('No saves yet. They appear here once a game has saved.'))
+            return
+        self.status.configure(text=_('Backup created: {}').format(made.name), fg=MUTED)
+        self.render_backups()
+
+    def restore_save_backup(self, path):
+        if self.save_running():
+            self.messagebox.showerror(NAME, _('Close the game first.'))
+            return
+        manifest = uncharted_saves.read_manifest(path) or {}
+        game = self.save_game_name('all' if manifest.get('format') == uncharted_saves.OLD_FORMAT
+                                   else manifest.get('game'))
+        created = str(manifest.get('created', '')).replace('T', ' ')
+        if not self.messagebox.askyesno(
+                NAME, _('Restore {}? The current saves of this game are backed up first.').format(f'{game} ({created})')):
+            return
+        s = self.current()
+        user = saves_user_dir(s)
+        info = game_info(game_folder(s, s['start']))
+        expected = set(uncharted_saves.title_ids(user)) or ({info['id']} if info else set())
+        try:
+            _manifest, before = uncharted_saves.restore_backup(
+                user, path, backup_keep(s), self.save_running, expected or None, info)
+        except (OSError, uncharted_saves.SaveError) as error:
+            self.messagebox.showerror(NAME, _('Could not restore the backup: {}').format(error))
+            self.render_saves()
+            return
+        self.render_saves()
+        self.messagebox.showinfo(NAME, _('Saves restored. The previous saves are in {}.').format(before.name)
+                                 if before else _('Saves restored.'))
+
+    def delete_save_backup(self, backup):
+        if not self.messagebox.askyesno(NAME, _('Delete the backup {}? This cannot be undone.').format(backup['name'])):
+            return
+        try:
+            uncharted_saves.delete_backup(backup['path'], backup['path'].parent)
+        except (OSError, uncharted_saves.SaveError) as error:
+            self.messagebox.showerror(NAME, _('Could not delete the backup: {}').format(error))
+        self.render_backups()
+
+    def import_save_backup(self):
+        source = self.filedialog.askopenfilename(title=_('Import a save backup'),
+                                                 filetypes=[(_('Save backup'), '*.zip')])
+        if not source:
+            return
+        try:
+            made = uncharted_saves.import_backup(source, uncharted_saves.backup_dir(saves_user_dir(self.current())))
+        except (OSError, uncharted_saves.SaveError) as error:
+            self.messagebox.showerror(NAME, _('Could not import the backup: {}').format(error))
+            return
+        self.status.configure(text=_('Backup imported: {}').format(made.name), fg=MUTED)
+        self.render_backups()
+
+    def open_backups(self):
+        self.open_path(uncharted_saves.backup_dir(saves_user_dir(self.current())))
+
+    def edit_save(self, save):
+        """The Edit button: save_editor.open_editor(save_dir, game='u1'|'u2'|'u3', parent=<Tk root>) from
+        scripts/save_editor.py, after a backup of that game; only while no game runs."""
+        editor = load_save_editor()
+        if not editor or not callable(getattr(editor, 'open_editor', None)):
+            self.messagebox.showinfo(NAME, _('The save editor is not part of this build yet.'))
+            return
+        if self.save_running():
+            self.messagebox.showerror(NAME, _('Close the game first.'))
+            return
+        s = self.current()
+        try:
+            uncharted_saves.create_backup(saves_user_dir(s), save['game'], kind='before-edit',
+                                          game=game_info(game_folder(s, s['start'])))
+            uncharted_saves.prune(uncharted_saves.backup_dir(saves_user_dir(s)), backup_keep(s), kind='before-edit')
+            editor.open_editor(str(save['path']), game=save['game'], parent=self.root)
+        except Exception as error:  # the editor is a separate tool: report, keep the launcher running
+            self.messagebox.showerror(NAME, _('Could not open the save editor: {}').format(error))
+        self.save_details.clear()
+        self.render_saves()
+
     def build_cheats(self):
         f = self.page('cheats', _('Cheats'), _('Each cheat only affects its own game; changes apply when the game starts.'))
         for game, title, subtitle, _exe in GAMES:
@@ -2071,6 +2329,12 @@ class Launcher:
             self.messagebox.showerror(NAME, _('This game is not in the chosen folder.'))
             return
         self.set_log('')
+        try:
+            made = backup_before_launch(self.app)
+            if made:
+                self.append(_('Automatic backup: {}').format(made) + '\n')
+        except Exception as error:  # a failed backup must not keep the game from starting
+            self.append(_('Automatic backup failed: {}').format(error) + '\n')
         try:
             env = game_environment(self.app)
         except OSError as error:
@@ -2676,6 +2940,12 @@ def play_without_window(settings):
     log_dir = Path(settings.get('user_dir') or DATA_DIR / 'user')
     log_dir.mkdir(parents=True, exist_ok=True)
     with open(log_dir / 'last_run.log', 'w', encoding='utf-8', buffering=1) as log:
+        try:
+            made = backup_before_launch(settings)
+            if made:
+                log.write(f'Automatic backup: {made}\n')
+        except Exception as error:  # a failed backup must not keep the game from starting
+            log.write(f'Automatic backup failed: {error}\n')
         try:
             env = game_environment(settings)
         except OSError as error:
