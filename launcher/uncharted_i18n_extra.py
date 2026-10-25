@@ -40,6 +40,10 @@ EXTRA_TRANSLATIONS = {
         'How the game window is shown.': 'Wie das Spielfenster angezeigt wird.',
         'Interface language': 'Sprache der Benutzeroberfläche',
         'Invert the mouse vertically': 'Maus vertikal umkehren',
+        'Aiming': 'Zielen',
+        'Aim assist': 'Zielhilfe',
+        'On (game default)': 'An (Spielstandard)',
+        'Off: aiming no longer slows down near enemies or follows them (all three games).': 'Aus: Das Zielen wird in der Nähe von Gegnern nicht mehr langsamer und folgt ihnen nicht mehr (alle drei Spiele).',
         'Invert the right stick vertically': 'Rechten Stick vertikal umkehren',
         'Keyboard and mouse buttons': 'Tastatur- und Maustasten',
         'Keyboard, mouse and controller. They work together; changes apply when the game starts.':
@@ -138,6 +142,10 @@ EXTRA_TRANSLATIONS = {
         'How the game window is shown.': 'Come viene mostrata la finestra del gioco.',
         'Interface language': "Lingua dell'interfaccia",
         'Invert the mouse vertically': 'Inverti verticalmente il mouse',
+        'Aiming': 'Mira',
+        'Aim assist': 'Mira assistita',
+        'On (game default)': 'Attiva (predefinito del gioco)',
+        'Off: aiming no longer slows down near enemies or follows them (all three games).': 'Disattivata: la mira non rallenta più vicino ai nemici e non li segue (tutti e tre i giochi).',
         'Invert the right stick vertically': 'Inverti verticalmente la levetta destra',
         'Keyboard and mouse buttons': 'Tasti di tastiera e mouse',
         'Keyboard, mouse and controller. They work together; changes apply when the game starts.':
@@ -236,6 +244,10 @@ EXTRA_TRANSLATIONS = {
         'How the game window is shown.': 'ゲームウィンドウの表示方法です。',
         'Interface language': 'インターフェース言語',
         'Invert the mouse vertically': 'マウスの上下操作を反転',
+        'Aiming': 'エイム',
+        'Aim assist': 'エイムアシスト',
+        'On (game default)': 'オン（ゲームの既定）',
+        'Off: aiming no longer slows down near enemies or follows them (all three games).': 'オフ：敵の近くでエイムが遅くならず、敵を追従しません（3作品すべて）。',
         'Invert the right stick vertically': '右スティックの上下操作を反転',
         'Keyboard and mouse buttons': 'キーボードとマウスのボタン',
         'Keyboard, mouse and controller. They work together; changes apply when the game starts.':

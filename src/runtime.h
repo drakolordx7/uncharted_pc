@@ -121,4 +121,8 @@ typedef struct {
     const unsigned char *patch;
 } RuntimeGuestCallback;
 const RuntimeGuestCallback *runtime_guest_callbacks(size_t *count);
+/* Whether an entry is wanted (offset 0: asked before the search; an entry not wanted is not searched
+ * and not reported missing), and the notice right before it is installed at `offset`. Entries that a
+ * launcher setting switches (aim assist) answer by their setting, all others are wanted. */
+int runtime_guest_callback_wanted(const RuntimeGuestCallback *c, uint64_t offset);
 #endif

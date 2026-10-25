@@ -820,6 +820,35 @@ static const unsigned char u3_focus_reset_102[]={
     0x83,0xf8,0x0f,0x0f,0x84,0xa5,0xfe,0xff,0xff,0xcd,0x41,CC8,CC8,CC8,
 };
 _Static_assert(sizeof(u3_focus_reset_100)==51 && sizeof(u3_focus_reset_102)==53,"patch sizes");
+/* Aim assist (Supermedo/uncharted_pc#598). While aiming, each game picks the enemy nearest the
+ * reticle and then (a) slows the turn down (friction: the stick's turn speed is multiplied by a
+ * factor below 1) and (b) turns the aim along with the target (magnetism). Both are applied in the
+ * aiming machine's UpdatePlayerAiming (player-aiming-machine3.cpp), right after it stores whether a
+ * target was found:
+ *   U1: mov [r13+0xcd9], al; je <skip>   (friction scales [r13+0xcc8/0xccc], magnetism [r13+0xcf0/0xcf4])
+ *   U2: mov [r13+0xce1], al; je <skip>   (friction scales [r13+0xcd0/0xcd4], magnetism [r13+0xcf8/0xcfc])
+ *   U3: the same block is guarded by Naughty Dog's own dev menu switch "Disable Aim Assist" (byte +0x3d of
+ *       the per-player debug settings, 64 bytes each): cmp byte [settings+player*64+0x3d], 0; jne <skip>.
+ *       Friction is [r13+0x100/0x104] (back to 1 at 1 per second without a target), magnetism
+ *       [r13+0x134/0x138].
+ * BB_AIM_ASSIST=0 makes that jump unconditional (the je/jne opcode 0f 84/0f 85 becomes nop; jmp with the
+ * same displacement), as the U3 switch does; unset (or any other value) keeps the game's own aim.
+ * Sites: U1 1.00 0x2786d7, 1.02 0x278cc7; U2 1.00 0x336a2e, 1.02 0x71d0ee; U3 1.00 0x31aa32, 1.02 0x92c3ac. */
+static const unsigned char aim_assist_jump[]={0x90,0xe9};
+static int aim_assist_gate(const RuntimeGuestCallback *c, uint64_t offset) {
+    if (!strstr(c->name," aim assist")) return 1;
+    static int off=-1;
+    if (off<0) { const char *t=getenv("BB_AIM_ASSIST"); off=t && t[0]=='0'; }
+    if (!off || !offset) return off;
+    static const struct { uint64_t offset; const char *build; } known[]={
+        {0x2786d7,"U1 1.00"},{0x278cc7,"U1 1.02"},{0x336a2e,"U2 1.00"},{0x71d0ee,"U2 1.02"},
+        {0x31aa32,"U3 1.00"},{0x92c3ac,"U3 1.02"}};
+    const char *build=NULL;
+    for (size_t i=0;i<sizeof(known)/sizeof(*known);++i) if (known[i].offset==offset) build=known[i].build;
+    if (build) printf("Aim assist: off (%s, patched at %#llx)\n",build,(unsigned long long)offset);
+    else printf("Aim assist: off (%.2s, other build, patched at %#llx)\n",c->name,(unsigned long long)offset);
+    return 1;
+}
 /* The camera code, the pad code and the assertion are found by their instructions, so a build of the
  * game that has them works (version 1.00 and 1.02 are known; "build" below). RIP-relative
  * displacements and call targets are wildcards. Entries with one name are variants for the builds. */
@@ -1016,12 +1045,29 @@ static const RuntimeGuestCallback guest_callbacks[]={
       "49 89 d7 48 89 f3 49 89 fe",
       0x0, 6, u1_cover_camera, NULL},
 
+    /* Aim assist off (BB_AIM_ASSIST=0, see aim_assist_gate; the names select it there): U1 and U2 both builds, U3 1.02, U3 1.00 */
+    {"U1 aim assist",
+      "48 8b 85 ?? ?? ?? ?? 24 01 41 88 85 d9 0c 00 00 0f 84 ?? ?? ?? ?? 48 8b 85",
+      16, 2, NULL, aim_assist_jump},
+    {"U2 aim assist",
+      "48 8b 85 ?? ?? ?? ?? 24 01 41 88 85 e1 0c 00 00 0f 84 ?? ?? ?? ?? 48 8b 85",
+      16, 2, NULL, aim_assist_jump},
+    {"U3 aim assist",
+      "48 8d 15 ?? ?? ?? ?? 80 7c 0a 3d 00 0f 85 ?? ?? ?? ?? 4d 89 ee 89 c0 48 8b 9c c5",
+      12, 2, NULL, aim_assist_jump},
+    {"U3 aim assist",
+      "48 8d 0d ?? ?? ?? ?? 80 7c 01 3d 00 0f 85 ?? ?? ?? ?? 48 8b 85 ?? ?? ?? ?? 41 89 c6",
+      12, 2, NULL, aim_assist_jump},
+
     /* The 7 bytes after the mov r9 are `mov qword [rdi], 0`: link_modules.py (patches/redzone.json, PR #403) replaces that
      * store with a jump to a red-zone-safe copy on Windows, so they are masked and the hook is found either way. */
     {"CUE table fill",
       "55 41 57 41 56 41 55 41 54 53 49 b9 00 24 00 0d 10 00 00 00 ?? ?? ?? ?? ?? ?? ?? 45 31 f6",
       0, 5, cue_table_pretouch, NULL},
 };
+int runtime_guest_callback_wanted(const RuntimeGuestCallback *c, uint64_t offset) {
+    return aim_assist_gate(c,offset);
+}
 const RuntimeGuestCallback *runtime_guest_callbacks(size_t *count) {
     *count=sizeof(guest_callbacks)/sizeof(*guest_callbacks);
     return guest_callbacks;

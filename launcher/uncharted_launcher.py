@@ -205,6 +205,8 @@ FIXES = {
         {'on': {'BB_CS_SPLIT_1024': '1'}, 'off': {'BB_CS_SPLIT_1024': '0'}}),
 }
 FIX_CHOICES = [('auto', 'Automatic'), ('on', 'On'), ('off', 'Off')]
+# Controls page: the games' aim assist (the aim slows down on and follows the enemy under the reticle).
+AIM_ASSIST_CHOICES = [('on', 'On (game default)'), ('off', 'Off')]
 
 # Insert opens the in-game settings menu; Left Alt frees the mouse cursor.
 RESERVED_KEYS = {'Insert': 'Insert is reserved for the in-game settings menu.',
@@ -218,7 +220,7 @@ APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_
                 'mouse_look': True, 'mouse_sensitivity': '1.0', 'mouse_invert_y': False,
                 'pad_invert_y': False, 'art_banner': '', 'art_u1': '', 'art_u2': '', 'art_u3': '', 'steam_art': '', 'art_crops': {},
                 'shortcut_name': 'Uncharted: The Nathan Drake Collection', 'shortcut_icon': '', 'trophy_game': 'u1',
-                'pad_vibration': True, 'pad_vibration_strength': '100', 'button_prompts': 'auto', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True,
+                'pad_vibration': True, 'pad_vibration_strength': '100', 'button_prompts': 'auto', 'aim_assist': 'on', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True,
                 **{key: 'auto' for key in FIXES},
                 **{f'{game}_infinite_{cheat}': False for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')}}
 
@@ -576,6 +578,8 @@ def game_environment(s, start=None):
     for key, (_title, _hint, choices) in FIXES.items():
         env.update(choices.get(str(s.get(key) or 'auto'), {}))
     env['BB_BUTTON_PROMPTS'] = str(s.get('button_prompts') or 'auto')
+    if str(s.get('aim_assist') or 'on') == 'off':
+        env['BB_AIM_ASSIST'] = '0'
     env['BB_CHEATS'] = ','.join(f'{game}:{cheat}' for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')
                                 if s.get(f'{game}_infinite_{cheat}'))
     for item in str(s['extra_env']).split():
@@ -1498,6 +1502,10 @@ class Launcher:
                         COLORS, self.px, self.font_ui_md, width=300, log=True, entry=True),
                  _('Default is 1.00.'))
         self.check(f, 'mouse_invert_y', _('Invert the mouse vertically'))
+
+        self.section(f, _('Aiming'))
+        self.row(f, _('Aim assist'), self.choice(f, 'aim_assist', AIM_ASSIST_CHOICES, 24),
+                 _('Off: aiming no longer slows down near enemies or follows them (all three games).'))
 
         self.section(f, _('Button prompts'))
         self.row(f, _('Style'), self.choice(f, 'button_prompts', BUTTON_PROMPTS, 40))
