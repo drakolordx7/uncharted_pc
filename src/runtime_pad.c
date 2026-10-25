@@ -7,7 +7,8 @@
  *       "Wheel Down"; actions: cross circle square triangle l1 r1 l2 r2 l3 r3 options touchpad
  *       up down left right, ls_up ls_down ls_left ls_right, rs_up rs_down rs_left rs_right,
  *       rotate_ccw rotate_cw (held: the left stick circles counter-clockwise / clockwise, for
- *       the valves and wheels that ask for the stick turned in circles).
+ *       the valves and wheels that ask for the stick turned in circles), overlay (opens and
+ *       closes the in-game menu, Insert by default; a key or Mouse Middle / 4 / 5).
  *   pad.<action>=<controller button>   SDL names (a b x y leftshoulder rightshoulder
  *       lefttrigger righttrigger leftstick rightstick back start dpup dpdown dpleft dpright
  *       touchpad misc1 paddle1..paddle4) or "none", for the button actions above.
@@ -116,7 +117,7 @@ enum { BIND_KEY=1, BIND_MOUSE, BIND_WHEEL, BIND_LAYOUT };
 typedef struct { uint8_t kind; int32_t code; } Bind;
 typedef struct { const char *name; uint32_t ps; const char *keys; const char *pad; } Action;
 enum { A_LS_UP=16, A_LS_DOWN, A_LS_LEFT, A_LS_RIGHT, A_RS_UP, A_RS_DOWN, A_RS_LEFT, A_RS_RIGHT,
-       A_ROT_CCW, A_ROT_CW, ACTIONS };
+       A_ROT_CCW, A_ROT_CW, A_OVERLAY, ACTIONS };
 static const Action actions[ACTIONS]={
     {"cross",BTN_CROSS,"Space","a"}, {"circle",BTN_CIRCLE,"C","b"}, {"square",BTN_SQUARE,"F","x"},
     {"triangle",BTN_TRIANGLE,"E","y"}, {"l1",BTN_L1,"Q","leftshoulder"}, {"r1",BTN_R1,"G","rightshoulder"},
@@ -127,7 +128,7 @@ static const Action actions[ACTIONS]={
     {"left",BTN_LEFT,"Left|Wheel Up","dpleft"}, {"right",BTN_RIGHT,"Right|Wheel Down","dpright"},
     {"ls_up",0,"W",NULL}, {"ls_down",0,"S",NULL}, {"ls_left",0,"A",NULL}, {"ls_right",0,"D",NULL},
     {"rs_up",0,"I",NULL}, {"rs_down",0,"K",NULL}, {"rs_left",0,"J",NULL}, {"rs_right",0,"L",NULL},
-    {"rotate_ccw",0,"R",NULL}, {"rotate_cw",0,"T",NULL},
+    {"rotate_ccw",0,"R",NULL}, {"rotate_cw",0,"T",NULL}, {"overlay",0,"Insert",NULL},
 };
 #define PAD_TRIGGER_LEFT (-2)
 #define PAD_TRIGGER_RIGHT (-3)
@@ -178,6 +179,22 @@ static int parse_pad(const char *value) {
     const SDL_GamepadButton button=SDL_GetGamepadButtonFromString(value);
     return button==SDL_GAMEPAD_BUTTON_INVALID ? -1 : (int)button;
 }
+/* The in-game menu lives in the window thread (gpu/shim/bbport_overlay.cpp), which sees the key
+ * events: it gets the two bindings of key.overlay. A wheel cannot open it, nor can the left and
+ * right mouse buttons (the menu is used with them). */
+static void configure_overlay_keys(void) {
+    for (int i=0;i<2;++i) {
+        const Bind *b=&input.keys[A_OVERLAY][i];
+        int kind=BBGPU_OVERLAY_KEY_NONE, code=0;
+        if (b->kind==BIND_KEY) { kind=BBGPU_OVERLAY_KEY_SCANCODE; code=b->code; }
+        else if (b->kind==BIND_LAYOUT) { kind=BBGPU_OVERLAY_KEY_KEYCODE; code=b->code; }
+        else if (b->kind==BIND_MOUSE && (b->code==4 || b->code==8 || b->code==16)) {
+            kind=BBGPU_OVERLAY_KEY_MOUSE;
+            code=b->code==4 ? SDL_BUTTON_MIDDLE : b->code==8 ? SDL_BUTTON_X1 : SDL_BUTTON_X2;
+        } else if (b->kind) printf("Runtime: key.overlay cannot be a wheel or the left or right mouse button, ignored\n");
+        bbgpu_overlay_key_configure(i,kind,code);
+    }
+}
 static void load_input(void) {
     for (int a=0;a<ACTIONS;++a) {
         set_keys(a,actions[a].keys);
@@ -210,6 +227,7 @@ static void load_input(void) {
         printf("Runtime: controls from %s (mouse look %s, sensitivity %.2f)\n",path,
                input.mouse_look ? "on" : "off",input.mouse_sensitivity);
     }
+    configure_overlay_keys();
     if (input.mouse_sensitivity<=0.0f) input.mouse_sensitivity=1.0f;
     if (input.pad_vibration_strength<0) input.pad_vibration_strength=0;
     if (input.pad_vibration_strength>100) input.pad_vibration_strength=100;
@@ -1520,7 +1538,7 @@ static void sample_host(PadData *d) {
     const int pad_used=g && (d->buttons || d->l2>60 || d->r2>60 || abs(d->left_x-128)>64 ||
                              abs(d->left_y-128)>64 || abs(d->right_x-128)>64 || abs(d->right_y-128)>64);
     int keys_used=mouse || wheel || (captured && SDL_fabsf(mdx)+SDL_fabsf(mdy)>3.0f);
-    for (int a=0;a<ACTIONS && !keys_used;++a) keys_used=action_down(a,k,mouse,now);
+    for (int a=0;a<A_OVERLAY && !keys_used;++a) keys_used=action_down(a,k,mouse,now);
     static int prompts_device=-1;
     if (pad_used!=keys_used) {
         const int device=pad_used ? prompts_pad_device(g) : 0;

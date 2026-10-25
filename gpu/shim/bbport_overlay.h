@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // bbport: in-game settings menu (Dear ImGui), drawn by the presenter into the swapchain image
-// after the game frame, at display resolution. Insert (keyboard) or L3+R3 (gamepad) opens it;
+// after the game frame, at display resolution. The key set in input.ini (Insert by default) or L3+R3 (gamepad) opens it;
 // while it is open the game gets no pad/keyboard input. Settings live in bbport_settings.h.
 
 #pragma once
@@ -21,6 +21,10 @@ namespace BbOverlay {
 
 /// Present thread, once: the ImGui context and its Vulkan backend.
 void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count);
+
+/// Any thread: the keys that open and close the menu (slot 0 or 1; kind and code as in
+/// bbgpu_overlay_key_configure, gpu/bbgpu.h). Insert opens it until this is called.
+void ConfigureToggleKey(int slot, int kind, int code);
 
 /// Window thread, for every SDL event: true when the menu consumed it.
 bool HandleEvent(const SDL_Event& event);

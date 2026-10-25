@@ -15,6 +15,7 @@
 
 #include <SDL3/SDL.h>
 #include "bbport_settings.h"
+#include "../bbgpu.h"
 #include <miniz.h>
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -60,6 +61,51 @@ std::mutex imgui_mutex; // the ImGui context: window thread (input) and present 
 bool initialized = false;
 std::atomic<bool> menu_open{false};
 bool l3_down = false, r3_down = false;
+// The keys that open and close the menu (input.ini key.overlay through bbgpu_overlay_key_configure),
+// guarded by imgui_mutex. Insert until the runtime says otherwise.
+struct ToggleKey {
+    int kind = 0; // BBGPU_OVERLAY_KEY_*
+    int code = 0;
+};
+ToggleKey toggle_keys[2] = {{BBGPU_OVERLAY_KEY_SCANCODE, SDL_SCANCODE_INSERT}, {}};
+
+bool IsToggleKey(const SDL_KeyboardEvent& key) {
+    for (const ToggleKey& t : toggle_keys) {
+        if ((t.kind == BBGPU_OVERLAY_KEY_SCANCODE && static_cast<int>(key.scancode) == t.code) ||
+            (t.kind == BBGPU_OVERLAY_KEY_KEYCODE && static_cast<int>(key.key) == t.code)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool IsToggleButton(u8 button) {
+    for (const ToggleKey& t : toggle_keys) {
+        if (t.kind == BBGPU_OVERLAY_KEY_MOUSE && t.code == button) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// "Insert / L3+R3": the title of the menu.
+std::string ToggleHint() {
+    std::string text;
+    for (const ToggleKey& t : toggle_keys) {
+        std::string name;
+        if (t.kind == BBGPU_OVERLAY_KEY_SCANCODE) {
+            name = SDL_GetScancodeName(static_cast<SDL_Scancode>(t.code));
+        } else if (t.kind == BBGPU_OVERLAY_KEY_KEYCODE) {
+            name = SDL_GetKeyName(static_cast<SDL_Keycode>(t.code));
+        } else if (t.kind == BBGPU_OVERLAY_KEY_MOUSE) {
+            name = t.code == SDL_BUTTON_MIDDLE ? "Mouse Middle" : t.code == SDL_BUTTON_X1 ? "Mouse 4" : "Mouse 5";
+        }
+        if (!name.empty()) {
+            text += name + " / ";
+        }
+    }
+    return text + "L3+R3";
+}
 bool dirty = false; // settings changed while open: saved on close
 // The game's text dialog (SetTextEntry), guarded by imgui_mutex.
 bool text_entry_active = false;
@@ -182,8 +228,9 @@ void Menu() {
                                                std::min(160.0f * base_scale, max_h)),
                                         ImVec2(max_w, max_h));
     bool keep_open = true;
-    if (!ImGui::Begin("Uncharted — settings  (Insert / L3+R3)", &keep_open,
-                      ImGuiWindowFlags_NoCollapse)) {
+    // "###": the window keeps its identity whatever the keys are called.
+    const std::string title = "Uncharted — settings  (" + ToggleHint() + ")###bbport_menu";
+    if (!ImGui::Begin(title.c_str(), &keep_open, ImGuiWindowFlags_NoCollapse)) {
         ImGui::End();
         return;
     }
@@ -766,7 +813,7 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
         return;
     }
     initialized = true;
-    std::printf("Overlay: menu ready (Insert or L3+R3)\n");
+    std::printf("Overlay: menu ready (%s)\n", ToggleHint().c_str());
 }
 
 void UpdateTextInput(SDL_Window* window) {
@@ -784,6 +831,14 @@ void UpdateTextInput(SDL_Window* window) {
     }
 }
 
+void ConfigureToggleKey(int slot, int kind, int code) {
+    if (slot < 0 || slot > 1) {
+        return;
+    }
+    std::scoped_lock lock{imgui_mutex};
+    toggle_keys[slot] = {kind, code};
+}
+
 bool HandleEvent(const SDL_Event& event) {
     std::scoped_lock lock{imgui_mutex};
     if (!initialized) {
@@ -795,10 +850,15 @@ bool HandleEvent(const SDL_Event& event) {
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP: {
         const bool down = event.type == SDL_EVENT_KEY_DOWN;
-        if (down && !event.key.repeat &&
-            (event.key.key == SDLK_INSERT || (is_open && event.key.key == SDLK_ESCAPE))) {
-            SetOpen(event.key.key == SDLK_INSERT ? !is_open : false);
-            return true;
+        if (down && !event.key.repeat) {
+            if (IsToggleKey(event.key)) {
+                SetOpen(!is_open);
+                return true;
+            }
+            if (is_open && event.key.key == SDLK_ESCAPE) {
+                SetOpen(false);
+                return true;
+            }
         }
         if (!is_open) {
             return false;
@@ -851,6 +911,10 @@ bool HandleEvent(const SDL_Event& event) {
     }
     case SDL_EVENT_MOUSE_BUTTON_DOWN:
     case SDL_EVENT_MOUSE_BUTTON_UP: {
+        if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && IsToggleButton(event.button.button)) {
+            SetOpen(!is_open);
+            return true;
+        }
         if (!is_open) {
             return false;
         }

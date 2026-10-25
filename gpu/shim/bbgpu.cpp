@@ -407,6 +407,10 @@ extern "C" int bbgpu_gyro_aim(void) {
     return BbSettings::Get().gyro_aim.load(std::memory_order_relaxed) ? 1 : 0;
 }
 
+extern "C" void bbgpu_overlay_key_configure(int slot, int kind, int code) {
+    BbOverlay::ConfigureToggleKey(slot, kind, code);
+}
+
 extern "C" int bbgpu_overlay_captures_input(void) {
     return BbOverlay::CapturesInput() ? 1 : 0;
 }

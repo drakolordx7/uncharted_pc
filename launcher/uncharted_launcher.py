@@ -132,7 +132,13 @@ STICK_ACTIONS = [
 # Hold one of the last two and the left stick circles: the games' valves, wheels and cranks ask for
 # the stick turned in circles, which the eight movement-key directions cannot do (#609).
 ROTATE_ACTIONS = ('rotate_ccw', 'rotate_cw')
-DEFAULT_KEYS = {a: k for a, _t, k, _p in BUTTON_ACTIONS} | {a: k for a, _t, k in STICK_ACTIONS}
+# Not a game action: opens and closes the in-game menu (the runtime reads it from input.ini, key.overlay).
+MENU_ACTIONS = [('overlay', 'Open in-game menu', 'Insert')]
+# The mouse buttons and the wheel the in-game menu cannot be opened with (the left and right buttons
+# are how the menu is used).
+OVERLAY_BAD_BUTTONS = ('Mouse Left', 'Mouse Right', 'Wheel Up', 'Wheel Down')
+DEFAULT_KEYS = ({a: k for a, _t, k, _p in BUTTON_ACTIONS} | {a: k for a, _t, k in STICK_ACTIONS}
+                | {a: k for a, _t, k in MENU_ACTIONS})
 DEFAULT_PAD = {a: p for a, _t, _k, p in BUTTON_ACTIONS}
 PAD_BUTTONS = [('a', 'A / Cross'), ('b', 'B / Circle'), ('x', 'X / Square'), ('y', 'Y / Triangle'),
                ('leftshoulder', 'LB / L1'), ('rightshoulder', 'RB / R1'),
@@ -150,7 +156,7 @@ MOUSE_SENSITIVITY = [('0.25', '0.25'), ('0.5', '0.5'), ('0.75', '0.75'), ('1.0',
 TK_KEYS = {'space': 'Space', 'Return': 'Return', 'Escape': 'Escape', 'Tab': 'Tab', 'BackSpace': 'Backspace',
            'Shift_L': 'Left Shift', 'Shift_R': 'Right Shift', 'Control_L': 'Left Ctrl',
            'Control_R': 'Right Ctrl', 'Alt_R': 'Right Alt', 'Caps_Lock': 'CapsLock', 'Up': 'Up',
-           'Down': 'Down', 'Left': 'Left', 'Right': 'Right', 'Delete': 'Delete', 'Home': 'Home',
+           'Down': 'Down', 'Left': 'Left', 'Right': 'Right', 'Delete': 'Delete', 'Insert': 'Insert', 'Home': 'Home',
            'End': 'End', 'Prior': 'PageUp', 'Next': 'PageDown', 'minus': '-', 'equal': '=',
            'bracketleft': '[', 'bracketright': ']', 'semicolon': ';', 'apostrophe': "'", 'comma': ',',
            'period': '.', 'slash': '/', 'backslash': '\\', 'grave': '`', 'KP_Enter': 'Keypad Enter',
@@ -210,9 +216,8 @@ FIX_CHOICES = [('auto', 'Automatic'), ('on', 'On'), ('off', 'Off')]
 # Controls page: the games' aim assist (the aim slows down on and follows the enemy under the reticle).
 AIM_ASSIST_CHOICES = [('on', 'On (game default)'), ('off', 'Off')]
 
-# Insert opens the in-game settings menu; Left Alt frees the mouse cursor.
-RESERVED_KEYS = {'Insert': 'Insert is reserved for the in-game settings menu.',
-                 'Alt_L': 'Left Alt is reserved for freeing the mouse cursor.'}
+# Left Alt frees the mouse cursor (the in-game menu key is rebindable: MENU_ACTIONS).
+RESERVED_KEYS = {'Alt_L': 'Left Alt is reserved for freeing the mouse cursor.'}
 
 APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'start': 'u1', 'language': '1', 'ui_language': '', 'player_name': '',
                 'fullscreen': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'skip_intro': False,
@@ -1622,7 +1627,7 @@ class Launcher:
         self.capturing = None
         self.section(f, _('Mouse'), top=6)
         self.check(f, 'mouse_look', _('Look around with the mouse'),
-                   _('Left Alt frees the cursor. Insert opens the in-game menu.'))
+                   _('Left Alt frees the cursor.'))
         from uncharted_widgets import Slider
         self.row(f, _('Mouse sensitivity'),
                  Slider(self.tk, self.target(f), self.var('mouse_sensitivity'), MOUSE_SENS_MIN, MOUSE_SENS_MAX, 0.05,
@@ -1642,7 +1647,8 @@ class Launcher:
         card = self.target(f)
         table = self.tk.Frame(card, bg=CARD)
         table.grid(row=self.next_row(card), column=0, columnspan=2, sticky='w', pady=(10, 0))
-        rows = [(a, t) for a, t, _k, _p in BUTTON_ACTIONS] + [(a, t) for a, t, _k in STICK_ACTIONS]
+        rows = ([(a, t) for a, t, _k, _p in BUTTON_ACTIONS] + [(a, t) for a, t, _k in STICK_ACTIONS]
+                + [(a, t) for a, t, _k in MENU_ACTIONS])
         for r, (action, title) in enumerate(rows):
             self.ttk.Label(table, text=_(title)).grid(row=r, column=0, sticky='w', padx=(0, 24), pady=3)
             for slot in (0, 1):
@@ -1714,6 +1720,13 @@ class Launcher:
                 button.configure(text=name or '—', bg=CARD_HI, fg=TEXT if name else MUTED)
 
     def set_key(self, action, slot, name):
+        if action == 'overlay' and name in OVERLAY_BAD_BUTTONS:
+            self.status.configure(text=_('The in-game menu cannot use the left or right mouse button or the wheel.'),
+                                  fg=GOLD)
+            self.capturing = None
+            self.release_capture()
+            self.show_keys()
+            return
         keys = self.key_list(action)
         keys[slot] = name
         if name:  # one binding per key: taken from the action that had it

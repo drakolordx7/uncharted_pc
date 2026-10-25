@@ -8,6 +8,7 @@ static int rumble_calls;
 static uint16_t rumble_low, rumble_high;
 int bbgpu_overlay_captures_input(void) { return capture; }
 void bbgpu_mouse_configure(int look) { (void)look; }
+void bbgpu_overlay_key_configure(int slot, int kind, int code) { (void)slot; (void)kind; (void)code; }
 int bbgpu_mouse_sample(float *dx, float *dy, uint32_t *buttons, int *wheel) {
     *dx=*dy=0; *buttons=0; *wheel=0;
     return 0;
