@@ -418,6 +418,40 @@ def _write_atomic(path, text):
     os.replace(temporary, path)
 
 
+def swap_units(user_dir, unit_list, incoming, stage, aside, rename=os.rename):
+    """Moves each unit of `unit_list` (relative POSIX paths from the user folder) that exists into
+    `aside` and, for those in `incoming`, the staged copy from `stage` into its place. Any failure
+    moves everything back and raises SaveError; when even that fails, the error has kept=True and
+    the old units stay in `aside` (named in the message) for a manual fix."""
+    user_dir, incoming, journal = Path(user_dir), set(incoming), []
+    try:
+        for unit in unit_list:
+            live = user_dir.joinpath(*unit.split('/'))
+            if live.exists():
+                away = Path(aside).joinpath(*unit.split('/'))
+                away.parent.mkdir(parents=True, exist_ok=True)
+                rename(live, away)
+                journal.append(('aside', live, away))
+            if unit in incoming:
+                new = Path(stage).joinpath(*unit.split('/'))
+                live.parent.mkdir(parents=True, exist_ok=True)
+                rename(new, live)
+                journal.append(('in', live, new))
+    except OSError as error:
+        failed = []
+        for action, live, other in reversed(journal):
+            try:
+                os.rename(live, other) if action == 'in' else os.rename(other, live)
+            except OSError:
+                failed.append(str(live))
+        if failed:
+            problem = SaveError('restoring failed ({}) and these could not be put back: {}; the old saves '
+                                'are in {}'.format(error, ', '.join(failed), aside))
+            problem.kept = True
+            raise problem
+        raise SaveError(f'restoring failed, nothing was changed ({error})')
+
+
 def restore_backup(user_dir, zip_path, keep=10, game_running=None, expected_titles=None, game=None,
                    rename=os.rename, now=None):
     """Restores a backup over the saves of its game; returns (manifest, path of the backup made first).
@@ -441,7 +475,6 @@ def restore_backup(user_dir, zip_path, keep=10, game_running=None, expected_titl
     stamp = time.strftime(STAMP, time.localtime(now))
     stage = Path(tempfile.mkdtemp(prefix=f'.restore-{stamp}-', dir=user_dir))
     aside = Path(tempfile.mkdtemp(prefix=f'.restore-old-{stamp}-', dir=user_dir))
-    journal = []
     try:
         with zipfile.ZipFile(zip_path) as archive:
             for item in manifest['files']:
@@ -450,30 +483,11 @@ def restore_backup(user_dir, zip_path, keep=10, game_running=None, expected_titl
                 with archive.open(item['path']) as source, open(target, 'wb') as out:
                     shutil.copyfileobj(source, out)
         try:
-            for unit in sorted(set(current) | set(saves)):
-                live = user_dir.joinpath(*unit.split('/'))
-                if live.exists():
-                    away = aside.joinpath(*unit.split('/'))
-                    away.parent.mkdir(parents=True, exist_ok=True)
-                    rename(live, away)
-                    journal.append(('aside', live, away))
-                if unit in saves:
-                    new = stage.joinpath(*unit.split('/'))
-                    live.parent.mkdir(parents=True, exist_ok=True)
-                    rename(new, live)
-                    journal.append(('in', live, new))
-        except OSError as error:
-            failed = []
-            for action, live, other in reversed(journal):
-                try:
-                    os.rename(live, other) if action == 'in' else os.rename(other, live)
-                except OSError:
-                    failed.append(str(live))
-            if failed:
-                kept, aside = aside, None  # keep the old saves where they are for a manual fix
-                raise SaveError('restoring failed ({}) and these could not be put back: {}; the old saves '
-                                'are in {}'.format(error, ', '.join(failed), kept))
-            raise SaveError(f'restoring failed, nothing was changed ({error})')
+            swap_units(user_dir, sorted(set(current) | set(saves)), saves, stage, aside, rename)
+        except SaveError as error:
+            if getattr(error, 'kept', False):
+                aside = None  # keep the old saves where they are for a manual fix
+            raise
         with zipfile.ZipFile(zip_path) as archive:
             for unit in trophies:
                 live = user_dir.joinpath(*unit.split('/'))

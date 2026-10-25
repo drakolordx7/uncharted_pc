@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import trophies  # noqa: E402  (scripts/trophies.py: the games' trophy lists)
 import uncharted_i18n
 import uncharted_saves
+import uncharted_slots
 
 DATA_DIR = Path(os.environ.get('BB_DATA_DIR', PORT_DIR))
 CONFIG_DIR = Path(os.environ.get('APPDATA', Path.home())) / 'uncharted-launcher'
@@ -221,7 +222,7 @@ APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_
                 'mouse_look': True, 'mouse_sensitivity': '1.0', 'mouse_invert_y': False,
                 'pad_invert_y': False, 'art_banner': '', 'art_u1': '', 'art_u2': '', 'art_u3': '', 'steam_art': '', 'art_crops': {},
                 'shortcut_name': 'Uncharted: The Nathan Drake Collection', 'shortcut_icon': '', 'trophy_game': 'u1',
-                'auto_backup': True, 'backup_keep': '10', 'pad_vibration': True, 'pad_vibration_strength': '100', 'button_prompts': 'auto', 'aim_assist': 'on', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True,
+                'auto_backup': True, 'backup_keep': '10', 'save_slots': {}, 'pad_vibration': True, 'pad_vibration_strength': '100', 'button_prompts': 'auto', 'aim_assist': 'on', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True,
                 **{key: 'auto' for key in FIXES},
                 **{f'{game}_infinite_{cheat}': False for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')}}
 
@@ -399,6 +400,21 @@ def backup_before_launch(s):
     if not s.get('auto_backup', True):
         return None
     return uncharted_saves.auto_backup(saves_user_dir(s), backup_keep(s), game=game_info(game_folder(s, s['start'])))
+
+
+def active_slots(s):
+    """{game: slot id} chosen on the Play page (Saves page: save slots)."""
+    value = s.get('save_slots')
+    return {k: str(v) for k, v in value.items() if k in uncharted_slots.GAMES} if isinstance(value, dict) else {}
+
+
+def prepare_slots(s, running=None):
+    """Before a game starts: every game's active slot in the saves folder (the save there stored into
+    its own slot first). Returns {game: slot id in place}; SlotError while a swap is refused."""
+    user = saves_user_dir(s)
+    placed = uncharted_slots.sync(user, active_slots(s), running or uncharted_saves.game_process_running)
+    uncharted_slots.mark_played(user, s['start'], placed[s['start']])
+    return placed
 
 
 _SAVE_EDITOR = []
@@ -721,6 +737,10 @@ class Launcher:
         self.card_hot = None
         self.info, self.available = None, {}
         self.update_box = None
+        try:  # a save left in place by a game the launcher did not see end goes back to its slot
+            slot_problems = uncharted_slots.recover(saves_user_dir(self.app), uncharted_saves.game_process_running)
+        except Exception as error:  # never keep the launcher from opening
+            slot_problems = {'all': str(error)}
         root.title(f'{NAME}: The Nathan Drake Collection')
         root.configure(bg=BG)
         self.dpi = root.winfo_fpixels('1i') / 96.0
@@ -732,6 +752,8 @@ class Launcher:
         self.style()
         self.build()
         self.show('play')
+        for error in slot_problems.values():
+            self.append(_('Could not store the save in its slot: {}').format(error) + '\n')
         root.protocol('WM_DELETE_WINDOW', self.close)
         root.after(100, self.drain_output)
         root.after(150, self.detect_controller)
@@ -1333,6 +1355,18 @@ class Launcher:
             self.enable_image_drop(card, lambda path, k=key: self.quick_art(f'art_{k}', k, path))
             self.cards[key] = card
         cards.bind('<Configure>', self.fit_posters)
+        # The chosen game's save slot, right under the covers.
+        slot_row = tk.Frame(shell, bg=SURFACE)
+        slot_row.pack(fill='x', padx=self.px(22), pady=(self.px(12), 0))
+        tk.Label(slot_row, text=_('Save slot'), bg=SURFACE, fg=MUTED, font=self.font_ui).pack(side='left', padx=(0, self.px(8)))
+        self.slot_box = ttk.Combobox(slot_row, state='readonly', width=22)
+        self.slot_box.pack(side='left')
+        self.slot_box.bind('<<ComboboxSelected>>', self.choose_slot)
+        self.pill(slot_row, _('Manage'), lambda: self.show('saves'), kind='ghost', background=SURFACE,
+                  padding=(12, 5)).pack(side='right')
+        self.slot_progress = tk.Label(slot_row, text='', bg=SURFACE, fg=MUTED, font=self.font_ui_sm, anchor='w')
+        self.slot_progress.pack(side='left', fill='x', expand=True, padx=(self.px(14), self.px(8)))
+        self.slot_choices = []
         # The settings people change most, next to the games; the rest are a page away.
         row = tk.Frame(shell, bg=SURFACE)
         row.pack(fill='x', padx=self.px(22), pady=(self.px(10), self.px(4)))
@@ -1371,7 +1405,7 @@ class Launcher:
         avail = natural
         if page is not None and page.winfo_height() > 240:
             # Leave the quick settings and the folder line under the covers on screen.
-            avail = page.winfo_height() - self.hero.winfo_height() - self.px(136)
+            avail = page.winfo_height() - self.hero.winfo_height() - self.px(176)
         total = max(self.px(150), min(natural, avail))
         for card in self.cards.values():
             if int(card['height']) != total:
@@ -1942,7 +1976,7 @@ class Launcher:
         self.save_body = self.tk.Frame(self.save_card.inner, bg=CARD)
         self.save_body.grid(row=1, column=0, columnspan=4, sticky='we')
         self.save_body.columnconfigure(0, weight=1)
-        self.note(f, _('Each game keeps only one save. Back up to keep more.'), top=10)
+        self.note(f, _('Slots hold the campaign save. Unlocks, difficulties and settings are shared.'), top=10)
         self.section(f, _('Backups'))
         self.check(f, 'auto_backup', _('Back up the saves before every game start'),
                    _('Skipped if nothing changed.'))
@@ -1977,29 +2011,41 @@ class Launcher:
             found = uncharted_saves.list_saves(user)
         except OSError:
             found = []
-        if not found:
-            tk.Label(self.save_body, text=_('No saves yet. They appear here once a game has saved.'), bg=CARD,
-                     fg=MUTED, font=self.font_ui, anchor='w').grid(row=0, column=0, sticky='w', pady=(4, 0))
         row = 0
         for key in ('u1', 'u2', 'u3', 'shared', None):
             group = [s for s in found if s['game'] == key]
-            if not group:
+            slots = self.slot_list(key) if key in uncharted_slots.GAMES else []
+            if not group and not slots:
                 continue
             head = tk.Frame(self.save_body, bg=CARD)
-            head.grid(row=row, column=0, sticky='we', pady=(10 if row else 2, 4))
+            head.grid(row=row, column=0, sticky='we', pady=(14 if row else 2, 6))
             tk.Label(head, text=self.save_game_name(key) if key else _('Other saves'), bg=CARD, fg=TEXT,
                      font=self.font_ui_md, anchor='w').pack(side='left')
             if key:
                 self.pill(head, _('Back up'), lambda k=key: self.backup_saves(k), padding=(14, 6)).pack(side='right')
+            if slots:
+                self.pill(head, _('New slot'), lambda k=key: self.new_slot(k), padding=(14, 6)).pack(
+                    side='right', padx=(0, self.px(8)))
             row += 1
+            if slots:
+                active = self.active_slot(key, slots)
+                in_place = next((s for s in group if s['dir'] == uncharted_slots.GAME_SAVE[key]), None)
+                for slot in slots:
+                    self.slot_line(row, key, slot, slot['id'] == active, in_place, describe)
+                    row += 1
+                group = [s for s in group if s['dir'] != uncharted_slots.GAME_SAVE[key]]
             for save in group:
                 line = tk.Frame(self.save_body, bg=CARD_HI)
                 line.grid(row=row, column=0, sticky='we', pady=(0, 4))
                 row += 1
+                if slots:  # lines up with the slots' ribbon
+                    tk.Frame(line, bg=CARD_HI, width=self.px(3)).pack(side='left', fill='y')
                 text = tk.Frame(line, bg=CARD_HI)
-                text.pack(side='left', fill='x', expand=True, padx=12, pady=6)
-                tk.Label(text, text=save['subtitle'] or save['dir'], bg=CARD_HI, fg=TEXT, font=self.font_ui,
-                         anchor='w').pack(anchor='w')
+                text.pack(side='left', fill='x', expand=True, padx=(self.px(10), 12) if slots else 12, pady=6)
+                title = save['subtitle'] or save['dir']
+                if slots and save['dir'].endswith('P'):
+                    title = _('Profile') + ('' if title.casefold() == 'profile' else ' · ' + title)
+                tk.Label(text, text=title, bg=CARD_HI, fg=TEXT, font=self.font_ui, anchor='w').pack(anchor='w')
                 when = time.strftime('%d %b %Y %H:%M', time.localtime(save['modified'])) if save['modified'] else '?'
                 extra = ' · '.join(x for x in (save['detail'].replace('\n', ' · ').strip(' ·'), save['dir'],
                                                _('Modified {}').format(when)) if x)
@@ -2011,8 +2057,247 @@ class Launcher:
                 if key in ('u1', 'u2', 'u3'):
                     self.pill(line, _('Edit'), lambda s=save: self.edit_save(s), background=CARD_HI,
                               padding=(14, 6)).pack(side='right', padx=10)
+        if not row:
+            tk.Label(self.save_body, text=_('No saves yet. They appear here once a game has saved.'), bg=CARD,
+                     fg=MUTED, font=self.font_ui, anchor='w').grid(row=0, column=0, sticky='w', pady=(4, 0))
         self.save_card.refit()
         self.render_backups()
+
+    def slot_line(self, row, game, slot, active, save, describe):
+        """One save slot on the Saves page: name (gold ribbon when active), progress, when, actions."""
+        tk = self.tk
+        line = tk.Frame(self.save_body, bg=CARD_HI)
+        line.grid(row=row, column=0, sticky='we', pady=(0, 4))
+        tk.Frame(line, bg=GOLD if active else CARD_HI, width=self.px(3)).pack(side='left', fill='y')
+        actions = tk.Frame(line, bg=CARD_HI)  # packed before the text, so a long line wraps instead
+        actions.pack(side='right', fill='y')
+        text = tk.Frame(line, bg=CARD_HI)
+        text.pack(side='left', fill='x', expand=True, padx=(self.px(10), 12), pady=6)
+        top = tk.Frame(text, bg=CARD_HI)
+        top.pack(anchor='w')
+        tk.Label(top, text=self.slot_name(slot), bg=CARD_HI, fg=GOLD_HI if active else TEXT, font=self.font_ui_md,
+                 anchor='w').pack(side='left')
+        if active:
+            tk.Label(top, text=_('Active'), bg=CARD_HI, fg=GOLD, font=self.font_brand_sm, anchor='w').pack(
+                side='left', padx=(self.px(10), 0))
+        when = self.slot_when(slot)
+        extra = ' · '.join(x for x in (self.slot_progress_text(slot), when) if x)
+        if active and save and not slot['empty']:
+            details = self.save_describe(describe, save)
+            if details:
+                extra += '\n' + details
+        info = tk.Label(text, text=extra, bg=CARD_HI, fg=MUTED, font=self.font_ui_sm, anchor='w', justify='left',
+                        wraplength=self.px(520))
+        info.pack(anchor='w')
+        text.bind('<Configure>', lambda e: info.configure(wraplength=max(self.px(160), e.width)))
+        buttons =[(_('Duplicate'), lambda: self.duplicate_slot(game, slot)),
+                   (_('Rename'), lambda: self.rename_slot(game, slot))]
+        if active:
+            if save and not slot['empty']:
+                buttons.append((_('Edit'), lambda: self.edit_save(save)))
+        else:
+            buttons = [(_('Delete'), lambda: self.delete_slot(game, slot))] + buttons + \
+                [(_('Use'), lambda: self.use_slot(game, slot['id']))]
+        for index, (label, command) in enumerate(buttons):
+            self.pill(actions, label, command, kind='ghost' if label == _('Delete') else 'secondary',
+                      background=CARD_HI, padding=(12, 5)).pack(side='right', padx=(4, 10 if index == 0 else 0))
+
+    # ---- save slots ----------------------------------------------------------------------------
+    def slot_name(self, slot):
+        return _('Main') if slot['name'] == uncharted_slots.DEFAULT_NAME else slot['name']
+
+    def slot_list(self, game):
+        try:
+            return uncharted_slots.list_slots(saves_user_dir(self.current()), game)
+        except (OSError, uncharted_saves.SaveError):
+            return []
+
+    def active_slot(self, game, slots):
+        """The slot chosen for a game; the one in place when the choice is unknown."""
+        wanted = active_slots(self.app).get(game)
+        ids = [s['id'] for s in slots]
+        if wanted in ids:
+            return wanted
+        return next((s['id'] for s in slots if s['in_place']), ids[0] if ids else None)
+
+    def slot_progress_text(self, slot):
+        return _('Empty: starts a new game') if slot['empty'] else slot['subtitle']
+
+    def slot_when(self, slot):
+        if slot['last_played']:
+            when = time.strptime(slot['last_played'][:19], '%Y-%m-%dT%H:%M:%S')
+            return _('Last played {}').format(time.strftime('%d %b %Y %H:%M', when))
+        if slot['saved']:
+            return _('Modified {}').format(time.strftime('%d %b %Y %H:%M', time.localtime(slot['saved'])))
+        return ''
+
+    def refresh_slot_choice(self):
+        """The Play page's slot chooser for the chosen game."""
+        game = self.var('start').get()
+        slots = self.slot_list(game)
+        self.slot_choices = slots
+        active = self.active_slot(game, slots)
+        self.slot_box.configure(values=[self.slot_name(s) for s in slots] + [_('New slot…')])
+        index = next((i for i, s in enumerate(slots) if s['id'] == active), None)
+        if index is None:
+            self.slot_box.set('')
+            self.slot_progress.configure(text='')
+        else:
+            self.slot_box.current(index)
+            self.slot_progress.configure(text=self.slot_progress_text(slots[index]))
+
+    def choose_slot(self, _event=None):
+        game = self.var('start').get()
+        index = self.slot_box.current()
+        self.slot_box.selection_clear()
+        if index >= len(self.slot_choices):
+            self.new_slot(game)
+        elif index >= 0:
+            self.use_slot(game, self.slot_choices[index]['id'])
+        self.refresh_slot_choice()
+
+    def slot_message(self, error):
+        messages = {'running': _('Close the game first.'), 'name-empty': _('Choose a name.'),
+                    'name-taken': _('A slot with this name already exists.')}
+        return messages.get(getattr(error, 'code', '')) or _('Could not change the save slot: {}').format(error)
+
+    def slot_error(self, error):
+        self.messagebox.showerror(NAME, self.slot_message(error))
+
+    def slots_changed(self):
+        self.refresh_slot_choice()
+        if self.current_page == 'saves':
+            self.render_saves()
+
+    def use_slot(self, game, slot_id):
+        """Make a slot active: its save goes in place now (refused while a game runs)."""
+        if self.process:
+            self.slot_error(uncharted_slots.SlotError('close the game first', 'running'))
+            return False
+        try:
+            uncharted_slots.activate(saves_user_dir(self.current()), game, slot_id,
+                                     uncharted_saves.game_process_running)
+        except (OSError, uncharted_saves.SaveError) as error:
+            self.slot_error(error)
+            self.slots_changed()
+            return False
+        self.app['save_slots'] = {**active_slots(self.app), game: slot_id}
+        self.collect()
+        name = next((self.slot_name(s) for s in self.slot_list(game) if s['id'] == slot_id), slot_id)
+        self.status.configure(text=_('Save slot: {}').format(name), fg=MUTED)
+        self.slots_changed()
+        return True
+
+    def slot_dialog(self, title, button, submit, name='', copy_name=None):
+        """A small window asking for a slot name (and, for a new slot, what it starts with); `submit`
+        (name, copy) returns a message to show, or None when done."""
+        tk = self.tk
+        window = tk.Toplevel(self.root)
+        window.title(title)
+        window.configure(bg=PANEL)
+        window.transient(self.root)
+        window.resizable(False, False)
+        shell = tk.Frame(window, bg=PANEL)
+        shell.pack(padx=self.px(24), pady=self.px(22))
+        tk.Label(shell, text=title, bg=PANEL, fg=TEXT, font=self.font_title).pack(anchor='w')
+        tk.Label(shell, text=_('Name'), bg=PANEL, fg=MUTED, font=self.font_ui).pack(
+            anchor='w', pady=(self.px(14), self.px(4)))
+        value = tk.StringVar(value=name)
+        entry = self.ttk.Entry(shell, textvariable=value, width=36)
+        entry.pack(anchor='w', fill='x')
+        copy = tk.StringVar(value='empty')
+        if copy_name is not None:
+            tk.Label(shell, text=_('Start with'), bg=PANEL, fg=MUTED, font=self.font_ui).pack(
+                anchor='w', pady=(self.px(14), self.px(4)))
+            for flag, text in (('empty', _('Empty (new game)')), ('copy', _('Copy of {}').format(copy_name))):
+                tk.Radiobutton(shell, text=text, variable=copy, value=flag, bg=PANEL, fg=TEXT, selectcolor=CARD_HI,
+                               activebackground=PANEL, activeforeground=TEXT, font=self.font_ui, highlightthickness=0,
+                               bd=0, anchor='w', cursor='hand2').pack(anchor='w', pady=1)
+        problem = tk.Label(shell, text='', bg=PANEL, fg='#e07a4f', font=self.font_ui_sm, anchor='w')
+        problem.pack(anchor='w', pady=(self.px(8), 0))
+        buttons = tk.Frame(shell, bg=PANEL)
+        buttons.pack(fill='x', pady=(self.px(8), 0))
+
+        def done(*_args):
+            message = submit(value.get(), copy.get() == 'copy')
+            if message:
+                problem.configure(text=message)
+            else:
+                window.destroy()
+        self.pill(buttons, _('Cancel'), window.destroy, kind='ghost', background=PANEL).pack(side='right')
+        self.pill(buttons, button, done, kind='primary', background=PANEL).pack(side='right', padx=(0, 6))
+        window.bind('<Return>', done)
+        window.bind('<Escape>', lambda _event: window.destroy())
+        window.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - window.winfo_reqwidth()) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - window.winfo_reqheight()) // 3
+        window.geometry(f'+{max(0, x)}+{max(0, y)}')
+        entry.focus_set()
+        entry.select_range(0, 'end')
+        window.grab_set()
+        window.wait_window()
+
+    def new_slot(self, game):
+        """A new slot for the game (empty or a copy of the active one); it becomes the active slot."""
+        user = saves_user_dir(self.current())
+        slots = self.slot_list(game)
+        active = next((s for s in slots if s['id'] == self.active_slot(game, slots)), None)
+        names = {self.slot_name(s).casefold() for s in slots}
+        number = len(slots) + 1
+        while _('Slot {}').format(number).casefold() in names:
+            number += 1
+        made = {}
+
+        def submit(name, copy):
+            try:
+                made['id'] = uncharted_slots.create_slot(user, game, name, active['id'] if copy and active else None)
+            except (OSError, uncharted_saves.SaveError) as error:
+                return self.slot_message(error)
+            return None
+        self.slot_dialog(_('New slot'), _('Create'), submit, _('Slot {}').format(number),
+                         self.slot_name(active) if active else None)
+        if made:
+            self.use_slot(game, made['id'])
+        self.slots_changed()
+
+    def rename_slot(self, game, slot):
+        user = saves_user_dir(self.current())
+
+        def submit(name, _copy):
+            try:
+                uncharted_slots.rename_slot(user, game, slot['id'], name)
+            except (OSError, uncharted_saves.SaveError) as error:
+                return self.slot_message(error)
+            return None
+        self.slot_dialog(_('Rename slot'), _('Save changes'), submit, self.slot_name(slot))
+        self.slots_changed()
+
+    def duplicate_slot(self, game, slot):
+        user = saves_user_dir(self.current())
+        base = _('{} (copy)').format(self.slot_name(slot))
+        for number in range(1, 100):
+            name = base if number == 1 else f'{base} {number}'
+            try:
+                uncharted_slots.duplicate_slot(user, game, slot['id'], name)
+                break
+            except uncharted_saves.SaveError as error:
+                if getattr(error, 'code', '') != 'name-taken':
+                    self.slot_error(error)
+                    break
+            except OSError as error:
+                self.slot_error(error)
+                break
+        self.slots_changed()
+
+    def delete_slot(self, game, slot):
+        if not self.messagebox.askyesno(NAME, _('Delete the slot {}? This cannot be undone.').format(self.slot_name(slot))):
+            return
+        slots = self.slot_list(game)
+        try:
+            uncharted_slots.delete_slot(saves_user_dir(self.current()), game, slot['id'], self.active_slot(game, slots))
+        except (OSError, uncharted_saves.SaveError) as error:
+            self.slot_error(error)
+        self.slots_changed()
 
     def save_describe(self, describe, save):
         """save_editor.describe() of a save as one line (cached per save and modification time)."""
@@ -2087,14 +2372,22 @@ class Launcher:
         user = saves_user_dir(s)
         info = game_info(game_folder(s, s['start']))
         expected = set(uncharted_saves.title_ids(user)) or ({info['id']} if info else set())
+        try:  # the restored save goes into the active slots
+            self.app['save_slots'] = uncharted_slots.sync(user, active_slots(self.app), self.save_running)
+        except (OSError, uncharted_saves.SaveError) as error:
+            self.slot_error(error)
+            self.slots_changed()
+            return
         try:
             _manifest, before = uncharted_saves.restore_backup(
                 user, path, backup_keep(s), self.save_running, expected or None, info)
         except (OSError, uncharted_saves.SaveError) as error:
             self.messagebox.showerror(NAME, _('Could not restore the backup: {}').format(error))
-            self.render_saves()
+            self.slots_changed()
             return
-        self.render_saves()
+        for _game, error in uncharted_slots.store_back_all(user).items():
+            self.messagebox.showerror(NAME, _('Could not store the save in its slot: {}').format(error))
+        self.slots_changed()
         self.messagebox.showinfo(NAME, _('Saves restored. The previous saves are in {}.').format(before.name)
                                  if before else _('Saves restored.'))
 
@@ -2134,15 +2427,30 @@ class Launcher:
             self.messagebox.showerror(NAME, _('Close the game first.'))
             return
         s = self.current()
+        user = saves_user_dir(s)
+        slotted = save['game'] in uncharted_slots.GAMES and save['dir'] == uncharted_slots.GAME_SAVE[save['game']]
+        if slotted:  # the editor changes the save in place: the active slot's
+            try:
+                uncharted_slots.activate(user, save['game'], self.active_slot(save['game'], self.slot_list(save['game'])),
+                                         self.save_running)
+            except (OSError, uncharted_saves.SaveError) as error:
+                self.slot_error(error)
+                self.slots_changed()
+                return
         try:
-            uncharted_saves.create_backup(saves_user_dir(s), save['game'], kind='before-edit',
+            uncharted_saves.create_backup(user, save['game'], kind='before-edit',
                                           game=game_info(game_folder(s, s['start'])))
-            uncharted_saves.prune(uncharted_saves.backup_dir(saves_user_dir(s)), backup_keep(s), kind='before-edit')
+            uncharted_saves.prune(uncharted_saves.backup_dir(user), backup_keep(s), kind='before-edit')
             editor.open_editor(str(save['path']), game=save['game'], parent=self.root)
         except Exception as error:  # the editor is a separate tool: report, keep the launcher running
             self.messagebox.showerror(NAME, _('Could not open the save editor: {}').format(error))
+        if slotted:
+            try:
+                uncharted_slots.store_back(user, save['game'])
+            except (OSError, uncharted_saves.SaveError) as error:
+                self.messagebox.showerror(NAME, _('Could not store the save in its slot: {}').format(error))
         self.save_details.clear()
-        self.render_saves()
+        self.slots_changed()
 
     def build_cheats(self):
         f = self.page('cheats', _('Cheats'), _('Changes apply when the game starts.'))
@@ -2226,6 +2534,7 @@ class Launcher:
             title = next(t for k, t, _s, _e in GAMES if k == start)
             self.status.configure(text=_('Ready: {}').format(title) if info else _('No game folder yet.'),
                                   fg=MUTED)
+        self.refresh_slot_choice()
         self.draw_hero()
 
     # ---- actions -----------------------------------------------------------------------------
@@ -2367,6 +2676,13 @@ class Launcher:
         except Exception as error:  # a failed backup must not keep the game from starting
             self.append(_('Automatic backup failed: {}').format(error) + '\n')
         try:
+            self.app['save_slots'] = prepare_slots(self.app)
+            self.collect()
+        except (OSError, uncharted_saves.SaveError) as error:  # never start on the wrong save
+            self.slot_error(error)
+            self.refresh()
+            return
+        try:
             env = game_environment(self.app)
         except OSError as error:
             self.messagebox.showerror(
@@ -2419,11 +2735,15 @@ class Launcher:
                     code = item[0]
                     self.append(_('\nThe game closed (code {}).\n').format(code))
                     self.process = None
+                    for _game, error in uncharted_slots.store_back_all(saves_user_dir(self.app)).items():
+                        self.append(_('Could not store the save in its slot: {}').format(error) + '\n')
                     if self.job:
                         self.job.close()
                     self.play_button.configure(state='normal')
                     self.stop_button.configure(state='disabled')
                     self.refresh()
+                    if self.current_page == 'saves':
+                        self.render_saves()
                     self.detect_controller()
                     # It failed to start or crashed (not Stop, not closing the window): say why.
                     if not self.stopping and (code != 0 or not self.entered):
@@ -2978,6 +3298,16 @@ def play_without_window(settings):
         except Exception as error:  # a failed backup must not keep the game from starting
             log.write(f'Automatic backup failed: {error}\n')
         try:
+            prepare_slots(settings)
+        except (OSError, uncharted_saves.SaveError) as error:  # never start on the wrong save
+            text = _('Could not change the save slot: {}').format(error) + '\n'
+            log.write(text)
+            try:
+                sys.stderr.write(text)
+            except (OSError, ValueError):
+                pass
+            return 1
+        try:
             env = game_environment(settings)
         except OSError as error:
             text = _('Could not save the input configuration: {}').format(error) + '\n'
@@ -2997,7 +3327,10 @@ def play_without_window(settings):
                 sys.stdout.write(text)
             except (OSError, ValueError):
                 pass
-        return process.wait()
+        code = process.wait()
+        for game, error in uncharted_slots.store_back_all(saves_user_dir(settings)).items():
+            log.write(f'Could not store the {game} save in its slot: {error}\n')
+        return code
 
 
 def requested_game(args):
