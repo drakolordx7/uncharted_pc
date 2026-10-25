@@ -538,8 +538,10 @@ def unlock_rewards(path, dry_run=False, game=None):
 
 # ---------------------------------------------------------------- edit dialog (launcher Saves page)
 
-DIALOG_COLORS = {'bg': '#17181b', 'panel': '#202226', 'text': '#f3efe6', 'muted': '#8e8a82', 'accent': '#e7c36a',
-                 'ok': '#9fd09a', 'error': '#e88b7d'}
+# The launcher's journal palette (launcher/uncharted_launcher.py): leather-dark page, brass gold, parchment text.
+DIALOG_COLORS = {'bg': '#16120e', 'panel': '#2a231c', 'line': '#5a4a37', 'text': '#eee3cc', 'muted': '#a5967e',
+                 'accent': '#d6ab52', 'ink': '#2b1d0f', 'ok': '#a9c98a', 'error': '#e08a6e'}
+DIALOG_HEADING = ('Cinzel', 14, 'bold')  # the launcher registers Cinzel; Tk falls back to a default face without it
 
 
 def actions_for(save_dir):
@@ -582,10 +584,11 @@ def open_editor(save_dir, game=None, parent=None, wait=True):
     win.resizable(False, False)
     if parent is not None:
         win.transient(parent)
-    tk.Label(win, text='%s · %s' % (GAME_NAMES.get(game, 'Uncharted'), kind), bg=c['bg'], fg=c['text'],
-             font=('Segoe UI', 12, 'bold'), anchor='w').pack(fill='x')
+    tk.Label(win, text='%s %s' % (GAME_NAMES.get(game, 'Uncharted'), kind), bg=c['bg'], fg=c['accent'],
+             font=DIALOG_HEADING, anchor='w').pack(fill='x')
+    tk.Frame(win, bg=c['line'], height=1).pack(fill='x', pady=(6, 0))
     info = tk.Label(win, bg=c['bg'], fg=c['muted'], font=('Segoe UI', 10), anchor='w', justify='left')
-    info.pack(fill='x', pady=(4, 10))
+    info.pack(fill='x', pady=(8, 12))
     result = tk.Label(win, text='', bg=c['bg'], fg=c['muted'], font=('Segoe UI', 10), anchor='w', justify='left',
                       wraplength=420)
 
@@ -623,9 +626,14 @@ def open_editor(save_dir, game=None, parent=None, wait=True):
         raise KeyError(label)
 
     for name, _question, _fn in acts:
-        tk.Button(win, text=name, command=lambda n=name: run(n), bg=c['panel'], fg=c['text'],
-                  activebackground=c['accent'], activeforeground='#000000', relief='flat', bd=0, padx=14, pady=6,
-                  font=('Segoe UI', 10), cursor='hand2').pack(fill='x', pady=3)
+        edge = tk.Frame(win, bg=c['line'])  # a 1 px outline, as the launcher's buttons have
+        edge.pack(fill='x', pady=3)
+        button = tk.Button(edge, text=name, command=lambda n=name: run(n), bg=c['bg'], fg=c['text'],
+                           activebackground=c['accent'], activeforeground=c['ink'], relief='flat', bd=0, padx=14,
+                           pady=7, font=('Segoe UI Semibold', 10), cursor='hand2', anchor='w')
+        button.pack(fill='x', padx=1, pady=1)
+        button.bind('<Enter>', lambda _e, b=button: b.configure(bg=c['panel']))
+        button.bind('<Leave>', lambda _e, b=button: b.configure(bg=c['bg']))
     if not acts:
         tk.Label(win, text='Nothing to edit in this save.', bg=c['bg'], fg=c['muted'], font=('Segoe UI', 10),
                  anchor='w').pack(fill='x')
