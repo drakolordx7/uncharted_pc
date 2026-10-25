@@ -197,8 +197,11 @@ void Menu() {
                 ImGui::SameLine();
                 // FSR 4 on a capable GPU without its assets (fsr4_shaders, BB_FSR4_DIR).
                 const char* fsr4_problem = s.fsr4_problem.load();
-                const bool no_assets = i == BbSettings::UpscalerFsr4 && fsr4_problem &&
-                                       std::strncmp(fsr4_problem, "assets", 6) == 0;
+                // (4.1.1 offered means the GPU runs FSR 4: only the files can be missing, also
+                // while a 4.1.1 problem is the message shown.)
+                const bool no_assets = i == BbSettings::UpscalerFsr4 &&
+                                       ((fsr4_problem && std::strncmp(fsr4_problem, "assets", 6) == 0) ||
+                                        s.fsr411_supported.load());
                 ImGui::TextDisabled("%s", no_assets ? "— files not installed"
                                                     : "— not supported by this GPU");
             }

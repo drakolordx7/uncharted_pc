@@ -344,6 +344,16 @@ void TemporalUpscaler::OnSceneColor(VideoCore::ImageId color) {
 }
 
 namespace {
+// What fsr4_problem goes back to when FSR 4 has nothing to report: on a GPU that runs FSR 4
+// (4.1.1 is offered) without the v07 assets, the startup note (bbport_settings.cpp), so the
+// disabled FSR 4 entry keeps saying "files not installed" after FSR 4.1.1 has run.
+const char* Fsr4IdleProblem() {
+    const auto& s = BbSettings::Get();
+    return !s.fsr4_supported && s.fsr411_supported
+               ? "assets not installed (fsr4_shaders, tools/fetch_fsr4_assets.sh)"
+               : nullptr;
+}
+
 float Halton(u32 index, u32 base) {
     float f = 1.0f, result = 0.0f;
     for (u32 i = index; i > 0; i /= base) {
@@ -410,7 +420,7 @@ bool TemporalUpscaler::OnFrameStart() {
         // A failed provider keeps a fatal flag internally; a user retry gets a fresh context.
         scheduler.Finish();
         fsr4 = std::make_unique<Fsr4Upscaler>(instance, scheduler);
-        if (BbSettings::IsFsr4(upscaler)) BbSettings::Get().fsr4_problem = nullptr;
+        if (BbSettings::IsFsr4(upscaler)) BbSettings::Get().fsr4_problem = Fsr4IdleProblem();
     }
     if (applied_upscaler != upscaler) fsr4_failed = false; // retry after a menu change
     // Dynamic scene resolution scaling (live preset switching) works on all GPUs.
@@ -2155,7 +2165,7 @@ bool TemporalUpscaler::RecordFsr4(vk::CommandBuffer cmdbuf, Fsr4Upscaler::Image 
     static std::string shown;
     const char* problem = fsr4->Problem();
     if (!problem) {
-        BbSettings::Get().fsr4_problem = nullptr;
+        BbSettings::Get().fsr4_problem = Fsr4IdleProblem();
     } else if (shown != problem) {
         shown = problem;
         static std::array<std::string, 8> kept;
