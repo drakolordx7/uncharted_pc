@@ -273,14 +273,14 @@ static float camera_dx[2], camera_dy[2];
 static int gyro_on(void) { return bbgpu_gyro_aim(); }
 static float aim_dx, aim_dy;
 static volatile uint64_t aim_direct_us;
-/* When aim was pressed. After a roll the game starts the aiming camera's controller up to a second
- * later: the mouse motion of that time waits for it (1.5 s at most) instead of being lost. */
+/* When aim was pressed. The game starts the aiming camera's controller after the shoulder move (up
+ * to a second later after a roll): until then the mouse keeps turning the camera it turned before
+ * (aim_starting, 1.5 s at most), and the aim starts where that camera looks. */
 static volatile uint64_t aim_press_us;
 /* Where the player looked when aim was pressed (degrees, heading_of in the aim direction's sense):
- * the follow camera's wanted heading (it already has mouse turns the shown camera has not caught up
- * with) turned by 180 degrees, as the aim direction points the other way to the follow camera's, or
- * the cover camera's direction, which points the aim's way; press_view_ok 0 when neither ran just
- * before. */
+ * the follow camera as shown turned by 180 degrees, as the aim direction points the other way to the
+ * follow camera's, or the cover camera's direction, which points the aim's way (view_now);
+ * press_view_ok 0 when neither ran just before. */
 static volatile float press_view;
 static volatile int press_view_ok;
 static volatile float follow_view, cover_view; /* the latest of each, for press_view */
@@ -334,8 +334,29 @@ static uint64_t follow_moved_us;          /* last frame the mouse moved */
 static volatile float follow_correction;  /* degrees the direction is short of the wanted heading */
 static volatile float follow_push;        /* the right stick while the direction turns (-0.3, 0, 0.3) */
 static volatile int follow_has_arc;       /* the follow camera's vertical arc is known */
+static int aim_hooked;                    /* the aim controller's callback is installed (this build) */
+/* Aim is held and the aiming camera's controller has not run yet in this press. Holding the mouse
+ * back for it and giving it all at once was a jump after the shoulder move. */
+static int aim_starting(uint64_t now) {
+    return gyro_on() && aim_held && aim_hooked && aim_direct_us<aim_press_us && now-aim_press_us<1500000;
+}
 static int raw_aim_armed(uint64_t now) {
-    return gyro_on() && aim_held && aim_direct_us && (now-aim_direct_us<1000000 || now-aim_press_us<1500000);
+    return gyro_on() && aim_held && aim_direct_us && aim_direct_us>=aim_press_us && now-aim_direct_us<1000000;
+}
+/* Where the player looks (press_view's sense): the cover camera's direction, or in the open the
+ * follow camera as shown, turned by 180 degrees; 0 when neither ran in the last 100 ms. The shown
+ * camera trails the follow camera's wanted heading (10-17 degrees while turning), and the game's own
+ * aim starts on the shown one: aiming at the wanted heading made the screen jump by that gap. The
+ * wanted heading is the fallback when no shown camera is known. */
+static int view_now(uint64_t now, float *view) {
+    if (cover_hook_us && now-cover_hook_us<100000) { *view=cover_view; return 1; }
+    if (camera_hook_us && now-camera_hook_us<100000) {
+        float shown;
+        double age;
+        *view=wrap_degrees((bbgpu_camera_yaw(&shown,&age) && age<0.25 ? shown : follow_view)+180.0f);
+        return 1;
+    }
+    return 0;
 }
 /* Gyro aiming: every camera updated in the same frame (within 4 ms) gets the frame's mouse motion,
  * the follow cameras of a blend and the cover camera blending with them. */
@@ -385,7 +406,7 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
      * and their follow camera blends would take the same motion twice */
     if (gyro_on() && (cover_hook_us || aim_direct_us)) frame_motion(now,&dx,&dy);
     else camera_take(0,&dx,&dy);
-    if (aim_held) { follow_moved_us=0; follow_pending=0; return; } /* the aiming camera takes the mouse */
+    if (aim_held && !aim_starting(now)) { follow_moved_us=0; follow_pending=0; return; } /* the aiming camera takes the mouse */
     if (follow_pending) {
         float kept=wrap_degrees(heading-follow_before)/wrap_degrees(follow_after-follow_before);
         kept=kept<0.0f ? 0.0f : kept>1.0f ? 1.0f : kept;
@@ -491,7 +512,7 @@ static void cover_camera(float *dir, float *pitch, const float *limits) {
     follow_push=0.0f;
     float dx, dy;
     frame_motion(now,&dx,&dy);
-    if (aim_held) return; /* the aiming camera takes the mouse */
+    if (aim_held && !aim_starting(now)) return; /* the aiming camera takes the mouse */
     if (mouse_debug()) printf("Mouse: cover t=%.4f dx=%.1f dy=%.1f heading=%.2f pitch=%.2f limits=%.1f..%.1f\n",
                               now*1e-6,dx,dy,heading_of(dir),*pitch,limits ? -limits[1] : 0.0f,limits ? limits[0] : 0.0f);
     const float turn=dx*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity;
@@ -523,8 +544,9 @@ static void aim_turn(float *v, float yaw, float pitch) {
     v[0]=hx*SDL_cosf(p)*len; v[1]=SDL_sinf(p)*len; v[2]=hz*SDL_cosf(p)*len;
 }
 /* Popping out keeps the aim: the first aim direction of a press turns to press_view, unless that
- * is more than this far (a cover that limits the aim, or a direction the view is not about). */
-#define POP_OUT_MAX_DEGREES 90.0f
+ * is more than this far. Further away Drake turns his body to aim, and the game itself swings the
+ * aim round (40-110 degrees within 0.3 s, measured): a turn of ours on top doubled it. */
+#define POP_OUT_MAX_DEGREES 30.0f
 /* Raw aim. The aim controller (U1 1.02 0x276a10; rsi = the controller) gets the aiming camera's
  * remembered aim direction (camera+0x1830) in rcx: it turns it by the stick, the camera saves it
  * back, and the shown direction adds aim assist and recoil on top. Called from the aiming camera's
@@ -575,15 +597,24 @@ static void raw_aim(const char *game, uint64_t controller, const RuntimeGuestReg
     static struct { uint64_t controller, last_us; float yaw, pitch; } given[4];
     static float last_dir[3];
     static int have_last;
+    /* The pop-out turn still to give: in one frame it was a snap (2-25 degrees, at times 60-80), so it
+     * eases in, most of it within 0.2 s (a 0.06 s time constant). */
+    static float pop_left;
+    static uint64_t pop_us;
     if (session_press!=aim_press_us) {
         session_press=aim_press_us;
         turned_yaw=turned_pitch=0.0f;
+        pop_left=0.0f;
+        pop_us=now;
         memset(given,0,sizeof(given));
         have_last=0;
+        /* the mouse turned the view during the shoulder move: start where it looks now */
+        float view;
+        if (view_now(now,&view)) { press_view=view; press_view_ok=1; }
         if (press_view_ok) {
             const float pop=wrap_degrees(heading_of(dir)-press_view);
             const int kept=SDL_fabsf(pop)<=POP_OUT_MAX_DEGREES;
-            if (kept) turned_yaw=pop;
+            if (kept) pop_left=pop;
             printf("Gyro: %s aim press: view %.1f, aim %.1f, turn %.1f%s\n",game,press_view,heading_of(dir),pop,
                    kept ? "" : " (too far, the game's aim kept)");
         } else {
@@ -607,6 +638,13 @@ static void raw_aim(const char *game, uint64_t controller, const RuntimeGuestReg
         }
     }
     given[slot].last_us=now;
+    if (pop_left!=0.0f) {
+        const float give=SDL_fabsf(pop_left)<0.05f ? pop_left
+                         : pop_left*(1.0f-SDL_expf(-(float)(now-pop_us)*1e-6f/0.06f));
+        turned_yaw+=give;
+        pop_left-=give;
+    }
+    pop_us=now;
     if (dx!=0.0f || dy!=0.0f) {
         turned_yaw+=dx*k;
         turned_pitch+=-(input.mouse_invert_y ? -dy : dy)*k;
@@ -711,17 +749,18 @@ static void mouse_sticks(float *pad, const AimCurve *aim) {
          * measured in U1: 45 x^2 degrees/s up to x = 1, then about 54 x - 9 (x = 3: 152, x = 6: 324) */
         const float scale=MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity/dt;
         const int following=camera_hook_us && now-camera_hook_us<50000;
+        const int aiming=aim_held && !aim_starting(now); /* the shoulder move turns the camera as before */
         if (raw_aim_armed(now)) dx=dy=0.0f; /* raw aim turns it (gyro aiming) */
         float push=0.0f;
-        if (!aim_held && following && follow_direct) { /* the follow camera turned itself */
+        if (!aiming && following && follow_direct) { /* the follow camera turned itself */
             dx=dy=0.0f;
             push=follow_push;
         }
-        if (!aim_held && gyro_on() && cover_hook_us && now-cover_hook_us<200000) dx=dy=0.0f; /* the cover camera too (a slow frame rate calls it rarely) */
+        if (!aiming && gyro_on() && cover_hook_us && now-cover_hook_us<200000) dx=dy=0.0f; /* the cover camera too (a slow frame rate calls it rarely) */
         /* following through the joypad: the shortfall is made up within about a quarter second */
-        const float extra=!aim_held && following && !follow_direct ? follow_correction*4.0f : 0.0f;
+        const float extra=!aiming && following && !follow_direct ? follow_correction*4.0f : 0.0f;
         const float ry=(input.mouse_invert_y ? -dy : dy)*scale;
-        if (aim_held) {
+        if (aiming) {
             x=stick_for_rate(&aim->h,dx*scale);
             y=stick_for_rate(&aim->v,ry);
         } else {
@@ -1025,6 +1064,9 @@ static const RuntimeGuestCallback guest_callbacks[]={
 const RuntimeGuestCallback *runtime_guest_callbacks(size_t *count) {
     *count=sizeof(guest_callbacks)/sizeof(*guest_callbacks);
     return guest_callbacks;
+}
+void runtime_guest_callback_installed(const RuntimeGuestCallback *callback) {
+    if (callback->callback==u1_aim_controller) aim_hooked=1;
 }
 
 /* The button pictures for this controller: 1 PlayStation (DualShock, DualSense: the game's own),
@@ -1351,9 +1393,9 @@ static void sample(PadData *d) {
         if (held && !aim_held) {
             /* gyro aiming: where the player looked (raw_aim turns the first aim direction there) */
             const uint64_t t=now_us();
-            if (cover_hook_us && t-cover_hook_us<100000) { press_view=cover_view; press_view_ok=1; }
-            else if (camera_hook_us && t-camera_hook_us<100000) { press_view=wrap_degrees(follow_view+180.0f); press_view_ok=1; }
-            else press_view_ok=0;
+            float view=0.0f;
+            press_view_ok=view_now(t,&view);
+            press_view=view;
             aim_press_us=t;
         }
         aim_held=held;
