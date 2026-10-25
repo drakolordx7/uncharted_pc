@@ -1213,9 +1213,13 @@ void TextureCache::UntrackImageTail(ImageId image_id) {
 }
 
 static bool LiveMarksOnBigCards() {
+    // BB_VRAM_LEGACY=1 turns these off too, so that one switch gives the old behaviour. (Only
+    // the explicit switch: unset, Vram::Legacy() is true on every card above 8.5 GB, where these
+    // marks are meant to run.)
     static const bool enabled = [] {
         const char* env = std::getenv("BB_GC_LIVE_MARKS");
-        return !(env && env[0] == '0');
+        const char* legacy = std::getenv("BB_VRAM_LEGACY");
+        return !(env && env[0] == '0') && !(legacy && legacy[0] == '1');
     }();
     return enabled;
 }
@@ -1234,6 +1238,11 @@ void TextureCache::GarbageCollectImages() {
     if (instance.CanReportMemoryUsage()) {
         u64 budget_now = 0;
         instance.QueryMemory(total_used_memory, budget_now);
+        // An allocation went over the budget since the last pass (image.cpp). Taken here on every
+        // pass, so a flag no branch below uses (say the budget moved across 8 GB) does not fire
+        // a stale aggressive pass later.
+        const bool over_budget_alloc =
+            Vulkan::Vram::urgent.exchange(false, std::memory_order_relaxed);
         // A card (or what other programs leave of it) under 8 GB works from its live budget.
         tight_budget = !Vulkan::Vram::Legacy() && !instance.IsIntegrated() && budget_now != 0 &&
                        budget_now < 8_GB;
@@ -1256,10 +1265,8 @@ void TextureCache::GarbageCollectImages() {
             trigger_gc_memory = others + room / 100 * 70;
             pressure_gc_memory = others + room / 100 * 85;
             critical_gc_memory = others + room;
-            if (Vulkan::Vram::urgent.exchange(false, std::memory_order_relaxed)) {
-                // An allocation just went over the budget: this pass is a critical one.
-                urgent_pass = true;
-            }
+            // An allocation just went over the budget: this pass is a critical one.
+            urgent_pass = over_budget_alloc;
         } else if (!instance.IsIntegrated() && budget_now >= 8_GB && LiveMarksOnBigCards()) {
             // bbport: cards of 8 GB and up. The startup marks keep 60% of up to 8 GB free and
             // compare with everything the process holds, and buffers backing guest memory alone
@@ -1276,9 +1283,18 @@ void TextureCache::GarbageCollectImages() {
             const u64 limit = budget / 100 * 90;
             u64 room = limit > others ? limit - others : 0;
             room = std::max<u64>(room, std::max<u64>(512_MB, budget / 5));
-            trigger_gc_memory = std::max<u64>(base_trigger_gc_memory, others + room / 100 * 70);
-            pressure_gc_memory = std::max<u64>(base_pressure_gc_memory, others + room / 100 * 85);
-            critical_gc_memory = std::max<u64>(base_critical_gc_memory, others + room);
+            // With others past ~80% of the budget, others + room passes the budget itself and
+            // the driver pages VRAM out before the collector reaches critical: no mark above 95%
+            // of the budget (the startup marks still the floor).
+            const u64 cap = budget / 100 * 95;
+            trigger_gc_memory = std::max<u64>(base_trigger_gc_memory,
+                                              std::min<u64>(others + room / 100 * 70, cap));
+            pressure_gc_memory = std::max<u64>(base_pressure_gc_memory,
+                                               std::min<u64>(others + room / 100 * 85, cap));
+            critical_gc_memory = std::max<u64>(base_critical_gc_memory,
+                                               std::min<u64>(others + room, cap));
+            // An over-budget allocation: an aggressive pass, as on small cards.
+            urgent_pass = over_budget_alloc;
         }
         // bbport: on integrated GPUs (Steam Deck) the usage covers system-memory heaps holding
         // much more than images (buffers backing guest memory), and the startup budget left
@@ -1331,6 +1347,11 @@ void TextureCache::GarbageCollectImages() {
     const auto configure = [&](bool allow_aggressive) {
         pressured = total_used_memory >= pressure_gc_memory;
         aggresive = allow_aggressive && total_used_memory >= critical_gc_memory;
+        if (urgent_pass && !tight_budget) {
+            // Big card with live marks, an allocation went over the budget: aggressive at once.
+            pressured = true;
+            aggresive = true;
+        }
         // bbport: critical used 160 ticks, longer than pressure's 80, so the aggressive pass
         // never freed more than the first one (#256).
         ticks_to_destroy = aggresive ? 40 : pressured ? 80 : 16;
