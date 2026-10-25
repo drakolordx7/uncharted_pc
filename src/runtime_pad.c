@@ -1841,6 +1841,45 @@ static float aim_follow(float dt, float pending_yaw, float pending_pitch) {
     const float k=pixels/AIM_SMOOTH_PIXELS;
     return 1.0f-SDL_expf(-dt*(1.0f+k*k)/AIM_SMOOTH_SECONDS);
 }
+/* The mouse's motion is taken once per frame at the moment the camera is updated, and those moments are uneven (measured: 7 and 13 ms apart in turn
+ * while the game's own frame time stays 10 ms and the frames are shown evenly), so the turn per frame beat between small and large (18 / 26 px in
+ * turn on a capture) and the player's body, a frame behind the camera, swung back and forth against it. The turn is given as it was at a steady
+ * pace instead: the total turned since the aim began is kept as a function of time and read at a virtual time that moves by the game's frame time
+ * and is held about AIM_RESAMPLE_DELAY_US behind real time. The angle turned in total is the same (1:1), no speed is capped.
+ * Off by default (BB_AIM_RESAMPLE=1 turns it on, BB_AIM_DELAY_MS=<ms> sets the delay): measured on video it made the steps a little steadier (median
+ * deviation 8.5 % to 7.2 %) but did not change the body's swing, which a perfectly steady turn (BB_AIM_TEST) shows as well. */
+#define AIM_RESAMPLE_N 64
+static int aim_resample_reset=1;
+static void aim_resample(uint64_t now, float dt, float *dx, float *dy) {
+    static struct { double t; float x, y; } ring[AIM_RESAMPLE_N];
+    static int count, enabled=-1; static double v, delay_us=15000.0; static float cx, cy, ax, ay;
+    if (enabled<0) {
+        const char *e=getenv("BB_AIM_RESAMPLE"); enabled=e && *e=='1';
+        const char *d=getenv("BB_AIM_DELAY_MS"); if (d && *d) delay_us=atof(d)*1000.0;
+    }
+    if (!enabled) return;
+    const double t=(double)now;
+    if (aim_resample_reset || count==0 || t-ring[count-1].t>100000.0) {
+        aim_resample_reset=0; count=0; cx=cy=ax=ay=0.0f; v=t-delay_us;
+        ring[0].t=t-delay_us-1000.0; ring[0].x=ring[0].y=0.0f; count=1;
+    }
+    cx+=*dx; cy+=*dy;
+    if (count==AIM_RESAMPLE_N) { memmove(ring,ring+1,(AIM_RESAMPLE_N-1)*sizeof ring[0]); count--; }
+    ring[count].t=t; ring[count].x=cx; ring[count].y=cy; count++;
+    v+=(double)dt*1e6;
+    v+=0.1*((t-delay_us)-v);
+    if (v>t) v=t;
+    if (v<ring[0].t) v=ring[0].t;
+    float ox=ring[count-1].x, oy=ring[count-1].y;
+    for (int i=count-1;i>0;--i) {
+        if (ring[i-1].t<=v) {
+            const double span=ring[i].t-ring[i-1].t, k=span>0.0 ? (v-ring[i-1].t)/span : 1.0;
+            ox=ring[i-1].x+(float)k*(ring[i].x-ring[i-1].x); oy=ring[i-1].y+(float)k*(ring[i].y-ring[i-1].y);
+            break;
+        }
+    }
+    *dx=ox-ax; *dy=oy-ay; ax=ox; ay=oy;
+}
 static uint64_t aim_native_us;        /* last frame the zoom camera was turned by the mouse */
 static volatile int aim_session_reset = 1; /* set while not aiming: the next aim starts from a zero turn */
 static float aim_pending_degrees;     /* the mouse's yaw not given to the zoom camera yet */
@@ -1935,7 +1974,7 @@ static void __attribute__((ms_abi)) u1b_aim_camera(uint64_t unused0, uint64_t un
     static float embedded_yaw, embedded_pitch;   /* the turn written into the aim vector (the camera's state) so far (degrees) */
     static float total_yaw, total_pitch;         /* the mouse's turn since the aim began (degrees) */
     if (aim_session_reset) {
-        aim_session_reset=0; total_yaw=total_pitch=embedded_yaw=embedded_pitch=0.0f;
+        aim_session_reset=0; aim_resample_reset=1; total_yaw=total_pitch=embedded_yaw=embedded_pitch=0.0f;
         aim_pending_degrees=aim_pending_pitch=0.0f; frame_us=0;
     }
     const int new_frame=!(frame_us && now-frame_us<1500);
@@ -1944,10 +1983,13 @@ static void __attribute__((ms_abi)) u1b_aim_camera(uint64_t unused0, uint64_t un
         float dx, dy;
         camera_take(2,&dx,&dy);
         if (camera_stopped(image,U1B_CAMERA_DT)) { aim_pending_degrees=aim_pending_pitch=0.0f; return; } /* paused */
-        aim_pending_degrees+=dx*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity*input.mouse_aim_sensitivity;
-        aim_pending_pitch+=(input.mouse_invert_y ? -dy : dy)*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity*input.mouse_aim_sensitivity;
         float dt=*(const volatile float *)(uintptr_t)(image+U1B_CAMERA_DT);
         if (!(dt>0.0005f && dt<0.05f)) dt=1.0f/60.0f;
+        aim_resample(now,dt,&dx,&dy);
+        aim_pending_degrees+=dx*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity*input.mouse_aim_sensitivity;
+        aim_pending_pitch+=(input.mouse_invert_y ? -dy : dy)*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity*input.mouse_aim_sensitivity;
+        static float test_rate=-1.0f; if (test_rate<0.0f) { const char *e=getenv("BB_AIM_TEST"); test_rate=e ? (float)atof(e) : 0.0f; }   /* BB_AIM_TEST=<degrees per second>: a steady turn on top of the mouse (to see whether the unevenness is made after our code) */
+        if (test_rate>0.0f) aim_pending_degrees+=test_rate*dt;
         const float follow=aim_follow(dt,aim_pending_degrees,aim_pending_pitch);
         const float step=aim_pending_degrees*follow, step_pitch=aim_pending_pitch*follow;
         aim_pending_degrees-=step;
@@ -1963,6 +2005,7 @@ static void __attribute__((ms_abi)) u1b_aim_camera(uint64_t unused0, uint64_t un
     float *aim=(float *)(uintptr_t)(camera+0x1830);
     float *yaw=(float *)(uintptr_t)(guest_callback_rsp+0x140);
     float *pitch=yaw+1; /* the output's pitch angle follows (degrees, positive looks down) */
+    const float aim_in=SDL_atan2f(aim[0],aim[2])*57.29578f, yaw_in=*yaw;   /* (what the game left, for BB_U1_AIMPROBE) */
     if (fade) {
         /* the state is left alone: the game works it out again partly from the previous one (a turn put into it fed back and ran away) */
         *yaw=wrap_degrees(*yaw-total_yaw*f);
@@ -1994,6 +2037,83 @@ static void __attribute__((ms_abi)) u1b_aim_camera(uint64_t unused0, uint64_t un
     }
     if (new_frame && fade) { embedded_yaw=0.0f; embedded_pitch=0.0f; }
     if (entry>0x10000) { *(float *)(uintptr_t)(entry+0x70)=*yaw; *(float *)(uintptr_t)(entry+0x74)=*pitch; }
+    {   /* BB_U1_AIMPROBE=<file>: at every aim frame, time, the mouse's turn so far and this frame's, then the player object's first 0x800 bytes (to find the body's heading) */
+        static FILE *probe_f; static int probe_init; static unsigned probe_n;
+        if (!probe_init) { probe_init=1; const char *p=getenv("BB_U1_AIMPROBE"); if (p && *p) probe_f=fopen(p,"wb"); }
+        uint64_t holder=0, player=0;
+        if (!(safe_read(&holder,image+0xaa5f78,8) && safe_read(&player,holder,8))) player=0;
+        if (player>0x10000 && new_frame && getenv("BB_ROOT_WATCH")) {   /* the same on the player's heading quaternion (+0x644 y, +0x64c w): who turns the body (use with BB_WATCH_WRITE=1) */
+            static uint64_t t0, last_summary;
+            if (!t0) t0=now;
+            uint64_t xf=0;   /* (Ghidra: player+0xf0 -> the transform object, whose quaternion at +0x20 is the body's own orientation; player+0x640 is only the camera heading the controller latched) */
+            (void)xf; stickwatch_arm(player+0x590,player+0x598,image);   /* a facing direction (x, z) that follows the camera's turn with one frame of delay (measured) */
+            stickwatch_enable(now-t0>2000000);
+            if (now-t0>2000000 && now-last_summary>4000000) { last_summary=now; stickwatch_summary(); }
+        }
+        if (player>0x10000 && new_frame && getenv("BB_ANIM_WATCH")) {   /* hardware watch on the skeleton's local matrices (Ghidra FUN_0008ca40: skeleton = *(*(player+0xf0)+0xb8), world matrices *(skel+8), local ones *(skel+0x10), 0x60 bytes per joint): who writes joint 15's local transform (use with BB_WATCH_WRITE=1) */
+            static uint64_t t0, last_summary; uint64_t xf=0, skel=0, local=0;
+            if (!t0) t0=now;
+            if (safe_read(&xf,player+0xf0,8) && xf>0x10000 && safe_read(&skel,xf+0xb8,8) && skel>0x10000 && safe_read(&local,skel+0x10,8) && local>0x10000) {
+                const char *e=getenv("BB_ANIM_JOINT"); const unsigned j=e ? (unsigned)atoi(e) : 15;
+                stickwatch_arm(local+j*0x60,local+j*0x60+0x10,image);
+                stickwatch_enable(now-t0>2000000);
+                if (now-t0>2000000 && now-last_summary>4000000) { last_summary=now; stickwatch_summary(); }
+            }
+        }
+        if (player>0x10000 && new_frame && getenv("BB_CLOCK_WATCH")) {   /* the same on the player's clock (player+0xe0): the delta time (+0x10) and the float after the 0x1c one */
+            static uint64_t t0, last_summary; uint64_t clock=0;
+            if (!t0) t0=now;
+            if (safe_read(&clock,player+0xe0,8) && clock>0x10000) {
+                stickwatch_arm(clock+0x10,clock+0x14,image);
+                stickwatch_enable(now-t0>2000000);
+                if (now-t0>2000000 && now-last_summary>4000000) { last_summary=now; stickwatch_summary(); }
+            }
+        }
+        if (player>0x10000 && new_frame && getenv("BB_POSE_WATCH")) {   /* hardware watch on two floats of the pose buffer (player+0x100 -> joints): who writes the torso / arm rotations */
+            static uint64_t t0, last_summary; uint64_t pose=0;
+            if (!t0) t0=now;
+            if (safe_read(&pose,player+0x100,8) && pose>0x10000) {
+                stickwatch_arm(pose+0x3c0,pose+0x2dc,image);
+                stickwatch_enable(now-t0>2000000);
+                if (now-t0>2000000 && now-last_summary>4000000) { last_summary=now; stickwatch_summary(); }
+            }
+        }
+        if (probe_f && new_frame && probe_n<6000 && player>0x10000) {
+            static unsigned char buf[0x1000];
+            if (safe_read(buf,player,sizeof buf)) {
+                const double pt=now*1e-6; float head[8]={total_yaw,frame_turn,0.0f,(float)new_frame,aim_in,SDL_atan2f(aim[0],aim[2])*57.29578f,yaw_in,*yaw};
+                safe_read(&head[2],image+U1B_CAMERA_DT,4);
+                unsigned char clk[0x40]={0}; uint64_t clock=0;   /* the player process's clock (player+0xe0), whose float at +0x10 is the delta time its update uses (FUN_0029afd0) */
+                if (safe_read(&clock,player+0xe0,8) && clock>0x10000) safe_read(clk,clock,sizeof clk);
+                fwrite(&pt,8,1,probe_f); fwrite(head,4,8,probe_f); fwrite(clk,1,sizeof clk,probe_f); fwrite(buf,1,sizeof buf,probe_f);
+                if ((++probe_n&63)==0) fflush(probe_f);
+            }
+        }
+        /* BB_U1_AIMPROBE2=<file>: the same, but every pointer found in the player object's first 0x1000 bytes is followed and 0x400 bytes of what it points to are written
+         * (time, count, then per pointer: offset in the player, pointer, bytes), to find the skeleton / animation data */
+        static FILE *probe2_f; static int probe2_init; static unsigned probe2_n;
+        if (!probe2_init) { probe2_init=1; const char *p=getenv("BB_U1_AIMPROBE2"); if (p && *p) probe2_f=fopen(p,"wb"); }
+        if (probe2_f && new_frame && probe2_n<500 && player>0x10000) {
+            static unsigned char pl[0x1000], target[0x400];
+            if (safe_read(pl,player,sizeof pl)) {
+                const double pt=now*1e-6; uint32_t count=0;
+                long count_at=ftell(probe2_f);
+                float extra[7]={total_yaw,frame_turn,0.0f,0,0,0,0};   /* the mouse's turn, game dt, the player's heading quaternion (+0x640) */
+                safe_read(&extra[2],image+U1B_CAMERA_DT,4); memcpy(&extra[3],pl+0x640,16);
+                fwrite(&pt,8,1,probe2_f); fwrite(&count,4,1,probe2_f); fwrite(extra,4,7,probe2_f);
+                for (uint32_t off=0;off+8<=sizeof pl;off+=8) {
+                    uint64_t v; memcpy(&v,pl+off,8);
+                    if (v<0x10000 || v>0x7fffffffffffULL || (v&3)) continue;
+                    if (!safe_read(target,v,sizeof target)) continue;
+                    fwrite(&off,4,1,probe2_f); fwrite(&v,8,1,probe2_f); fwrite(target,1,sizeof target,probe2_f);
+                    count++;
+                }
+                const long end_at=ftell(probe2_f);
+                fseek(probe2_f,count_at+8,SEEK_SET);   /* (the count sits right after the time) */ fwrite(&count,4,1,probe2_f); fseek(probe2_f,end_at,SEEK_SET);
+                if ((++probe2_n&15)==0) fflush(probe2_f);
+            }
+        }
+    }
     if (mouse_debug()) {
         float shown=0.0f; double age=0.0;
         const int have=bbgpu_camera_yaw(&shown,&age);

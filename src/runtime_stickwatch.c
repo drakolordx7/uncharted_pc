@@ -30,6 +30,16 @@ static LONG CALLBACK veh(PEXCEPTION_POINTERS ep) {
                 const int guest=rip>=image_base && rip<image_base+GUEST_SIZE;
                 printf("Watch%d: first access by %s, next instruction at image+%#llx\n",w,guest ? "guest" : "HOST",
                        (unsigned long long)(rip-image_base));
+                {   /* the guest return addresses on the stack, to find the callers */
+                    const uint64_t *sp=(const uint64_t *)(uintptr_t)c->Rsp;
+                    printf("Watch%d: callers:",w);
+                    int shown=0;
+                    for (int k=0;k<400 && shown<14;++k) {
+                        uint64_t v; if (IsBadReadPtr(sp+k,8)) break; v=sp[k];
+                        if (v>=image_base+0x1000 && v<image_base+0x800000) { printf(" image+%#llx",(unsigned long long)(v-image_base)); ++shown; }
+                    }
+                    printf("\n");
+                }
             }
             ++seen[w][i].count;
         }
@@ -53,7 +63,7 @@ static DWORD WINAPI apply_thread(LPVOID unused) {
             if (GetThreadContext(th,&ctx)) {
                 ctx.Dr0=(DWORD64)watched[0];
                 ctx.Dr1=(DWORD64)watched[1];
-                ctx.Dr7=0xFF0005; /* L0 L1, both read/write, 4 bytes */
+                ctx.Dr7=getenv("BB_WATCH_WRITE") ? 0xDD0005 : 0xFF0005; /* L0 L1, 4 bytes; read/write, or writes only with BB_WATCH_WRITE */
                 if (SetThreadContext(th,&ctx)) ++count;
             }
             ResumeThread(th);
