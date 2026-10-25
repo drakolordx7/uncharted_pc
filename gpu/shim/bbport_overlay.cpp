@@ -211,7 +211,8 @@ void Menu() {
     if (const char* problem = s.xess_problem.load(); problem && upscaler == BbSettings::UpscalerXess) {
         ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "XeSS: %s", problem);
     }
-    if (const char* problem = s.fsr4_problem.load()) {
+    // Missing FSR 4 assets are shown next to the disabled entry above, not as a warning here.
+    if (const char* problem = s.fsr4_problem.load(); problem && std::strncmp(problem, "assets", 6) != 0) {
         ImGui::PushTextWrapPos();
         ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "FSR 4 unavailable: %s", problem);
         if (!BbSettings::IsFsr4(s.upscaler))
