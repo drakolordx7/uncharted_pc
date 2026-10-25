@@ -2032,13 +2032,43 @@ void Rasterizer::DispatchDirect() {
     if (!pipeline) {
         return;
     }
-    if (pipelined &&
-        !IsGuestMemoryShaderHLE(pipeline->GetStage(Shader::SwStage::Compute).pgm_hash)) {
+    const auto& cs = pipeline->GetStage(Shader::SwStage::Compute);
+    if (pipelined && (!IsGuestMemoryShaderHLE(cs.pgm_hash) || GuestCopyOnStageB(cs))) {
         PostDraw(pipeline, nullptr, false, 0, &CsRegs());
         return;
     }
     DrainDrawPipe();
     DispatchRecord(pipeline);
+}
+
+bool Rasterizer::GuestCopyOnStageB(const Shader::Info& cs) {
+    // bbport: U2 runs ~10 raycaster copies a frame (a 64-dword copy shader). Done here, each
+    // drained the draw pipe: the GPU command thread waited for the recording thread to run dry
+    // (~30% of it in the Borneo jungle) and the recording thread then idled. A copy of GPU data
+    // (results of raycaster dispatches recorded or still queued) writes guest memory only for
+    // the record arrays the game's CPU code reads (DeferGuestCopy), never the constants the SRT
+    // walkers here read, so it runs in order on the recording thread. Copies of CPU data (the
+    // constant blocks) still run here. BB_HLE_PIPE=0 or toggle2 PipelinedRaycasterCopies: off.
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_HLE_PIPE");
+        return !(env && env[0] == '0');
+    }();
+    if (!enabled || BbToggle::Disabled2(BbToggle::PipelinedRaycasterCopies)) {
+        return false;
+    }
+    const auto copy = RaycasterCopyRange(cs, CsRegs());
+    if (!copy) {
+        return false;
+    }
+    if (copy->size != 0) {
+        if (!buffer_cache.IsRangeGpuWritten(copy->src, copy->size) &&
+            !PendingWriteOverlaps(copy->src, copy->size)) {
+            return false;
+        }
+        // Constants overlapping the destination are bound on the recording thread, after it.
+        NotePendingGpuWrite(copy->dst, copy->size);
+    }
+    return true;
 }
 
 void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {

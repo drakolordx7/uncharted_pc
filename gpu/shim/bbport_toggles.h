@@ -85,6 +85,9 @@ inline bool Disabled(std::uint64_t bit) {
 /// Toggles in the second number of BB_TOGGLE_FILE ("mask mask2"; the first 64 bits are used).
 enum : std::uint64_t {
     TextureSetExact = 1, ///< memoized texture sets of exact images survive (un)registrations
+    PipelinedRaycasterCopies = 2, ///< 64-dword copies of GPU data run on the recording thread
+    ChainedEosLabels = 4, ///< end-of-shader labels written behind the deferred fences
+    VoLabelNoDrain = 8, ///< a met display buffer label wait does not drain the draw pipe
     FaultReadbackHere = 16, ///< guest write faults on submitted GPU data read back on their thread
 };
 inline bool Disabled2(std::uint64_t bit) {
