@@ -261,7 +261,12 @@ static ABI int32_t fiber_run_with(GuestFiber *fiber,void *addr,uint64_t size,uin
 }
 static ABI int32_t fiber_run(GuestFiber *fiber,uint64_t arg,uint64_t *ret) { return fiber_run_with(fiber,NULL,0,arg,ret); }
 
+/* bbport: set while a render command context is open on this thread (probe.c, the job wait
+ * patch); a fiber leaving the thread takes its context along, so the flag is cleared. */
+_Thread_local int runtime_ndgi_open;
+#define NDGI_LEAVE() (runtime_ndgi_open=0)
 static ABI int32_t fiber_switch_with(GuestFiber *fiber,void *addr,uint64_t size,uint64_t arg,uint64_t *arg_on_run) {
+    NDGI_LEAVE();
     int32_t e=check_fiber(fiber);
     if (e) return e;
     if ((uintptr_t)addr&15) return FIBER_ERROR_ALIGNMENT;
@@ -286,9 +291,13 @@ static ABI int32_t fiber_switch_with(GuestFiber *fiber,void *addr,uint64_t size,
     if (arg_on_run) *arg_on_run=t->arg_on_run_to;
     return 0;
 }
-static ABI int32_t fiber_switch(GuestFiber *fiber,uint64_t arg,uint64_t *arg_on_run) { return fiber_switch_with(fiber,NULL,0,arg,arg_on_run); }
+static ABI int32_t fiber_switch(GuestFiber *fiber,uint64_t arg,uint64_t *arg_on_run) {
+    NDGI_LEAVE();
+    return fiber_switch_with(fiber,NULL,0,arg,arg_on_run);
+}
 
 static ABI int32_t fiber_return_to_thread(uint64_t arg_on_return,uint64_t *arg_on_run) {
+    NDGI_LEAVE();
     FiberThread *t=this_thread();
     GuestFiber *current=t->current;
     if (!current) return FIBER_ERROR_PERMISSION;
