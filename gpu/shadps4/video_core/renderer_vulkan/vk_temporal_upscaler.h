@@ -253,6 +253,10 @@ private:
     bool scaled_session = false;
     u32 ui_width = 0, ui_height = 0;
     u32 render_width = 0, render_height = 0;
+    /// Velocity mode (Uncharted): the game's own render size (BB_GAME_RES, else 1080p) and the
+    /// size Run() last took the scene at; the menu shows these, presets do not apply.
+    u32 game_width = 1920, game_height = 1080;
+    u32 run_width = 0, run_height = 0, run_out_width = 0, run_out_height = 0;
     vk::Format ui_format = vk::Format::eUndefined;
     vk::Format ui_depth_format = vk::Format::eUndefined;
     /// Views of the port's images in the formats/swizzles the game's views use.

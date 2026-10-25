@@ -270,9 +270,12 @@ void Menu() {
     }
     const bool upscaler_on = s.upscaler != BbSettings::UpscalerOff;
     const bool taa = s.upscaler == BbSettings::UpscalerTaa;
+    // Uncharted renders the scene at the game's own size (Display page, BB_GAME_RES): the
+    // renderer runs the upscaler as Native AA there and ignores the preset.
+    const bool game_size = s.game_size_render.load();
     ImGui::BeginDisabled(!upscaler_on);
-    ImGui::BeginDisabled(taa);
-    int preset = taa ? BbSettings::NativeAA : s.preset.load();
+    ImGui::BeginDisabled(taa || game_size);
+    int preset = taa || game_size ? BbSettings::NativeAA : s.preset.load();
     char preset_label[64];
     std::snprintf(preset_label, sizeof(preset_label), "%s (x%.1f)", BbSettings::PresetName(preset),
                   BbSettings::PresetScale(preset));
@@ -310,6 +313,9 @@ void Menu() {
             Hint("BB_RENDER_RES fixes the scene size at startup. Remove that variable to change "
                  "resolution and presets without restarting the game.");
         }
+    } else if (game_size) {
+        Hint("This game renders the scene at its own resolution (the launcher's Display page): the "
+             "upscaler works as anti-aliasing at that size (Native AA), the preset does not lower it.");
     } else {
         Hint("Native AA: FSR works as anti-aliasing. The other presets lower the scene's render "
              "resolution relative to the output. The UI is drawn at the output resolution. "
@@ -390,6 +396,7 @@ void Menu() {
     ImGui::SeparatorText("Output resolution");
     static const char* outputs[] = {"1280 x 720", "1920 x 1080", "2560 x 1440", "3840 x 2160"};
     int output = s.output_res;
+    ImGui::BeginDisabled(game_size);
     if (ImGui::BeginCombo("Output resolution", outputs[output])) {
         for (int i = 0; i < BbSettings::OutputCount; ++i) {
             if (ImGui::Selectable(outputs[i], i == output)) {
@@ -398,7 +405,11 @@ void Menu() {
         }
         ImGui::EndCombo();
     }
-    if (BbSettings::FixedRenderSession()) {
+    ImGui::EndDisabled();
+    if (game_size) {
+        Hint("The frame and the UI have the game's own resolution: set it on the launcher's Display "
+             "page (applies after restarting the game).");
+    } else if (BbSettings::FixedRenderSession()) {
         Hint("Size of the finished frame and the UI. The preset sets the scene size relative to "
              "the output: 4K Performance = 1920x1080. Applies after restarting the game.");
     } else {
@@ -408,6 +419,7 @@ void Menu() {
     }
     static const char* live_modes[] = {"Auto (by GPU)", "Off (faster)", "On"};
     int live = s.live_resolution + 1;
+    ImGui::BeginDisabled(game_size);
     if (ImGui::BeginCombo("Live resolution changes", live_modes[live])) {
         for (int i = 0; i < 3; ++i) {
             if (ImGui::Selectable(live_modes[i], i == live)) {
@@ -416,6 +428,7 @@ void Menu() {
         }
         ImGui::EndCombo();
     }
+    ImGui::EndDisabled();
     Hint("On: output resolution and preset change without a restart, but the game's post-processing "
          "stays at 1080p, noticeably slower on the Steam Deck and older GPUs. "
          "Off: everything renders at the preset's size, changes need a restart. Auto turns "
