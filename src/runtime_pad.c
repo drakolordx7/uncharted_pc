@@ -1751,7 +1751,9 @@ static void sample(PadData *d) {
         if (held) aim_blend_until_us=t0+1300000;
         aim_native=held && zoom && !(u2_zoom_under_us && t0-u2_zoom_under_us<100000) &&
                    !(u2_zoom_below_cover_us && t0-u2_zoom_below_cover_us<100000);
-        look_held=(d->buttons & BTN_R3)!=0;
+        /* R3 counts only with the look-around camera running (R3 held elsewhere, say on foot, is no look: the follow
+         * camera and the aim keep the mouse), as the zoom check above does for the aim */
+        look_held=(d->buttons & BTN_R3)!=0 && u2_look_seen_us && t0-u2_look_seen_us<100000;
         if (look_held) look_blend_until_us=t0+1300000;
         if (held && !aim_held) {
             /* gyro aiming: where the player looked (raw_aim turns the first aim direction there) */
