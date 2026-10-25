@@ -83,6 +83,12 @@ class SaveSlotTests(unittest.TestCase):
         # a game without a save gets an empty Main
         self.assertTrue(slots.list_slots(self.user, 'u2')[0]['empty'])
 
+    def test_launches_make_no_slots_for_games_without_saves(self):
+        slots.sync(self.user, {})
+        slots.store_back_all(self.user)
+        slots.recover(self.user)
+        self.assertEqual(sorted(p.name for p in slots.slots_root(self.user).iterdir() if p.is_dir()), ['u1', 'u3'])
+
     def test_profiles_never_go_into_slots(self):
         slots.list_slots(self.user, 'u1')
         held = list((slots.slots_root(self.user) / 'u1' / 'main' / 'data' / 'savedata' / '1' / TITLE).iterdir())
@@ -271,6 +277,69 @@ class SaveSlotTests(unittest.TestCase):
         self.assertEqual(slot_usr(self.user, 'u1', other, 'SAVEDATA010'), b'u1-main')
         self.assertEqual(slots.in_place(self.user, 'u1'), other)
 
+    # ---- backups of slots ------------------------------------------------------------------------
+    def zip_names(self, path):
+        import zipfile
+        with zipfile.ZipFile(path) as archive:
+            return set(archive.namelist())
+
+    def test_backups_hold_every_slot(self):
+        other = slots.create_slot(self.user, 'u1', 'Other', copy_from='main')
+        slots.list_slots(self.user, 'u3')
+        manual = self.zip_names(saves.create_backup(self.user, 'u1'))
+        for slot_id in ('main', other):
+            self.assertIn(f'save_slots/u1/{slot_id}/slot.json', manual)
+            self.assertIn(f'save_slots/u1/{slot_id}/data/savedata/1/{TITLE}/SAVEDATA010/USR-DATA', manual)
+        self.assertFalse(any(n.startswith('save_slots/u3/') for n in manual))  # u1's backup: u1's slots
+        self.assertFalse(any(n.endswith(('state.json', '.lock')) for n in manual))
+        auto = self.zip_names(saves.auto_backup(self.user))
+        self.assertIn(f'save_slots/u1/{other}/slot.json', auto)
+        self.assertIn('save_slots/u3/main/slot.json', auto)
+        saves.validate_backup(saves.list_backups(saves.backup_dir(self.user))[0]['path'])
+
+    def test_delete_backs_the_slot_up_and_restore_brings_it_back(self):
+        run = slots.create_slot(self.user, 'u1', 'Run 2')
+        slots.activate(self.user, 'u1', run)
+        make_save(self.user, 'SAVEDATA010', b'u1-run2')
+        slots.activate(self.user, 'u1', 'main')
+        made = slots.delete_slot(self.user, 'u1', run)
+        self.assertEqual(saves.read_manifest(made)['kind'], 'before-delete')
+        self.assertNotIn(run, self.names('u1'))
+        make_save(self.user, 'SAVEDATA010', b'u1-main-v2')
+        saves.restore_backup(self.user, made)
+        found = self.names('u1')
+        self.assertEqual(found[run]['name'], 'Run 2')
+        self.assertEqual(slot_usr(self.user, 'u1', run, 'SAVEDATA010'), b'u1-run2')
+        self.assertEqual(usr(self.user, 'SAVEDATA010'), b'u1-main-v2')  # the save in place is untouched
+        self.assertEqual(slots.in_place(self.user, 'u1'), 'main')
+
+    def test_restore_never_overwrites_existing_slots(self):
+        other = slots.create_slot(self.user, 'u1', 'Other', copy_from='main')
+        backup = saves.create_backup(self.user, 'all')
+        slots.activate(self.user, 'u1', other)
+        make_save(self.user, 'SAVEDATA010', b'u1-other-new')
+        slots.store_back(self.user, 'u1')
+        saves.restore_backup(self.user, backup)
+        self.assertEqual(slot_usr(self.user, 'u1', other, 'SAVEDATA010'), b'u1-other-new')
+        self.assertEqual(usr(self.user, 'SAVEDATA010'), b'u1-main')  # the backup's save, in place
+        slots.store_back_all(self.user)                             # goes into the active slot
+        self.assertEqual(slot_usr(self.user, 'u1', other, 'SAVEDATA010'), b'u1-main')
+        self.assertEqual(slot_usr(self.user, 'u1', 'main', 'SAVEDATA010'), b'u1-main')
+
+    def test_a_backup_cannot_smuggle_another_games_slot(self):
+        import hashlib
+        import json
+        import zipfile
+        path = Path(self.temp.name) / 'bad.zip'
+        name = 'save_slots/u2/main/slot.json'
+        with zipfile.ZipFile(path, 'w') as archive:
+            archive.writestr(name, '{}')
+            archive.writestr(saves.MANIFEST, json.dumps({
+                'format': saves.FORMAT, 'game': 'u1',
+                'files': [{'path': name, 'size': 2, 'sha256': hashlib.sha256(b'{}').hexdigest()}]}))
+        with self.assertRaises(saves.SaveError):
+            saves.validate_backup(path)
+
     # ---- the launcher's launch paths -------------------------------------------------------------
     def test_empty_slot_launch_path_and_store_back(self):
         launcher = load_launcher()
@@ -299,7 +368,8 @@ class SaveSlotTests(unittest.TestCase):
         found = self.names('u1')
         self.assertTrue(found[fresh]['last_played'])
         self.assertFalse(found['main']['last_played'])
-        self.assertIn('game output', (self.user / 'last_run.log').read_text(encoding='utf-8'))
+        log = (self.user / 'last_run.log').read_text(encoding='utf-8')
+        self.assertIn(f'Save slot swapped in: u1 {fresh}\ngame output\nSave stored in slot: u1 {fresh}\n', log)
 
     def test_launch_path_refuses_a_swap_while_a_game_runs(self):
         launcher = load_launcher()

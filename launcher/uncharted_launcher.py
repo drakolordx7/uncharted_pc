@@ -410,10 +410,12 @@ def active_slots(s):
 
 def prepare_slots(s, running=None):
     """Before a game starts: every game's active slot in the saves folder (the save there stored into
-    its own slot first). Returns {game: slot id in place}; SlotError while a swap is refused."""
+    its own slot first). Returns {game: slot id in place} (.swapped: the games whose save changed);
+    SlotError while a swap is refused."""
     user = saves_user_dir(s)
     placed = uncharted_slots.sync(user, active_slots(s), running or uncharted_saves.game_process_running)
-    uncharted_slots.mark_played(user, s['start'], placed[s['start']])
+    if s['start'] in placed:
+        uncharted_slots.mark_played(user, s['start'], placed[s['start']])
     return placed
 
 
@@ -1970,7 +1972,7 @@ class Launcher:
 
     # ---- saves ---------------------------------------------------------------------------------
     def build_saves(self):
-        f = self.page('saves', _('Saves'), _('Back up and restore your saves.'))
+        f = self.page('saves', _('Saves'), _('Save slots and backups.'))
         self.save_details = {}
         self.save_card = self.new_card(f, _('Your saves'))
         self.save_body = self.tk.Frame(self.save_card.inner, bg=CARD)
@@ -2290,11 +2292,15 @@ class Launcher:
         self.slots_changed()
 
     def delete_slot(self, game, slot):
-        if not self.messagebox.askyesno(NAME, _('Delete the slot {}? This cannot be undone.').format(self.slot_name(slot))):
+        if not self.messagebox.askyesno(NAME, _('Delete the slot {}? A backup is kept.').format(self.slot_name(slot))):
             return
-        slots = self.slot_list(game)
+        s = self.current()
+        user = saves_user_dir(s)
         try:
-            uncharted_slots.delete_slot(saves_user_dir(self.current()), game, slot['id'], self.active_slot(game, slots))
+            made = uncharted_slots.delete_slot(user, game, slot['id'], self.active_slot(game, self.slot_list(game)))
+            uncharted_saves.prune(uncharted_saves.backup_dir(user), backup_keep(s), kind='before-delete')
+            if made:
+                self.status.configure(text=_('Backup created: {}').format(made.name), fg=MUTED)
         except (OSError, uncharted_saves.SaveError) as error:
             self.slot_error(error)
         self.slots_changed()
@@ -2320,7 +2326,8 @@ class Launcher:
             child.destroy()
         backups = uncharted_saves.list_backups(uncharted_saves.backup_dir(saves_user_dir(self.current())))
         kinds = {'manual': _('manual'), 'auto': _('automatic'), 'before-restore': _('before a restore'),
-                 'before-edit': _('before editing'), 'imported': _('imported')}
+                 'before-edit': _('before editing'), 'before-delete': _('before deleting a slot'),
+                 'imported': _('imported')}
         if not backups:
             tk.Label(self.backup_body, text=_('No backups yet.'), bg=CARD, fg=MUTED, font=self.font_ui,
                      anchor='w').grid(row=0, column=0, sticky='w')
@@ -2676,7 +2683,10 @@ class Launcher:
         except Exception as error:  # a failed backup must not keep the game from starting
             self.append(_('Automatic backup failed: {}').format(error) + '\n')
         try:
-            self.app['save_slots'] = prepare_slots(self.app)
+            placed = prepare_slots(self.app)
+            self.app['save_slots'] = dict(placed)
+            for game in sorted(placed.swapped):
+                self.append(f'Save slot swapped in: {game} {placed[game]}\n')
             self.collect()
         except (OSError, uncharted_saves.SaveError) as error:  # never start on the wrong save
             self.slot_error(error)
@@ -3298,7 +3308,9 @@ def play_without_window(settings):
         except Exception as error:  # a failed backup must not keep the game from starting
             log.write(f'Automatic backup failed: {error}\n')
         try:
-            prepare_slots(settings)
+            placed = prepare_slots(settings)
+            for game in sorted(placed.swapped):
+                log.write(f'Save slot swapped in: {game} {placed[game]}\n')
         except (OSError, uncharted_saves.SaveError) as error:  # never start on the wrong save
             text = _('Could not change the save slot: {}').format(error) + '\n'
             log.write(text)
@@ -3328,7 +3340,11 @@ def play_without_window(settings):
             except (OSError, ValueError):
                 pass
         code = process.wait()
-        for game, error in uncharted_slots.store_back_all(saves_user_dir(settings)).items():
+        stored = {}
+        errors = uncharted_slots.store_back_all(saves_user_dir(settings), stored=stored)
+        for game, slot_id in sorted(stored.items()):
+            log.write(f'Save stored in slot: {game} {slot_id}\n')
+        for game, error in errors.items():
             log.write(f'Could not store the {game} save in its slot: {error}\n')
         return code
 

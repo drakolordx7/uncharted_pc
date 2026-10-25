@@ -335,6 +335,11 @@ def _finish(user_dir, game, state, running, rename):
 
 # ---- what the launcher calls -----------------------------------------------------------------
 
+def _untouched(user_dir, game):
+    """No slots and no save yet: nothing to store or swap (and no slot folder is made for it)."""
+    return not _game_dir(user_dir, game).is_dir() and not game_units(user_dir, game)
+
+
 def in_place(user_dir, game, now=None):
     """The id of the slot whose save is in the saves folder."""
     with _lock(user_dir):
@@ -374,12 +379,16 @@ def store_back(user_dir, game, now=None):
         return _store(user_dir, game, _ensure(user_dir, game, now))
 
 
-def store_back_all(user_dir, now=None):
-    """store_back for every game; returns {game: error message} for those that failed."""
+def store_back_all(user_dir, now=None, stored=None):
+    """store_back for every game; returns {game: error message} for those that failed. `stored`, a
+    dict, receives {game: slot id} of the slots that changed."""
     errors = {}
     for game in GAMES:
+        if _untouched(user_dir, game):
+            continue
         try:
-            store_back(user_dir, game, now)
+            if store_back(user_dir, game, now) and stored is not None:
+                stored[game] = in_place(user_dir, game, now)
         except (OSError, saves.SaveError) as error:
             errors[game] = str(error)
     return errors
@@ -390,6 +399,8 @@ def recover(user_dir, running=None, rename=os.rename, now=None):
     place back into its slot. Returns {game: error message}."""
     errors = {}
     for game in GAMES:
+        if _untouched(user_dir, game):
+            continue
         try:
             with _lock(user_dir):
                 state = _ensure(user_dir, game, now)
@@ -424,16 +435,27 @@ def activate(user_dir, game, slot_id, running=None, rename=os.rename, now=None):
 def sync(user_dir, active, running=None, rename=os.rename, now=None):
     """Before a game starts: for every game, its active slot (`active`: {game: slot id}; unknown or
     missing ids keep the slot in place) in the saves folder. Returns {game: slot id in place}."""
-    placed = {}
+    placed, swapped = {}, set()
     for game in GAMES:
         wanted = (active or {}).get(game)
+        if _untouched(user_dir, game):
+            continue
         current = in_place(user_dir, game, now)
         if not wanted or not ID_RE.match(str(wanted)) or \
                 not (_slot_dir(user_dir, game, wanted) / 'slot.json').is_file():
             wanted = current
-        activate(user_dir, game, wanted, running, rename, now)
+        if activate(user_dir, game, wanted, running, rename, now):
+            swapped.add(game)
         placed[game] = wanted
-    return placed
+    return Placed(placed, swapped)
+
+
+class Placed(dict):
+    """sync's result: {game: slot id in place}, with .swapped, the games whose save was swapped."""
+
+    def __init__(self, placed, swapped):
+        super().__init__(placed)
+        self.swapped = swapped
 
 
 def mark_played(user_dir, game, slot_id, now=None):
@@ -501,8 +523,9 @@ def rename_slot(user_dir, game, slot_id, name):
         return manifest['name']
 
 
-def delete_slot(user_dir, game, slot_id, active=None, now=None):
-    """Deletes a slot; never the one in place, being swapped in, or `active`."""
+def delete_slot(user_dir, game, slot_id, active=None, now=None, backup=True):
+    """Deletes a slot; never the one in place, being swapped in, or `active`. First the slot goes into
+    a ZIP backup (kind 'before-delete'; restoring it brings the slot back); returns that backup."""
     with _lock(user_dir):
         state = _ensure(user_dir, game, now)
         if slot_id in (state['in_place'], state['pending'], active):
@@ -510,4 +533,7 @@ def delete_slot(user_dir, game, slot_id, active=None, now=None):
         slot = _slot_dir(user_dir, game, slot_id)
         if not (slot / 'slot.json').is_file():
             raise SlotError('this save slot no longer exists', 'missing')
+        made = saves.create_backup(user_dir, game, kind='before-delete', now=now,
+                                   only=[f'save_slots/{game}/{slot_id}']) if backup else None
         shutil.rmtree(slot)
+        return made
