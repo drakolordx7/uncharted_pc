@@ -368,6 +368,7 @@ static volatile uint64_t look_blend_until_us; /* the look-around camera (V) is b
 static volatile int look_held;            /* R3 is held: first-person look around, which turns like the aim */
 static float follow_target;               /* wanted heading (degrees) */
 static uint64_t follow_moved_us;          /* last frame the mouse moved */
+static float follow_prev_total;           /* degrees the previous frame turned the direction by (0 after a gap, a pause or the joypad route) */
 static volatile float follow_correction;  /* degrees the direction is short of the wanted heading */
 static volatile float follow_push;        /* the right stick while the direction turns (-0.3, 0, 0.3) */
 static volatile int follow_has_arc;       /* the follow camera's vertical arc is known */
@@ -387,6 +388,15 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
     camera_hook_us=now;
     float *dir=(float *)(uintptr_t)(camera+dir_offset);
     const float heading=heading_of(dir);
+    {   /* BB_U1_WALKPROBE=<file>: the camera object's first 0x1330 bytes at every call (time, address, bytes), to find the fields that beat when the camera trembles in depth */
+        static FILE *probe_f; static int probe_init; static unsigned probe_n;
+        if (!probe_init) { probe_init=1; const char *p=getenv("BB_U1_WALKPROBE"); if (p && *p) probe_f=fopen(p,"wb"); }
+        if (probe_f && probe_n<12000) {
+            const double pt=now*1e-6; const uint64_t pc=camera;
+            fwrite(&pt,8,1,probe_f); fwrite(&pc,8,1,probe_f); fwrite((const void *)(uintptr_t)camera,1,0x1330,probe_f);
+            if ((++probe_n&63)==0) fflush(probe_f);
+        }
+    }
     /* The walking camera was away for a few frames (grab, vault, ledge drop, knock-out: the animation camera holds the
      * picture alone). The game's own camera turned meanwhile; the wanted heading it left behind would then be made up at
      * 4 degrees a frame, which swung the picture just after every animation. After such a gap nothing is made up: the
@@ -410,7 +420,7 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
     if (resync_gap_us && gap_us>resync_gap_us) {
         float ignore_x, ignore_y;
         camera_take(0,&ignore_x,&ignore_y);
-        follow_moved_us=0; follow_pending=0; follow_push=0.0f; follow_correction=0.0f; follow_target=heading;
+        follow_moved_us=0; follow_pending=0; follow_push=0.0f; follow_correction=0.0f; follow_target=heading; follow_prev_total=0.0f;
         if (mouse_debug()) printf("Mouse: follow resync after a %.0f ms gap (heading %.2f) t=%.4f\n",gap_us*1e-3,(double)heading,now*1e-6);
     }
     follow_call_us=now;
@@ -428,9 +438,9 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
         follow_direct=1; follow_kept=0.5f;   /* the turns of the direct mode with the push are the ones the game keeps (in the joypad mode it pulled the direction back at once) */
         dx=0.0f; dy=0.0f;
     }
-    if (aim_native || look_held) { follow_moved_us=0; follow_pending=0; follow_push=0.0f; return; } /* the aiming / look camera takes the mouse */
+    if (aim_native || look_held) { follow_moved_us=0; follow_pending=0; follow_push=0.0f; follow_prev_total=0.0f; return; } /* the aiming / look camera takes the mouse */
     if (stopped) { /* paused (or a frame time out of range): the mouse is taken but not applied, the camera goes on as the game wants */
-        follow_moved_us=0; follow_pending=0; follow_push=0.0f; follow_correction=0.0f;
+        follow_moved_us=0; follow_pending=0; follow_push=0.0f; follow_correction=0.0f; follow_prev_total=0.0f;
         if (mouse_debug()) { static unsigned n; if ((n++&31)==0) printf("Mouse: u2 follow camera %#llx stopped (dt out of range) t=%.4f\n",(unsigned long long)camera,now*1e-6); }
         return;
     }
@@ -462,7 +472,17 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
         correction=0.0f;
     }
     /* Mouse still: a shortfall under 0.3 degree is left alone (making it up flipped the push and the turn every frame for 0.15 s after a stop: a slight tremble) */
-    if (turn==0.0f && correction>-0.3f && correction<0.3f) correction=0.0f;    if (correction>90.0f || correction<-90.0f) { /* at most a quarter turn behind */
+    if (turn==0.0f && correction>-0.3f && correction<0.3f) correction=0.0f;
+    /* Only what the game undid of our own last turn is made up: it cannot be more than that turn. Against a wall the game turns the direction away by
+     * itself (3 to 6 degrees a frame); a small mouse move kept the rest of the 0.5 s chase going against it and the picture trembled. That turn is accepted. */
+    {
+        const float cap=SDL_fabsf(follow_prev_total)+0.1f;
+        if (follow_direct && (correction>cap || correction<-cap)) {
+            correction=correction>0.0f ? cap : -cap;
+            follow_target=wrap_degrees(heading-correction);
+        }
+    }
+    if (correction>90.0f || correction<-90.0f) { /* at most a quarter turn behind */
         correction=correction>0.0f ? 90.0f : -90.0f;
         follow_target=wrap_degrees(heading-correction);
     }
@@ -493,11 +513,12 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
     if (correction<-catch_up) correction=-catch_up;
     if (correction>catch_up) correction=catch_up;
     const float total=turn+correction;
+    follow_prev_total=total;
     follow_applied=total;
     follow_push=total>0.05f ? 0.3f : total<-0.05f ? -0.3f : 0.0f;
-    if (mouse_debug()) printf("Mouse: follow t=%.4f dx=%.1f heading=%.2f shown=%.2f target=%.2f turn=%.2f corr=%.2f%s total=%.2f\n",
+    if (mouse_debug()) printf("Mouse: follow t=%.4f dx=%.1f heading=%.2f shown=%.2f target=%.2f turn=%.2f corr=%.2f%s total=%.2f cam=%llx\n",
                               now*1e-6,dx,heading,shown,follow_target,turn,correction,
-                              (correction>8.0f || correction<-8.0f) ? " CATCHUP" : "",total);
+                              (correction>8.0f || correction<-8.0f) ? " CATCHUP" : "",total,(unsigned long long)camera);
     if (total!=0.0f) {
         const float a=total*0.017453293f, c=SDL_cosf(a), s=SDL_sinf(a);
         const float x=dir[0], z=dir[2];
@@ -553,7 +574,47 @@ static void u1b_free_view_spring(uint64_t camera, uint64_t image) {
     static uint64_t shape; static float original; static int raised;
     static float speed=-1.0f;
     if (speed<0.0f) { const char *e=getenv("BB_FREE_SPRING"); speed=e && atof(e)>0.0 ? (float)atof(e) : U1B_FREE_SPRING_SPEED; }
-    u1b_free_view_constants(image,!input.free_view_smoothing && input.mouse_look && !pad_only_mode,speed);
+    /* The quick spring only while the mouse is in use (and 0.6 s after): kept all the time it passed every swing of the game's camera near a wall
+     * to the picture (a tremble when walking towards the camera against a wall); the game's own spring damps it. */
+    const uint64_t spring_now=now_us();
+    const int mouse_recent=follow_moved_us && spring_now>=follow_moved_us && spring_now-follow_moved_us<600000;
+    static int parts=-1;   /* BB_SPRING_PARTS (test): 1 = the two global constants, 2 = the camera shape's speed; default 3 = both */
+    if (parts<0) { const char *e=getenv("BB_SPRING_PARTS"); parts=e ? atoi(e) : 0; }
+    /* Lag-free turning while the mouse is in use. Raising the spring's speed made the camera beat by +-0.4 m to and from the player against a wall
+     * (measured with BB_U1_WALKPROBE); putting the whole state on the target removed the smoothing of the wall's pushes too. BB_SPRING_RIGID=0 turns it off. */
+    {
+        static int rigid=-1;
+        if (rigid<0) { const char *e=getenv("BB_SPRING_RIGID"); rigid=!(e && atoi(e)==0); }
+        /* only while the mouse moves (0.15 s after): longer, the player's small moves against a wall showed unsmoothed after the mouse had stopped */
+        const int mouse_moving=follow_moved_us && spring_now>=follow_moved_us && spring_now-follow_moved_us<150000;
+        if (rigid && !input.free_view_smoothing && input.mouse_look && !pad_only_mode && mouse_moving) {
+            /* What the data say (BB_U1_WALKPROBE + BB_CAMERA_LOG): +0x1230 is the camera's wanted position, which turns about the player's point
+             * (+0x12f0) at a fixed radius (3.65 m) when the mouse turns it and is pushed towards the player by a wall; +0x1250 is the position
+             * the game's spring shows, +0x1240 its velocity. The spring's lag behind a turn is what made the mouse feel smoothed; its lag in the
+             * radius is what absorbs the wall pushing the camera in and out. So only the angle is made up: the state is turned about the player's
+             * point (and its velocity with it) to the wanted position's angle; radius and height are left to the game's spring. */
+            float t[3], s[3], v[3], p[3];
+            if (safe_read(t,camera+0x1230,12) && safe_read(s,camera+0x1250,12) && safe_read(v,camera+0x1240,12) && safe_read(p,camera+0x12f0,12)) {
+                int ok=1;
+                for (int i=0;i<3;++i) ok&=(t[i]>-5000.0f && t[i]<5000.0f && s[i]>-5000.0f && s[i]<5000.0f && p[i]>-5000.0f && p[i]<5000.0f && v[i]>-500.0f && v[i]<500.0f);
+                const float tx=t[0]-p[0], tz=t[2]-p[2], sx=s[0]-p[0], sz=s[2]-p[2];
+                const float tr2=tx*tx+tz*tz, sr2=sx*sx+sz*sz;
+                if (ok && tr2>0.09f && tr2<400.0f && sr2>0.09f && sr2<400.0f) {   /* beyond ~20 m or under 0.3 m it is a cut: left alone */
+                    float da=SDL_atan2f(tz,tx)-SDL_atan2f(sz,sx);
+                    da=da>3.14159265f ? da-6.2831853f : da<-3.14159265f ? da+6.2831853f : da;
+                    if (da>-1.5f && da<1.5f) {
+                        const float c=SDL_cosf(da), sn=SDL_sinf(da);
+                        const float ns[3]={p[0]+sx*c-sz*sn, s[1], p[2]+sx*sn+sz*c};
+                        const float nv[3]={v[0]*c-v[2]*sn, v[1], v[0]*sn+v[2]*c};
+                        safe_write(camera+0x1250,ns,12);
+                        safe_write(camera+0x1240,nv,12);
+                        if (mouse_debug()) { static unsigned n; if ((n++&63)==0) printf("Mouse: u1 spring turned %.2f deg (radius state %.2f wanted %.2f)\n",da*57.29578f,SDL_sqrtf(sr2),SDL_sqrtf(tr2)); }
+                    }
+                }
+            }
+        }
+    }
+    u1b_free_view_constants(image,!input.free_view_smoothing && input.mouse_look && !pad_only_mode && mouse_recent && (parts&1),speed);
     uint64_t now_shape=0;
     if (!safe_read(&now_shape,camera+0x1e0,8) || now_shape<0x10000) return;
     if (now_shape!=shape) {   /* another camera object or shape: the old one gets its value back */
@@ -562,7 +623,7 @@ static void u1b_free_view_spring(uint64_t camera, uint64_t image) {
     }
     float current=0.0f;
     if (!safe_read(&current,shape+0x74,4)) return;
-    const int want=!input.free_view_smoothing && input.mouse_look && !pad_only_mode;
+    const int want=!input.free_view_smoothing && input.mouse_look && !pad_only_mode && mouse_recent && (parts&2);
     if (want && !raised && current>0.0f && current<speed) {
         original=current;
         if (safe_write(shape+0x74,&speed,4)) raised=1;

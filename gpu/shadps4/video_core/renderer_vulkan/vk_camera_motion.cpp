@@ -309,9 +309,10 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
     }
     static const bool camera_log = std::getenv("BB_CAMERA_LOG") != nullptr;
     if (camera_log) {
-        std::printf("Camera: t=%.4f yaw=%.3f pitch=%.3f\n", t,
+        std::printf("Camera: t=%.4f yaw=%.3f pitch=%.3f eye=%.4f %.4f %.4f uv=%.5f %.5f\n", t,
                     std::atan2(fx, fz) * 57.29578f,
-                    std::asin(std::clamp(fy / std::sqrt(fx * fx + fy * fy + fz * fz), -1.0f, 1.0f)) * 57.29578f);
+                    std::asin(std::clamp(fy / std::sqrt(fx * fx + fy * fy + fz * fz), -1.0f, 1.0f)) * 57.29578f,
+                    c[15], c[19], c[23], c[0], c[1]);
     }
     // The extra motion of stencil-marked pixels is not reproduced: say when it is used.
     static bool reported = false;
@@ -382,6 +383,14 @@ void CameraMotion::OnConstants(const float* data) {
     // runs every frame, also during the scripted animations (the velocity pass does not run there,
     // which is why bbgpu_camera_yaw used to freeze).
     publish_shown_camera(-current.view[8], -current.view[10]);
+    static const bool shown_log = std::getenv("BB_CAMERA_LOG") != nullptr;
+    if (shown_log) { // the rendered camera every frame: view (12), inverse view (12) and the projection scale, to see what really shakes
+        const double lt = std::chrono::duration<double>(
+                              std::chrono::steady_clock::now().time_since_epoch()).count();
+        std::printf("CamShown: t=%.4f f=%.4f %.4f inv=", lt, current.proj[0], current.proj[1]);
+        for (int i = 0; i < 12; ++i) std::printf("%.4f ", current.inv_view[i]);
+        std::printf("\n");
+    }
     const std::array<u32, 2> size{u32(data[4]), u32(data[5])};
     if (size != render_size) {
         std::printf("Camera motion: scene render size %ux%u\n", size[0], size[1]);
