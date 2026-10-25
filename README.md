@@ -23,7 +23,7 @@ Settings, saves and logs are stored in `user\`. To update, use the launcher's up
 
 Controls are remapped on the Controls page. For prompts that ask you to rotate the left stick, hold R (or T for the other direction); the prompt on screen shows that key. Fixes that cost performance are on the Fixes page; Automatic enables each one only where it's needed.
 
-Save editor (close the game first; every edit backs up the old files to a `CUSA02320.backups` folder next to the saves in `user\savedata\`): `python scripts/save_editor.py describe user` shows each game's progress, difficulty, treasures and unlocks; `unlock-chapters`, `unlock-difficulties` (Crushing and Brutal), `unlock-rewards` (Uncharted 1) and `unlock-all` change the saves, with `--game u1|u2|u3` and `--dry-run`.
+Saves are backed up on the Saves page, and automatically before each launch (the last 10 are kept). Its Edit button unlocks all chapters, Crushing and Brutal, and Uncharted 1's rewards; close the game first. Every edit makes a backup first.
 
 ## Reporting problems
 
