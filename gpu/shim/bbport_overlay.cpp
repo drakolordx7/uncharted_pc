@@ -69,7 +69,25 @@ struct ToggleKey {
 };
 ToggleKey toggle_keys[2] = {{BBGPU_OVERLAY_KEY_SCANCODE, SDL_SCANCODE_INSERT}, {}};
 
-bool IsToggleKey(const SDL_KeyboardEvent& key) {
+// Whether the key types a character (letters, digits, punctuation, Space, number pad). Bound as the
+// menu key, it is the menu key only while nothing is being typed.
+bool TypesCharacter(const SDL_KeyboardEvent& key) {
+    const SDL_Keycode code = key.key;
+    if (code >= SDLK_SPACE && code <= 0x10FFFF && code != SDLK_DELETE) {
+        return true;
+    }
+    return (key.scancode >= SDL_SCANCODE_KP_DIVIDE && key.scancode <= SDL_SCANCODE_KP_PLUS) ||
+           (key.scancode >= SDL_SCANCODE_KP_1 && key.scancode <= SDL_SCANCODE_KP_PERIOD) ||
+           key.scancode == SDL_SCANCODE_KP_EQUALS;
+}
+
+// `typing`: an ImGui text field wants the keyboard (io.WantTextInput) or the game's text dialog is
+// open (text_entry_active). A character key bound as the menu key then types instead of toggling;
+// the other keys (Insert, F-keys, ...) still do.
+bool IsToggleKey(const SDL_KeyboardEvent& key, bool typing) {
+    if (typing && TypesCharacter(key)) {
+        return false;
+    }
     for (const ToggleKey& t : toggle_keys) {
         if ((t.kind == BBGPU_OVERLAY_KEY_SCANCODE && static_cast<int>(key.scancode) == t.code) ||
             (t.kind == BBGPU_OVERLAY_KEY_KEYCODE && static_cast<int>(key.key) == t.code)) {
@@ -854,7 +872,7 @@ bool HandleEvent(const SDL_Event& event) {
     case SDL_EVENT_KEY_UP: {
         const bool down = event.type == SDL_EVENT_KEY_DOWN;
         if (down && !event.key.repeat) {
-            if (IsToggleKey(event.key)) {
+            if (IsToggleKey(event.key, io.WantTextInput || text_entry_active)) {
                 SetOpen(!is_open);
                 return true;
             }
