@@ -478,12 +478,16 @@ private:
     tsl::robin_map<VAddr, MetaDataInfo> surface_metas;
     /// bbport: most layers seen for a depth array at an address, and the most memory a depth
     /// image requested there covered (PadDepthLayers).
+    /// layer_bytes: the largest layer of a request with that many layers.
     struct DepthArraySeen {
         u32 layers{};
         u64 bytes{};
+        u64 layer_bytes{};
     };
     tsl::robin_map<VAddr, DepthArraySeen> depth_array_layers;
-    void PadDepthLayers(ImageInfo& info);
+    /// requested: what the game asked for when `info` is merged with a cached image (recorded
+    /// instead of `info`); null: `info` is the request.
+    void PadDepthLayers(ImageInfo& info, const ImageInfo* requested = nullptr);
 };
 
 } // namespace VideoCore

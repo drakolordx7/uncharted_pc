@@ -224,30 +224,50 @@ void TextureCache::UnmapMemory(VAddr cpu_addr, size_t size) {
 /// that frame (ten times in a frame): the layers drawn before were lost, so those lights lost their
 /// shadow maps (the flashlight's light vanished for a frame, then came back in blocky tiles).
 /// A depth image made at an address that has held a deeper array gets all those layers at once; the
-/// game draws each layer again every frame. BB_DEPTH_ARRAY_PAD=0: off.
+/// game draws each layer again every frame.
 /// (Mevlock 670bf18.)
 /// bbport: the padded image stays within the memory the depth images at that address have
 /// covered. Padded by layer count alone, a 4096x4096 depth target at the address of U3's shadow
 /// array in the London pub became 8 layers, 512 MiB over memory the game's CPU code writes every
 /// frame: each frame's write made the texture cache hash all of it again (~10 GB a second, the
-/// draw recording thread busy at 20 FPS).
-void TextureCache::PadDepthLayers(ImageInfo& info) {
-    static const bool pad = [] {
+/// draw recording thread busy at 20 FPS). The memory seen only covers what was requested, though:
+/// the first 1280 request after the array ran at 1024 (16 layers of 1024: 64 MiB seen, 16 of
+/// 1280: 100 MiB) would not be padded and the flashlight dropout above came back for that frame.
+/// So a layer up to twice the size of a layer of the deepest array seen there is padded too
+/// (1280 over 1024: 1.56x); the London target (16x) is not. What is recorded is what the game
+/// requested (`requested`), never a padded or merged size, so the cap does not lift itself.
+/// BB_DEPTH_ARRAY_PAD: 0 = no padding, 2 = padding by layer count alone (uncapped, as before
+/// the cap), unset or anything else = capped as above.
+void TextureCache::PadDepthLayers(ImageInfo& info, const ImageInfo* requested) {
+    static const int mode = [] {
         const char* env = std::getenv("BB_DEPTH_ARRAY_PAD");
-        return !(env && env[0] == '0');
+        if (env && env[0] == '0') {
+            return 0;
+        }
+        return env && env[0] == '2' ? 2 : 1;
     }();
-    if (!pad || !info.props.is_depth) {
+    if (mode == 0 || !info.props.is_depth) {
         return;
     }
+    const ImageInfo& asked = requested ? *requested : info;
+    const u32 asked_layers = std::max(asked.resources.layers, 1u);
+    const u64 asked_bytes = asked.guest_size;
+    const u64 asked_layer_bytes = asked_bytes / asked_layers;
     auto& seen = depth_array_layers[info.guest_address];
-    seen.bytes = std::max<u64>(seen.bytes, info.guest_size);
-    if (info.resources.layers > seen.layers) {
-        seen.layers = info.resources.layers;
-    } else if (seen.layers > info.resources.layers && seen.layers > 1) {
+    seen.bytes = std::max<u64>(seen.bytes, asked_bytes);
+    if (asked_layers > seen.layers) {
+        seen.layers = asked_layers;
+        seen.layer_bytes = asked_layer_bytes;
+    } else if (asked_layers == seen.layers) {
+        seen.layer_bytes = std::max(seen.layer_bytes, asked_layer_bytes);
+    }
+    if (seen.layers > info.resources.layers && seen.layers > 1) {
         auto padded = info;
         padded.resources.layers = seen.layers;
         padded.UpdateSize();
-        if (padded.guest_size <= seen.bytes) {
+        const u64 layer_bytes = info.guest_size / std::max(info.resources.layers, 1u);
+        if (mode == 2 || padded.guest_size <= seen.bytes ||
+            layer_bytes <= 2 * seen.layer_bytes) {
             info = padded;
         }
     }
@@ -302,7 +322,7 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         auto new_info = requested_info;
         new_info.resources = std::max(requested_info.resources, cache_image.info.resources);
         new_info.UpdateSize();
-        PadDepthLayers(new_info);
+        PadDepthLayers(new_info, &requested_info);
         // bbport: the copy below overwrites all of an image of the same size and resources, so it
         // may take the Vulkan image of one freed here before (UniqueImage::Recycle).
         std::optional<UniqueImage::ReuseScope> reuse;
