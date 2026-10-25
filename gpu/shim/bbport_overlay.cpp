@@ -195,7 +195,12 @@ void Menu() {
             ImGui::EndDisabled();
             if (!supported) {
                 ImGui::SameLine();
-                ImGui::TextDisabled("— not supported by this GPU");
+                // FSR 4 on a capable GPU without its assets (fsr4_shaders, BB_FSR4_DIR).
+                const char* fsr4_problem = s.fsr4_problem.load();
+                const bool no_assets = i == BbSettings::UpscalerFsr4 && fsr4_problem &&
+                                       std::strncmp(fsr4_problem, "assets", 6) == 0;
+                ImGui::TextDisabled("%s", no_assets ? "— files not installed"
+                                                    : "— not supported by this GPU");
             }
         }
         ImGui::EndCombo();
@@ -206,7 +211,8 @@ void Menu() {
     if (const char* problem = s.xess_problem.load(); problem && upscaler == BbSettings::UpscalerXess) {
         ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "XeSS: %s", problem);
     }
-    if (const char* problem = s.fsr4_problem.load()) {
+    // Missing FSR 4 assets are shown next to the disabled entry above, not as a warning here.
+    if (const char* problem = s.fsr4_problem.load(); problem && std::strncmp(problem, "assets", 6) != 0) {
         ImGui::PushTextWrapPos();
         ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "FSR 4 unavailable: %s", problem);
         if (!BbSettings::IsFsr4(s.upscaler))

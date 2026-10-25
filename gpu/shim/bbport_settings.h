@@ -115,7 +115,9 @@ Values& Get();
 /// Reads the file, then the environment overrides. Called once at start.
 void Load();
 /// Checks the loaded choice before the first frame; unsupported FSR 4 uses FSR 3.1.
-void ConfigureUpscalerSupport(bool fsr4, bool fsr411);
+/// fsr4_assets: the FSR 4 v07 assets are installed; without them FSR 4 is not
+/// offered (it would only fall back to FSR 3.1 mid-game).
+void ConfigureUpscalerSupport(bool fsr4, bool fsr411, bool fsr4_assets = true);
 /// After device creation: DLSS availability; a DLSS setting falls back to FSR 3.1 without it.
 void ConfigureDlssSupport(bool available, const char* problem);
 /// Same for Intel XeSS (libxess.dll).
