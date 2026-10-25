@@ -64,6 +64,7 @@ Fixes and features in this build, by contributor. Pull request links go to the o
 - [EdouardSence](https://github.com/EdouardSence) ([fork](https://github.com/EdouardSence/uncharted_pc)): large command data no longer stops the game, GPU copies mark textures dirty, overlay cleanup, Linux window icon
 - [soni424](https://github.com/soni424) ([fork](https://github.com/soni424/uncharted_pc)): dark launcher title bar, null shader binding guard
 - [eduardoghi](https://github.com/eduardoghi): numpad bindings ([#473](https://github.com/Supermedo/uncharted_pc/pull/473)), zip that extracts on Linux ([#404](https://github.com/Supermedo/uncharted_pc/pull/404))
+- [Canneli](https://github.com/canneli): design of the save backups (ZIP with a description file, checked paths, a backup before every restore), from their launcher
 - [parsifal295](https://github.com/parsifal295) and [devilismyfriend](https://github.com/devilismyfriend): texture collector frees textures again (video memory growth)
 - Pedro Delfino: more texture eviction under critical memory pressure
 - Rick: prepare.py on CP950 Windows systems
