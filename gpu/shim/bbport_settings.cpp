@@ -66,6 +66,12 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.fsr4_auto_exposure = i != 0;
     } else if (key == "fsr4_invert_jitter") {
         v.fsr4_invert_jitter = i != 0;
+    } else if (key == "display_mode") {
+        for (int m = 0; m < DisplayModeCount; ++m) {
+            if (value == DisplayModeName(m)) {
+                v.display_mode = m;
+            }
+        }
     } else if (key == "model_lod") {
         v.model_lod = std::clamp(i, -2, 2);
     } else if (key == "live_resolution") {
@@ -128,6 +134,17 @@ void Load() {
     for (const auto& [env, key] : env_keys) {
         if (const char* value = std::getenv(env)) {
             Set(v, key, value);
+        }
+    }
+    // The launcher's Fullscreen switch decides at start (BB_FULLSCREEN, always set by the launchers):
+    // 1 opens fullscreen (exclusive when the in-game menu last chose it, otherwise borderless),
+    // 0 opens windowed. Without the variable the in-game menu's last choice (bbport.ini) is used.
+    // The in-game menu then switches live for the session.
+    if (const char* fullscreen = std::getenv("BB_FULLSCREEN"); fullscreen && fullscreen[0]) {
+        if (fullscreen[0] == '1') {
+            if (v.display_mode != DisplayExclusive) v.display_mode = DisplayBorderless;
+        } else {
+            v.display_mode = DisplayWindowed;
         }
     }
     v.startup_preset = v.preset;
@@ -222,13 +239,15 @@ void Save() {
                  "# bbport settings (in-game menu: Insert / L3+R3)\n"
                  "upscaler=%s\npreset=%d\nsharpen=%d\nsharpness=%.2f\njitter=%d\n"
                  "reactive=%d\nobject_motion=%d\nreactive_scale=%.2f\nreactive_threshold=%.2f\nreactive_max=%.2f\n"
-                 "debug_view=%d\nshow_fps=%d\ngyro_aim=%d\nfsr4_auto_exposure=%d\nfsr4_invert_jitter=%d\n",
+                 "debug_view=%d\nshow_fps=%d\ngyro_aim=%d\nfsr4_auto_exposure=%d\nfsr4_invert_jitter=%d\n"
+                 "display_mode=%s\n",
                  UpscalerName(v.upscaler), v.preset.load(), int(v.sharpen.load()),
                  v.sharpness.load(), int(v.jitter.load()), int(v.reactive.load()),
                  int(v.object_motion.load()),
                  v.reactive_scale.load(), v.reactive_threshold.load(), v.reactive_max.load(),
                  v.debug_view.load(), int(v.show_fps.load()), int(v.gyro_aim.load()),
-                 int(v.fsr4_auto_exposure.load()), int(v.fsr4_invert_jitter.load()));
+                 int(v.fsr4_auto_exposure.load()), int(v.fsr4_invert_jitter.load()),
+                 DisplayModeName(v.display_mode));
     // Read by patches.py at start.
     for (int e = 0; e < EffectCount; ++e) {
         std::fprintf(file, "%s=%d\n", Effects[e].key, int(v.effects[e].load()));
@@ -270,6 +289,11 @@ bool FsrDriverValidated(unsigned driver_id) {
         if (id != 0 && id == driver_id) return true;
     }
     return false;
+}
+
+const char* DisplayModeName(int mode) {
+    static constexpr const char* names[DisplayModeCount] = {"windowed", "borderless", "exclusive"};
+    return names[std::clamp(mode, 0, DisplayModeCount - 1)];
 }
 
 } // namespace BbSettings

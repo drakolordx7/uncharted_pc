@@ -19,6 +19,10 @@ enum Preset : int { NativeAA = 0, Quality, Balanced, Performance, UltraPerforman
 /// Frame generation (vk_frame_generation.h): frames generated between two of the game's.
 enum FrameGen : int { FrameGenOff = 0, FrameGenFsr3 = 1, FrameGenDlss = 2, FrameGenCount };
 enum DebugView : int { DebugNone = 0, DebugReactive = 1, DebugMotion = 2, DebugViewCount };
+/// Window mode of the SDL window (window.cpp): the in-game menu switches it live and keeps it in
+/// bbport.ini; the launchers' BB_FULLSCREEN (1/0) picks fullscreen or windowed at start (Load()).
+enum DisplayMode : int { DisplayWindowed = 0, DisplayBorderless = 1, DisplayExclusive = 2,
+                         DisplayModeCount };
 
 /// Game effects switched by the community patches at start (patches.py EFFECTS): ini key,
 /// menu label, default (the game's own behaviour).
@@ -73,6 +77,7 @@ struct Values {
     /// (also Steam's gyro as a mouse) turns the aiming and cover cameras directly, 1:1. Off: the mouse is a
     /// right stick value there (the game's stick curve and top speed).
     std::atomic<bool> gyro_aim{true};
+    std::atomic<int> display_mode{DisplayWindowed}; ///< window.cpp reads it when the window opens
     // FSR 4 checks (menu): the provider's auto exposure, the jitter sign it is given.
     std::atomic<bool> fsr4_auto_exposure{true};
     std::atomic<bool> fsr4_invert_jitter{false};
@@ -134,6 +139,7 @@ float PresetScale(int preset);
 const char* PresetName(int preset);
 const char* UpscalerName(int upscaler);
 const char* FrameGenName(int frame_gen);
+const char* DisplayModeName(int mode);
 
 /// Whether FSR 3.1 has been seen rendering correctly on this driver (a VkDriverId value).
 /// Nothing is on the list yet, so every driver gets the warning: on RADV PHOENIX (Mesa

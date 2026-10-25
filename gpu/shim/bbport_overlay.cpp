@@ -22,6 +22,9 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
+// window.cpp: a display mode change is applied on the thread that owns the SDL window.
+extern "C" void bbgpu_display_mode_request(int mode);
+
 // DejaVu Sans (Cyrillic), embedded (third_party/fonts, Bitstream Vera license).
 #ifdef _WIN32
 asm(".section .rdata,\"dr\"\n"
@@ -165,10 +168,19 @@ void Hint(const char* text) {
 void Menu() {
     auto& s = BbSettings::Get();
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    // The menu fits whatever window the game has: 620 px wide when there is room, never wider or
+    // taller than the game window (the long option list scrolls inside instead of running off the
+    // screen) and it can still be resized by hand within those limits.
+    const float edge = 20.0f * base_scale;
+    const float max_w = std::max(viewport->WorkSize.x - edge * 2.0f, 320.0f * base_scale);
+    const float max_h = std::max(viewport->WorkSize.y - edge * 2.0f, 200.0f * base_scale);
     ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + 40.0f * base_scale,
                                    viewport->WorkPos.y + 40.0f * base_scale),
                             ImGuiCond_Appearing);
-    ImGui::SetNextWindowSize(ImVec2(620.0f * base_scale, 0.0f), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(ImVec2(std::min(620.0f * base_scale, max_w), 0.0f), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(std::min(300.0f * base_scale, max_w),
+                                               std::min(160.0f * base_scale, max_h)),
+                                        ImVec2(max_w, max_h));
     bool keep_open = true;
     if (!ImGui::Begin("Uncharted — settings  (Insert / L3+R3)", &keep_open,
                       ImGuiWindowFlags_NoCollapse)) {
@@ -177,6 +189,25 @@ void Menu() {
     }
     ImGui::Text("%.0f FPS  (%.1f ms)", frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f,
                 frame_ms_avg);
+
+    ImGui::SeparatorText("Window");
+    static const char* display_modes[] = {"Windowed", "Borderless (fullscreen)",
+                                         "Exclusive fullscreen"};
+    const int display_mode = s.display_mode;
+    if (ImGui::BeginCombo("Display mode", display_modes[display_mode])) {
+        for (int i = 0; i < BbSettings::DisplayModeCount; ++i) {
+            if (ImGui::Selectable(display_modes[i], i == display_mode)) {
+                Store(s.display_mode, i, true);
+                bbgpu_display_mode_request(i); // the window thread applies it
+            }
+        }
+        ImGui::EndCombo();
+    }
+    Hint("Windowed keeps the game in its own window. Borderless fills the screen with the desktop's "
+         "own mode. Exclusive fullscreen asks the display for a mode of its own at the panel's "
+         "native size and minimizes when another window takes the focus; some Wayland "
+         "compositors refuse and stay borderless. The launcher's Fullscreen switch picks the "
+         "mode at start (on: this choice if it is a fullscreen one, else borderless; off: windowed).");
 
     ImGui::SeparatorText("Temporal upscaler");
     static const char* upscalers[] = {"Off", "FSR 3.1", "FSR 4 (INT8)", "FSR 4.1.1 (INT8)",
