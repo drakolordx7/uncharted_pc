@@ -678,6 +678,16 @@ bool BufferCache::SmallWriterLearned(u64 writer) const {
     return it != small_writers.by_writer.end() && it->second.learned;
 }
 
+bool BufferCache::CanDeferGuestCopy(VAddr src, VAddr dst, u64 size) const {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_SCALAR_COPY64_DEFER");
+        return env && env[0] == '1';
+    }();
+    return enabled && side_queue && !land_stopping.load(std::memory_order_acquire) && size != 0 &&
+           size <= SideQueue::StagingSize / 2 && memory->IsValidGpuMapping(src, size) &&
+           memory->IsValidGpuMapping(dst, size);
+}
+
 bool BufferCache::DeferGuestCopy(VAddr src, VAddr dst, u64 size, bool guest_part, bool gated,
                                  u64 writer) {
     static const bool enabled = [] {

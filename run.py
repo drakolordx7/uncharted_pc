@@ -299,6 +299,10 @@ def main():
             copy_on = exe in (EXECUTABLES['u1'], EXECUTABLES['u2'])
             env['BB_SCALAR_COPY64_SYNC'] = '2' if copy_on else '0'
             env['BB_SCALAR_COPY64_DEFER'] = '1' if copy_on else '0'
+        # Chained end-of-shader labels (toggle2 4) and met display-label waits without a drain
+        # (toggle2 8) were measured in U2 only: off for U1 and U3 until they are.
+        if exe in (EXECUTABLES['u1'], EXECUTABLES['u3']):
+            env.setdefault('BB_TOGGLE2', '12')
         game, file = locate(env, exe)
         if not game:
             fail('Set BB_GAME_DIR to the game folder (the one with eboot.bin).')

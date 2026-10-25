@@ -2252,7 +2252,8 @@ std::optional<Rasterizer::StageBCopy> Rasterizer::GuestCopyOnStageB(const Shader
     // A source with GPU-written bytes stays so when the copy runs (writes queued meanwhile
     // only add to them); one that only a queued write overlaps is copied in guest memory.
     if (!buffer_cache.IsRangeGpuWritten(copy->src, copy->size) ||
-        !RaycasterCopyLeavesGuestMemory(copy->size)) {
+        !RaycasterCopyLeavesGuestMemory(copy->size) ||
+        !buffer_cache.CanDeferGuestCopy(copy->src, copy->dst, copy->size)) {
         return std::nullopt;
     }
     return StageBCopy{copy->dst, copy->size};

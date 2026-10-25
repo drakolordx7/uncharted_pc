@@ -126,6 +126,9 @@ public:
     /// writer (guest_part false, nonzero): the compute shader that wrote the result. Its landings
     /// then check whether the guest rewrote the bytes between landings, and a shader whose results
     /// the guest keeps rewriting is learned (SmallWriterLearned).
+    /// bbport: whether DeferGuestCopy can take a raycaster copy of this range (its checks that don't
+    /// depend on the arena), so callers that rely on the deferral can fall back in time.
+    [[nodiscard]] bool CanDeferGuestCopy(VAddr src, VAddr dst, u64 size) const;
     bool DeferGuestCopy(VAddr src, VAddr dst, u64 size, bool guest_part = true, bool gated = true,
                         u64 writer = 0);
     /// bbport: whether the guest was seen rewriting the small results of compute shader `writer`
