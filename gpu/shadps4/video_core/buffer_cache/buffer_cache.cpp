@@ -323,6 +323,175 @@ bool BufferCache::DownloadOnSideQueue(VAddr page, u64 length) {
     return true;
 }
 
+bool BufferCache::ReadBackOnFaultThread(VAddr device_addr, u64 size) {
+    // bbport: with accurate GPU memory (U2) a guest write to a page holding GPU data waited for
+    // the GPU command thread to take its read back: the command waited until that thread came
+    // round (it may sleep on a display buffer label for a vblank), drained the draw pipe, waited
+    // for the GPU there and blocked it meanwhile (~150 faults a second in U2's Borneo jungle,
+    // ~20% of that thread; the exact read back cost ~16% of the frame rate). When the writes on
+    // the faulting pages are submitted, the faulting thread waits for them and reads back on the
+    // second queue itself. Page states change under their region's lock, the one the recording
+    // thread marks GPU writes under, and only if no write was marked since the read back began
+    // (a later write has a later tick); else the GPU command thread's path settles the fault.
+    // BB_FAULT_HERE=0 or toggle2 FaultReadbackHere: always the GPU command thread's path.
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_FAULT_HERE");
+        return !(env && env[0] == '0');
+    }();
+    if (!enabled || !side_queue || BbToggle::Disabled2(BbToggle::FaultReadbackHere) ||
+        shadow_pages.load(std::memory_order_relaxed) != 0) {
+        return false;
+    }
+    const auto start_time = std::chrono::steady_clock::now();
+    const VAddr page = Common::AlignDown(device_addr, TRACKER_BYTES_PER_PAGE);
+    const u64 length = Common::AlignUp(device_addr + size, TRACKER_BYTES_PER_PAGE) - page;
+    // The arena of GPU data exists already; one is never created from here.
+    const u64 arena_page = (page >> block_shift) >> blocks_per_arena_page_shift;
+    if (arena_page != (((page + length - 1) >> block_shift) >> blocks_per_arena_page_shift)) {
+        return false;
+    }
+    const Buffer* arena = address_space[arena_page];
+    if (!arena || page < arena->cpu_addr || page + length > arena->cpu_addr + arena->size_bytes) {
+        return false;
+    }
+    // As DownloadOnSideQueue: the completed GPU data of the pages around the fault comes along.
+    constexpr u64 Window = 64_KB;
+    const VAddr window_start = std::max(Common::AlignDown(page, Window), arena->cpu_addr);
+    const VAddr window_end =
+        std::min(std::max(Common::AlignDown(page, Window) + Window, page + length),
+                 arena->cpu_addr + arena->size_bytes);
+    struct Candidate {
+        VAddr at;
+        u64 tick;
+    };
+    boost::container::small_vector<Candidate, 16> pages;
+    auto& semaphore = *scheduler.GetWorkSemaphore();
+    u64 fault_tick = 0;
+    bool faulting_found = false;
+    const bool locked = memory_tracker->WithRegionLocked(
+        window_start, window_end - window_start, [&](RegionManager& manager) {
+            for (VAddr at = window_start; at < window_end; at += TRACKER_BYTES_PER_PAGE) {
+                const u64 offset = at - manager.GetCpuAddr();
+                if (!manager.IsRegionModified<Type::GPU>(offset, TRACKER_BYTES_PER_PAGE)) {
+                    continue;
+                }
+                const u64 tick = manager.LatestGpuWriteTick(at, TRACKER_BYTES_PER_PAGE);
+                if (at >= page && at < page + length) {
+                    faulting_found = true;
+                    fault_tick = std::max(fault_tick, tick);
+                    pages.push_back({at, tick});
+                } else if (tick != 0 && semaphore.IsFree(tick) &&
+                           !manager.IsRegionModified<Type::CPU>(offset, TRACKER_BYTES_PER_PAGE)) {
+                    pages.push_back({at, tick});
+                }
+            }
+        });
+    // Writes still in the command buffer being recorded need a flush from the GPU side.
+    if (!locked || !faulting_found || fault_tick == 0 || fault_tick >= scheduler.CurrentTick()) {
+        return false;
+    }
+    semaphore.Wait(fault_tick);
+    boost::container::small_vector<vk::BufferCopy, 16> copies;
+    u64 total = 0;
+    for (const auto& candidate : pages) {
+        gpu_modified_ranges.ForEachInRange(
+            candidate.at, TRACKER_BYTES_PER_PAGE, [&](VAddr start, VAddr end) {
+                if (!copies.empty() &&
+                    copies.back().srcOffset + copies.back().size == start - arena->cpu_addr &&
+                    copies.back().dstOffset + copies.back().size == total) {
+                    copies.back().size += end - start;
+                    total += end - start;
+                    return;
+                }
+                total = Common::AlignUp(total, 64);
+                copies.push_back(vk::BufferCopy{
+                    .srcOffset = start - arena->cpu_addr,
+                    .dstOffset = total,
+                    .size = end - start,
+                });
+                total += end - start;
+            });
+    }
+    if (total > SideQueue::StagingSize) {
+        return false;
+    }
+    if (total != 0) {
+        auto& side = *side_queue;
+        std::scoped_lock lk{side.mutex};
+        Vulkan::Check(side.device.resetCommandPool(*side.pool));
+        Vulkan::Check(side.cmdbuf.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit}));
+        side.cmdbuf.copyBuffer(arena->Handle(), side.staging.Handle(), copies);
+        const vk::MemoryBarrier2 to_host = {
+            .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eHost,
+            .dstAccessMask = vk::AccessFlagBits2::eHostRead,
+        };
+        side.cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &to_host});
+        Vulkan::Check(side.cmdbuf.end());
+        const vk::Semaphore timeline = semaphore.Handle();
+        const vk::PipelineStageFlags wait_stage = vk::PipelineStageFlagBits::eTransfer;
+        const vk::TimelineSemaphoreSubmitInfo timeline_info = {
+            .waitSemaphoreValueCount = 1,
+            .pWaitSemaphoreValues = &fault_tick,
+        };
+        const vk::SubmitInfo submit = {
+            .pNext = &timeline_info,
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &timeline,
+            .pWaitDstStageMask = &wait_stage,
+            .commandBufferCount = 1,
+            .pCommandBuffers = &side.cmdbuf,
+        };
+        Vulkan::Check(side.queue.submit(submit, *side.fence));
+        const vk::Result result = side.device.waitForFences(*side.fence, true, UINT64_MAX);
+        if (result == vk::Result::eErrorDeviceLost) {
+            Vulkan::DeviceLost(side.device);
+        }
+        Vulkan::Check(result);
+        Vulkan::Check(side.device.resetFences(*side.fence));
+        side.staging.Invalidate(0, total);
+        for (const auto& copy : copies) {
+            memory->TryWriteBacking(std::bit_cast<u8*>(arena->cpu_addr + copy.srcOffset),
+                                    side.staging.mapped_data.data() + copy.dstOffset, copy.size);
+        }
+    }
+    // The pages whose GPU data is in guest memory now stop being GPU data, unless a write was
+    // marked on them meanwhile; the faulting range becomes the guest's (writable).
+    bool settled = true;
+    memory_tracker->WithRegionLocked(
+        window_start, window_end - window_start, [&](RegionManager& manager) {
+            for (const auto& candidate : pages) {
+                const bool faulting = candidate.at >= page && candidate.at < page + length;
+                const u64 offset = candidate.at - manager.GetCpuAddr();
+                if (!manager.IsRegionModified<Type::GPU>(offset, TRACKER_BYTES_PER_PAGE)) {
+                    continue; // read back by someone else meanwhile
+                }
+                if (manager.LatestGpuWriteTick(candidate.at, TRACKER_BYTES_PER_PAGE) !=
+                    candidate.tick) {
+                    settled &= !faulting;
+                    continue;
+                }
+                gpu_modified_ranges.Subtract(candidate.at, TRACKER_BYTES_PER_PAGE);
+                manager.ChangeRegionState<Type::GPU, false>(candidate.at, TRACKER_BYTES_PER_PAGE);
+            }
+            if (settled) {
+                manager.ChangeRegionState<Type::CPU, true>(device_addr, size);
+            }
+        });
+    if (!settled) {
+        return false;
+    }
+    BbStats::gpu_side_downloads.fetch_add(1, std::memory_order_relaxed);
+    BbStats::gpu_side_download_ns.fetch_add(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+                                                             start_time)
+            .count(),
+        std::memory_order_relaxed);
+    BbStats::fault_thread_read_backs.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
 extern "C" int runtime_memory_read_backing(uintptr_t address, void* out, uint64_t size);
 
 // bbport: deferred raycaster copies (see landing_gate.h). The guest part of the copy is made at
@@ -933,7 +1102,7 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
         };
         if (assume_locks) {
             resolve();
-        } else {
+        } else if (merge || !ReadBackOnFaultThread(device_addr, size)) {
             liverpool->SendCommand<true>(std::move(resolve));
         }
     });
