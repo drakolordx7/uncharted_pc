@@ -81,7 +81,7 @@ works for menus and movies.
 Test windows (scripted runs next to the desktop), all off by default: `BB_WINDOW_POS=x,y` (e.g. `-3000,0`: off every
 screen), `BB_NO_FOCUS=1` (cannot take the focus or a taskbar button), `BB_WINDOW_HIDDEN=1` (created hidden; the
 game keeps rendering and the frame dump above still works), `BB_WINDOW_MINIMIZED=1` (the presenter then skips
-presenting). `a local test script` sets hidden + no-focus for its parallel test runs.
+presenting).
 
 Not ported: the watchdog/`--timeout` thread dumps (Linux signals), userfaultfd tracking
 (`BB_UFFD`), MangoHud, PGO (GCC flags), the GTK launcher (`launcher/bbport_launcher_win.py`, Tkinter, replaces it), and
