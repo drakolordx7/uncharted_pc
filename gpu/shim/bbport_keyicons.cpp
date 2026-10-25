@@ -1465,6 +1465,19 @@ static bool PaintAtlas(uint8_t* rgba, int phase) {
         } else if (i == 1 && wheel) {
             DrawWheelFrame(rgba, 512, dpad, font);
             ++patched;
+        } else if (i == 2 && g_menu_mode && left_stick.size() == 4) {
+            // the menus: the up+down pad (Select in a list) is moved with the stick keys and the wheel, not the d-pad
+            // bindings: same prompt as the first d-pad, the WASD (phase 0) and the wheel (phase 1) taking turns
+            if (phase == 1) {
+                DrawWheelFrame(rgba, 512, dpad, font);
+            } else {
+                ClearFrame(rgba, 512, dpad, 6);
+                const std::string keys[4] = {left_stick.substr(0, 1), left_stick.substr(1, 1), left_stick.substr(2, 1),
+                                             left_stick.substr(3, 1)};
+                DrawCluster(rgba, 512, float(dpad.x) + float(dpad.w) * 0.5f, float(dpad.y) + float(dpad.h) * 0.5f, keys, font,
+                            DpadClusterKey, -1, 1.0f);
+            }
+            ++patched;
         } else if (i == 2 && !up_key.empty() && !down_key.empty()) {
             // up and down lit: the keys of both, one above the other
             ClearFrame(rgba, 512, dpad, 6);
