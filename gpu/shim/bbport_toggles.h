@@ -90,6 +90,7 @@ enum : std::uint64_t {
     VoLabelNoDrain = 8, ///< a met display buffer label wait does not drain the draw pipe
     FaultReadbackHere = 16, ///< guest write faults on submitted GPU data read back on their thread
     RecycledImages = 32, ///< images remade by format reuse the Vulkan images freed that way
+    TrackedStreamReads = 64, ///< (bit set) stream buffer reads go to the barrier tracker again
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;
