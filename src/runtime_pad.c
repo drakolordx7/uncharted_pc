@@ -527,12 +527,14 @@ static void aim_turn(float *v, float yaw, float pitch) {
  * remembered aim direction (camera+0x1830) in rcx: it turns it by the stick, the camera saves it
  * back, and the shown direction adds aim assist and recoil on top. Called from the aiming camera's
  * own call site (return address main_return), the mouse turns that direction directly; other
- * callers are left alone and take no mouse motion. The return address is the word above the
+ * callers are left alone and take no mouse motion. The return address is above the
  * registers the hook saved (the hook is at the function's first instruction). */
 static void raw_aim(const char *game, uint64_t controller, const RuntimeGuestRegs *regs, uint64_t image,
                     uint64_t main_return, uint64_t main_return_alt) {
     if (!gyro_on()) return;
-    const uint64_t ret=((const uint64_t *)(regs+1))[0]-image;
+    /* the thunk (probe.c) moves rsp down 0x80 (the red zone) before it saves the block, so the return address is
+     * the word 0x80 bytes above the block */
+    const uint64_t ret=*(const uint64_t *)((uintptr_t)(regs+1)+0x80)-image;
     float *dir=(float *)(uintptr_t)regs->rcx;
     static uint64_t other_logged;
     if (ret!=main_return && ret!=main_return_alt) {
@@ -713,7 +715,7 @@ static void mouse_sticks(float *pad, const AimCurve *aim) {
             dx=dy=0.0f;
             push=follow_push;
         }
-        if (!aim_held && gyro_on() && cover_hook_us && now-cover_hook_us<50000) dx=dy=0.0f; /* the cover camera too */
+        if (!aim_held && gyro_on() && cover_hook_us && now-cover_hook_us<200000) dx=dy=0.0f; /* the cover camera too (a slow frame rate calls it rarely) */
         /* following through the joypad: the shortfall is made up within about a quarter second */
         const float extra=!aim_held && following && !follow_direct ? follow_correction*4.0f : 0.0f;
         const float ry=(input.mouse_invert_y ? -dy : dy)*scale;
@@ -1296,9 +1298,10 @@ static void sample(PadData *d) {
     const uint64_t inject_now=now_us();
     if ((injected.mouse[0]!=0.0f || injected.mouse[1]!=0.0f) && mouse_inject_us) {
         float dt=(float)(inject_now-mouse_inject_us)*1e-6f;
-        if (dt>0.1f) dt=0.1f;
+        if (dt>0.5f) dt=0.5f; /* a loaded PC polls the pad rarely: the scripted motion is not lost */
         pthread_mutex_lock(&camera_lock);
         for (int q=0;q<2;++q) { camera_dx[q]+=injected.mouse[0]*dt; camera_dy[q]+=injected.mouse[1]*dt; }
+        if (raw_aim_armed(inject_now)) { aim_dx+=injected.mouse[0]*dt; aim_dy+=injected.mouse[1]*dt; } /* raw aim (scripted runs) */
         pthread_mutex_unlock(&camera_lock);
     }
     mouse_inject_us=inject_now;
