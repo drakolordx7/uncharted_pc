@@ -321,6 +321,35 @@ std::optional<ScalarCopyRange> RaycasterCopyRange(const Shader::Info& info,
     return ScalarCopyRange{copy->src.base_address, copy->dst.base_address, copy->size};
 }
 
+bool RaycasterCopyLeavesGuestMemory(unsigned long long size) {
+    // The same switches ExecuteScalarCopyHLE reads, for a 64-dword copy whose source holds
+    // GPU-written bytes: it writes guest memory unless it is copied on the GPU only or its guest
+    // part is deferred to the landing thread (BB_SCALAR_COPY64_SYNC=2 with
+    // BB_SCALAR_COPY64_DEFER=1, the U2 profile).
+    const auto env_is = [](const char* name, char value) {
+        const char* env = std::getenv(name);
+        return env && env[0] == value;
+    };
+    static const bool both = !env_is("BB_SCALAR_COPY_BOTH", '0');
+    static const bool sync_all = env_is("BB_SCALAR_COPY_SYNC", '1');
+    static const bool small_sync = env_is("BB_SCALAR_COPY_SMALL_SYNC", '1');
+    static const int sync_64 = [] {
+        const char* env = std::getenv("BB_SCALAR_COPY64_SYNC");
+        return !env ? 0 : env[0] == '0' ? 0 : env[0] == '1' ? 1 : 2;
+    }();
+    static const bool defer = env_is("BB_SCALAR_COPY64_DEFER", '1');
+    if (size >= 1_MB) {
+        return true; // copied on the GPU only
+    }
+    if (small_sync) {
+        return false;
+    }
+    if (!both) {
+        return true;
+    }
+    return !sync_all && (sync_64 == 0 || (sync_64 == 2 && defer));
+}
+
 static bool ExecuteScalarCopyHLE(const Shader::Info& info, const AmdGpu::ComputeProgram& cs_program,
                                  Rasterizer& rasterizer, u64 group_size) {
     const auto copy = ScalarCopyOf(info, cs_program, group_size);

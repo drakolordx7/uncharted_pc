@@ -31,6 +31,10 @@ struct ScalarCopyRange {
 };
 std::optional<ScalarCopyRange> RaycasterCopyRange(const Shader::Info& info,
                                                   const AmdGpu::ComputeProgram& cs_program);
+/// bbport: whether such a copy of `size` bytes, its source holding GPU-written bytes, leaves
+/// guest memory alone when it runs (copied on the GPU only, or its guest part deferred to the
+/// landing thread), as the BB_SCALAR_COPY* switches set it.
+bool RaycasterCopyLeavesGuestMemory(unsigned long long size);
 
 /// Attempts to execute a shader using HLE if possible.
 bool ExecuteShaderHLE(const Shader::Info& info, const AmdGpu::Regs& regs,

@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <optional>
 #include <mutex>
 #include <vector>
 
@@ -539,8 +540,13 @@ private:
     bool scene_debug_frame = false; ///< BB_SCENE_DEBUG: this frame's passes are printed
     bool PendingWriteOverlaps(VAddr address, u64 size);
     /// Stage A: whether a guest-memory HLE dispatch can go to the recording thread like other
-    /// dispatches (a raycaster copy of GPU data), instead of a drain and the copy here.
-    bool GuestCopyOnStageB(const Shader::Info& cs);
+    /// dispatches (a raycaster copy of GPU data), instead of a drain and the copy here; if so,
+    /// the destination range it writes on the GPU (to note as a pending write once queued).
+    struct StageBCopy {
+        VAddr dst{};
+        u64 size{};
+    };
+    std::optional<StageBCopy> GuestCopyOnStageB(const Shader::Info& cs);
     /// Stage B: the ring bindings of the stages of the packet being recorded.
     struct RingStage {
         const Shader::Info* info;
