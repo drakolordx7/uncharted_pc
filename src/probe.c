@@ -943,10 +943,10 @@ static void install_ndgi_hooks(uint64_t image_size) {
         begin_at=find_masked("4d89a710e80000",image_size);
         begin_len=7;
     }
-    if (begin_at>=0 && callback_thunk(image+begin_at,begin_len,(const void *)ndgi_begin))
-        printf("Render contexts: begin hooked at %#" PRIx64 "\n",(uint64_t)begin_at);
-    else
+    if (begin_at<0) {
         printf("Render contexts: begin site %s\n",begin_at==-2 ? "not unique" : "not found");
+        return;
+    }
     /* End: mov rbx,[r14+0xe810]; call GetCurrentWorkerThreadIndex; cmp rbx,rax; je */
     static const unsigned char head[]={0x49,0x8b,0x9e,0x10,0xe8,0x00,0x00,0xe8};
     static const unsigned char tail[]={0x48,0x39,0xc3,0x74};
@@ -962,8 +962,14 @@ static void install_ndgi_hooks(uint64_t image_size) {
         if (us>=0) found=us+14;
     }
     if (found<0) { printf("Render contexts: end site not found\n"); return; }
-    if (callback_thunk(image+found,7,(const void *)ndgi_end))
-        printf("Render contexts: end hooked at %#" PRIx64 "\n",(uint64_t)found);
+    /* both or neither: a Begin without its End would leave the flag set. End first (alone it only
+     * clears the flag), Begin only once End is in. */
+    if (!callback_thunk(image+found,7,(const void *)ndgi_end)) { printf("Render contexts: end hook failed\n"); return; }
+    printf("Render contexts: end hooked at %#" PRIx64 "\n",(uint64_t)found);
+    if (callback_thunk(image+begin_at,begin_len,(const void *)ndgi_begin))
+        printf("Render contexts: begin hooked at %#" PRIx64 "\n",(uint64_t)begin_at);
+    else
+        printf("Render contexts: begin hook failed\n");
 }
 #endif
 /* Naughty Dog's FrameBegin (ndlib/render/fg-draw-mgr.cpp) asserts that the frame it recycles,
@@ -1210,10 +1216,12 @@ static ABI int job_lock_wait(uint64_t counter, uint64_t a, uint32_t b) {
         if (try_lock(counter,a,b)&0xff) return 1;
         SwitchToThread();
     }
-    for (unsigned ms=0;ms<job_lock_wait_ms;++ms) {
+    /* a real deadline: Sleep(1) can take a whole 15.6 ms timer tick */
+    const ULONGLONG deadline=GetTickCount64()+job_lock_wait_ms;
+    do {
         if (try_lock(counter,a,b)&0xff) return 1;
-        Sleep(1);
-    }
+        compat_sleep_ns(1000000);
+    } while (GetTickCount64()<deadline);
 #else
     for (unsigned i=0;i<job_lock_wait_ms*10;++i) {
         if (try_lock(counter,a,b)&0xff) return 1;

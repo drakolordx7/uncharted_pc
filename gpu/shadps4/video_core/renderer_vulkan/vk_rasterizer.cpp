@@ -32,6 +32,8 @@
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_hle.h"
+#include "video_core/renderer_vulkan/vk_shader_util.h"
+#include "video_core/host_shaders/indirect_split_comp.h"
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/texture_cache.h"
 
@@ -2308,6 +2310,88 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     DispatchIndirectRecord(pipeline, address + offset, size);
 }
 
+// bbport: BB_CS_SPLIT_1024 for indirect dispatches. The guest's group count is in its argument
+// buffer (often written by an earlier dispatch), so indirect_split.comp copies it into the stream
+// buffer with x multiplied by the split factor, and the dispatch reads the copy. Recorded before
+// the game pipeline binds its resources (this pipeline uses push descriptors on set 0).
+static void RecordIndirectSplit(const Instance& instance, Scheduler& scheduler,
+                                vk::Buffer args, u64 args_offset, vk::Buffer stream,
+                                u64 stream_offset, u32 factor) {
+    struct Pipeline {
+        vk::UniqueDescriptorSetLayout set_layout;
+        vk::UniquePipelineLayout layout;
+        vk::UniquePipeline pipeline;
+    };
+    static Pipeline pipe = [&] {
+        const auto device = instance.GetDevice();
+        Pipeline p;
+        std::array<vk::DescriptorSetLayoutBinding, 2> bindings{};
+        for (u32 i = 0; i < 2; ++i) {
+            bindings[i] = {.binding = i,
+                           .descriptorType = vk::DescriptorType::eStorageBuffer,
+                           .descriptorCount = 1,
+                           .stageFlags = vk::ShaderStageFlagBits::eCompute};
+        }
+        p.set_layout = Check(device.createDescriptorSetLayoutUnique({
+            .flags = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR,
+            .bindingCount = static_cast<u32>(bindings.size()),
+            .pBindings = bindings.data(),
+        }));
+        const vk::PushConstantRange range{.stageFlags = vk::ShaderStageFlagBits::eCompute,
+                                          .offset = 0,
+                                          .size = 2 * sizeof(u32)};
+        p.layout = Check(device.createPipelineLayoutUnique({
+            .setLayoutCount = 1,
+            .pSetLayouts = &*p.set_layout,
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges = &range,
+        }));
+        const auto module = CompileSPV(INDIRECT_SPLIT_COMP, device);
+        p.pipeline = Check(device.createComputePipelineUnique(
+            {}, vk::ComputePipelineCreateInfo{
+                    .stage = {.stage = vk::ShaderStageFlagBits::eCompute,
+                              .module = module,
+                              .pName = "main"},
+                    .layout = *p.layout,
+                }));
+        device.destroyShaderModule(module);
+        return p;
+    }();
+    // the argument buffer is bound from an aligned offset, the dwords are addressed past it
+    const u64 align = instance.StorageMinAlignment();
+    const u64 src_start = args_offset & ~(align - 1);
+    const std::array<u32, 2> push = {static_cast<u32>((args_offset - src_start) / 4), factor};
+    const u64 src_size = args_offset - src_start + 3 * sizeof(u32);
+    scheduler.Record([args, src_start, src_size, stream, stream_offset, push,
+                      layout = *pipe.layout,
+                      handle = *pipe.pipeline](vk::CommandBuffer cmdbuf) {
+        const std::array<vk::DescriptorBufferInfo, 2> infos{{
+            {args, src_start, src_size},
+            {stream, stream_offset, 3 * sizeof(u32)},
+        }};
+        std::array<vk::WriteDescriptorSet, 2> writes{};
+        for (u32 i = 0; i < 2; ++i) {
+            writes[i] = {.dstBinding = i,
+                         .descriptorCount = 1,
+                         .descriptorType = vk::DescriptorType::eStorageBuffer,
+                         .pBufferInfo = &infos[i]};
+        }
+        cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, handle);
+        cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, layout, 0, writes);
+        cmdbuf.pushConstants(layout, vk::ShaderStageFlagBits::eCompute, 0,
+                             static_cast<u32>(sizeof(push)), push.data());
+        cmdbuf.dispatch(1, 1, 1);
+        const vk::MemoryBarrier2 barrier = {
+            .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+            .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eDrawIndirect,
+            .dstAccessMask = vk::AccessFlagBits2::eIndirectCommandRead,
+        };
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{.memoryBarrierCount = 1,
+                                                   .pMemoryBarriers = &barrier});
+    });
+}
+
 void Rasterizer::DispatchIndirectRecord(const ComputePipeline* pipeline, VAddr address,
                                         u32 size) {
     scheduler.PopPendingOperations();
@@ -2325,21 +2409,32 @@ void Rasterizer::DispatchIndirectRecord(const ComputePipeline* pipeline, VAddr a
     }
 
     scheduler.EndRendering();
-    pipeline->BindResources(set_writes, push_data);
 
     const vk::Pipeline handle = pipeline->Handle();
-    const vk::Buffer args = buffer->Handle();
-    const u64 args_offset = base;
-    // bbport: BB_CS_SPLIT_1024 - the group count lives in the guest's argument buffer and is
-    // not rewritten, so a split shader would only cover half of its work.
-    if (pipeline->GetStage(Shader::SwStage::Compute).split_workgroup != 0) {
-        static bool warned = false;
-        if (!warned) {
-            warned = true;
-            std::printf("Compute shader %08x: indirect dispatch is not split (BB_CS_SPLIT_1024)\n",
-                        u32(pipeline->GetStage(Shader::SwStage::Compute).pgm_hash));
+    vk::Buffer args = buffer->Handle();
+    u64 args_offset = base;
+    // bbport: BB_CS_SPLIT_1024 - a split shader needs `factor` times the guest's x group count,
+    // which is in the argument buffer: dispatch from a scaled copy (RecordIndirectSplit).
+    const u32 split = pipeline->GetStage(Shader::SwStage::Compute).split_workgroup;
+    if (split != 0 && 1024 % split == 0) {
+        auto& stream = buffer_cache.GetStreamBuffer();
+        const u32 zero[4] = {};
+        const u64 copy_offset = stream.Copy(zero, sizeof(zero), instance.StorageMinAlignment());
+        RecordIndirectSplit(instance, scheduler, args, args_offset, stream.Handle(), copy_offset,
+                            1024 / split);
+        runtime.AccessBuffer(buffer, base, 3 * sizeof(u32),
+                             vk::PipelineStageFlagBits2::eComputeShader,
+                             vk::AccessFlagBits2::eShaderRead);
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            std::printf("Compute shader %08x: indirect dispatch split (x %u groups)\n",
+                        u32(pipeline->GetStage(Shader::SwStage::Compute).pgm_hash), 1024 / split);
         }
+        args = stream.Handle();
+        args_offset = copy_offset;
     }
+    pipeline->BindResources(set_writes, push_data);
     const void* checkpoint =
         NoteCheckpoint("indirect dispatch", pipeline->GetStage(Shader::SwStage::Compute).pgm_hash,
                        0, size, 0, 0, address + offset);

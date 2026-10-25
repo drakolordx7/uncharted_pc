@@ -1,0 +1,18 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// bbport: BB_CS_SPLIT_1024 for indirect dispatches. A split compute shader runs each 1024-thread
+// group as `factor` smaller groups, so the guest's group count (x, y, z in its argument buffer,
+// written by the GPU) is copied with x multiplied by the factor, and the dispatch reads the copy.
+#version 450
+
+layout(local_size_x = 1) in;
+
+layout(std430, binding = 0) readonly buffer Source { uint src[]; };
+layout(std430, binding = 1) writeonly buffer Destination { uint dst[]; };
+
+layout(push_constant) uniform Push { uint offset; uint factor; } push; // offset in dwords
+
+void main() {
+    dst[0] = src[push.offset] * push.factor;
+    dst[1] = src[push.offset + 1];
+    dst[2] = src[push.offset + 2];
+}

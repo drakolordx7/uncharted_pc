@@ -47,7 +47,7 @@ def wait_for(pid):
         fail(f'Cannot wait for previous game process {pid}: OpenProcess failed '
              f'(Windows error {error}).')
     try:
-        result = kernel32.WaitForSingleObject(handle, 30000)
+        result = kernel32.WaitForSingleObject(handle, 30000) & 0xFFFFFFFF  # unsigned: WAIT_FAILED is 0xFFFFFFFF
         if result == WAIT_OBJECT_0:
             return
         if result == WAIT_TIMEOUT:

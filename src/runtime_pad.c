@@ -381,7 +381,9 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
     float *dir=(float *)(uintptr_t)(camera+dir_offset);
     const float heading=heading_of(dir);
     float dx, dy;
-    if (gyro_on()) frame_motion(now,&dx,&dy);
+    /* frame_motion only once a U1 gyro hook (cover camera, raw aim) has run: U2 and U3 have none,
+     * and their follow camera blends would take the same motion twice */
+    if (gyro_on() && (cover_hook_us || aim_direct_us)) frame_motion(now,&dx,&dy);
     else camera_take(0,&dx,&dy);
     if (aim_held) { follow_moved_us=0; follow_pending=0; return; } /* the aiming camera takes the mouse */
     if (follow_pending) {
