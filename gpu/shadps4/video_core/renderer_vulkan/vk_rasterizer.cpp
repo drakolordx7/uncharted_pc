@@ -1947,15 +1947,16 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     scheduler.KickRecording();
 }
 
-void Rasterizer::NoteSmallWrittenBuffers(const Shader::Info& stage) {
+bool Rasterizer::NoteSmallWrittenBuffers(const Shader::Info& stage) {
     static const bool enabled = [] {
         // Off by default: in U3's Cartagena square it halved the frame rate (94 -> 46 FPS).
         const char* env = std::getenv("BB_READBACK_SMALL_BUFFERS");
         return env && env[0] == '1';
     }();
     if (!enabled) {
-        return;
+        return false;
     }
+    bool wrote_small = false;
     for (const auto& desc : stage.buffers) {
         if (desc.IsSpecial() || !desc.is_written) {
             continue;
@@ -1965,6 +1966,7 @@ void Rasterizer::NoteSmallWrittenBuffers(const Shader::Info& stage) {
         if (!sharp.base_address || size == 0 || size > 64) {
             continue;
         }
+        wrote_small = true;
         std::scoped_lock lk{small_written_mutex};
         // BB_SC_LOG: which shaders write the small buffers, and where (first 40 distinct).
         static const bool sc_log = std::getenv("BB_SC_LOG") != nullptr;
@@ -1976,16 +1978,103 @@ void Rasterizer::NoteSmallWrittenBuffers(const Shader::Info& stage) {
                             static_cast<unsigned long long>(sharp.base_address));
             }
         }
-        const std::pair<VAddr, u32> range{sharp.base_address, size};
-        if (small_written_buffers.size() < 16 &&
-            std::ranges::find(small_written_buffers, range) == small_written_buffers.end()) {
-            small_written_buffers.push_back(range);
+        const auto it = std::ranges::find_if(small_written_buffers, [&](const SmallWritten& w) {
+            return w.address == sharp.base_address && w.size == size;
+        });
+        if (it != small_written_buffers.end()) {
+            it->writer = stage.pgm_hash; // the last writer's result is what lands
+        } else if (small_written_buffers.size() < 16) {
+            small_written_buffers.push_back({sharp.base_address, size, stage.pgm_hash});
         }
     }
+    return wrote_small && SmallWriterGated(stage.pgm_hash);
+}
+
+namespace {
+/// BB_READBACK_SMALL_GATE: which small GPU results hold back the end-of-pipe label until they
+/// have landed (see ReadBackSmallWrittenBuffers).
+enum class SmallGate {
+    Never, ///< 0: none (the labels never wait; the old default)
+    All,   ///< 1: all of them (U3 pub 46 of 60 FPS)
+    Auto,  ///< default: the listed shaders and the ones learned in this run
+};
+
+SmallGate SmallGateMode() {
+    static const SmallGate mode = [] {
+        const char* env = std::getenv("BB_READBACK_SMALL_GATE");
+        if (env && env[0] == '0') {
+            return SmallGate::Never;
+        }
+        if (env && env[0] == '1') {
+            return SmallGate::All;
+        }
+        return SmallGate::Auto;
+    }();
+    return mode;
+}
+
+/// Comma-separated compute shader hashes (hex, as SMALLBUF and SMALLGATE print them; 8 digits
+/// match the low 32 bits).
+std::vector<u64> ParseShaderList(const char* name) {
+    std::vector<u64> list;
+    const char* env = std::getenv(name);
+    while (env && *env) {
+        char* end;
+        const u64 value = std::strtoull(env, &end, 16);
+        if (end == env) {
+            ++env;
+            continue;
+        }
+        list.push_back(value);
+        env = end;
+    }
+    return list;
+}
+
+bool InShaderList(const std::vector<u64>& list, u64 hash) {
+    return std::ranges::any_of(list, [hash](u64 v) {
+        return v == hash || (v <= 0xffffffffull && v == (hash & 0xffffffffull));
+    });
+}
+
+/// Shaders whose small results are known to be read by the guest right after the label, gated
+/// in the default mode from the first frame (the learning finds them after a few frames).
+/// Fill in from SMALLGATE "learned shader" lines of U2/U3 runs.
+constexpr std::array<u64, 0> KnownGatedSmallWriters{};
+
+bool SmallGateLearning() {
+    static const bool learn = [] {
+        const char* env = std::getenv("BB_READBACK_SMALL_GATE_LEARN");
+        return !(env && env[0] == '0');
+    }();
+    return learn;
+}
+} // namespace
+
+bool Rasterizer::SmallWriterGated(u64 writer, const char** why) const {
+    static const std::vector<u64> listed = ParseShaderList("BB_READBACK_SMALL_GATE_CS");
+    static const std::vector<u64> skipped = ParseShaderList("BB_READBACK_SMALL_GATE_SKIP");
+    if (SmallGateMode() != SmallGate::Auto || InShaderList(skipped, writer)) {
+        return false;
+    }
+    if (InShaderList(listed, writer) ||
+        std::ranges::find(KnownGatedSmallWriters, writer) != KnownGatedSmallWriters.end()) {
+        if (why) {
+            *why = "listed";
+        }
+        return true;
+    }
+    if (SmallGateLearning() && buffer_cache.SmallWriterLearned(writer)) {
+        if (why) {
+            *why = "learned";
+        }
+        return true;
+    }
+    return false;
 }
 
 void Rasterizer::ReadBackSmallWrittenBuffers() {
-    std::vector<std::pair<VAddr, u32>> ranges;
+    std::vector<SmallWritten> ranges;
     {
         std::scoped_lock lk{small_written_mutex};
         ranges.swap(small_written_buffers);
@@ -1999,20 +2088,38 @@ void Rasterizer::ReadBackSmallWrittenBuffers() {
         const char* env = std::getenv("BB_READBACK_SMALL_DEFER");
         return !(env && env[0] == '0');
     }();
-    // Gated: the end-of-pipe label waits for the landing, i.e. for the GPU to finish that work
-    // (the guest then never reads it early, but loses the overlap with the GPU: U3 pub 46 of 60
-    // FPS). Default: the bytes land when the GPU is done and the label does not wait.
-    // BB_READBACK_SMALL_GATE=1: gated.
-    static const bool gated = [] {
-        const char* env = std::getenv("BB_READBACK_SMALL_GATE");
-        return env && env[0] == '1';
-    }();
-    for (const auto& [address, size] : ranges) {
+    // Gated: the end-of-pipe label waits for the landing, i.e. for the GPU to finish that work.
+    // The guest then never reads it early, but loses the overlap with the GPU when every result
+    // is gated (BB_READBACK_SMALL_GATE=1: U3 pub 46 of 60 FPS). Most results (auto-exposure and
+    // the like) do no harm a frame late; the ones the guest resets or refills between passes and
+    // reads right after the label do (U3 characters sinking, #601, #590). By default only those
+    // are gated: shaders listed in BB_READBACK_SMALL_GATE_CS or KnownGatedSmallWriters, and the
+    // ones the landing thread sees the guest rewriting (BufferCache::SmallWriterLearned;
+    // BB_READBACK_SMALL_GATE_LEARN=0 turns the learning off). BB_READBACK_SMALL_GATE_SKIP lists
+    // shaders never gated in that mode. BB_READBACK_SMALL_GATE=0: none gated, 1: all.
+    static const SmallGate mode = SmallGateMode();
+    static const bool learn = SmallGateLearning();
+    static const bool sc_log = std::getenv("BB_SC_LOG") != nullptr;
+    for (const auto& [address, size, writer] : ranges) {
         if (defer) {
             if (!buffer_cache.IsRangeGpuWritten(address, size)) {
                 continue; // none of these bytes is GPU data, the guest copy is current
             }
-            if (buffer_cache.DeferGuestCopy(address, address, size, false, gated)) {
+            const char* why = "all";
+            const bool gated = mode == SmallGate::All || SmallWriterGated(writer, &why);
+            // BB_SC_LOG: the gated results, first 40 distinct shader and address pairs.
+            if (gated && sc_log) {
+                static std::mutex log_mutex;
+                static std::set<std::pair<u64, VAddr>> logged;
+                std::scoped_lock lk{log_mutex};
+                if (logged.size() < 40 && logged.emplace(writer, address).second) {
+                    std::printf("SMALLGATE: gating shader %016llx result at %#llx (%u bytes, %s)\n",
+                                static_cast<unsigned long long>(writer),
+                                static_cast<unsigned long long>(address), size, why);
+                }
+            }
+            const u64 track = mode == SmallGate::Auto && learn ? writer : 0;
+            if (buffer_cache.DeferGuestCopy(address, address, size, false, gated, track)) {
                 continue;
             }
         }
@@ -2106,7 +2213,7 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     if (!BindResources(pipeline)) {
         return;
     }
-    NoteSmallWrittenBuffers(cs);
+    const bool gated_small_result = NoteSmallWrittenBuffers(cs);
     if (StaleCheckEnabled()) {
         VAddr slot = ~VAddr{0};
         u64 slot_size = 0;
@@ -2289,6 +2396,16 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
 
     ResetBindings(true);
     scheduler.KickRecording();
+    // A gated small result (ReadBackSmallWrittenBuffers): submitted now, the landing at the next
+    // end-of-pipe label waits for the GPU to get this far only, not through the work recorded
+    // after it. BB_READBACK_SMALL_GATE_FLUSH=0: left in the open command buffer.
+    static const bool flush_gated = [] {
+        const char* env = std::getenv("BB_READBACK_SMALL_GATE_FLUSH");
+        return !(env && env[0] == '0');
+    }();
+    if (gated_small_result && flush_gated) {
+        scheduler.Flush();
+    }
 }
 
 void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
