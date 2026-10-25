@@ -171,7 +171,8 @@ void ReportCheckpoints() {
 // it had finished from the ones that were in flight when it stopped.
 void ReportRecentCheckpoints(u32 max_records) {
     if (!checkpoint_ring) {
-        std::printf("GPU crash: no GPU checkpoints (BB_GPU_CHECKPOINTS=1 was not set)\n");
+        // Checkpoints off (BB_GPU_CHECKPOINTS unset): say nothing, or every CPU crash reads as a
+        // GPU crash in players' logs.
         return;
     }
     const u64 latest = checkpoint_seq.load(std::memory_order_acquire);
