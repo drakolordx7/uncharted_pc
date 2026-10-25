@@ -94,6 +94,9 @@ enum Shape : u8 {
     Puck,        ///< 512x512: a raised button seen from the side (tapping prompts)
     PressedPuck, ///< 512x512: the same button pressed down (hold prompts)
     HudDPad,     ///< 256x256: the weapon switch d-pad
+    Bumper,      ///< 256x256: L1 / R1, flat top, round bottom
+    LeftTrigger, ///< 256x256: L2, round top, the left side leaning out
+    RightTrigger, ///< 256x256: R2, the same mirrored
 };
 struct Picture {
     u64 hash;
@@ -107,6 +110,23 @@ const Picture pictures[] = {
     {0x5db884aa1bae54f9ull, 256, RoundButton, Triangle, {55, 216, 104}, "Uncharted 2 triangle prompt"},
     {0x7af1abf688d8c824ull, 256, RoundButton, Circle, {230, 58, 35}, "Uncharted 2 circle prompt"},
     {0x9edd4f2f0f64f6e5ull, 256, RoundButton, Square, {243, 160, 155}, "Uncharted 2 square prompt"},
+    // The rest of the big prompts of art/general/hud/buttons (hud.pak; the same pictures in Uncharted 1).
+    {0x2bf5d90eb864162full, 256, RoundButton, Cross, {136, 149, 238}, "Uncharted 2 cross prompt"},
+    {0xb88838d137123548ull, 256, Bumper, L1, {197, 170, 131}, "Uncharted 2 L1 prompt"},
+    {0x4999c8b20a45cd6dull, 256, Bumper, R1, {197, 170, 131}, "Uncharted 2 R1 prompt"},
+    {0x539b560401a1ac83ull, 256, LeftTrigger, L2, {197, 170, 131}, "Uncharted 2 L2 prompt"},
+    {0xe2c351d65c6a63f1ull, 256, RightTrigger, R2, {197, 170, 131}, "Uncharted 2 R2 prompt"},
+    // Uncharted 3's own encodings of the same pictures (the triangle, circle and square are shared).
+    {0x305c2c731ec227e6ull, 256, RoundButton, Cross, {136, 149, 238}, "Uncharted 3 cross prompt"},
+    {0x6c3fc301ede4114aull, 256, Bumper, L1, {199, 172, 136}, "Uncharted 3 L1 prompt"},
+    {0xbd74a617a879f120ull, 256, Bumper, R1, {199, 172, 136}, "Uncharted 3 R1 prompt"},
+    {0x2e8ae3386e2a91ddull, 256, LeftTrigger, L2, {199, 172, 136}, "Uncharted 3 L2 prompt"},
+    {0x784278339a5a55bfull, 256, RightTrigger, R2, {199, 172, 136}, "Uncharted 3 R2 prompt"},
+    {0x07ff3d0e4090be85ull, 512, Puck, Triangle, {54, 215, 103}, "Uncharted 3 triangle tapping prompt"},
+    {0x4181f3ae6bd1efffull, 512, PressedPuck, Triangle, {54, 215, 103},
+     "Uncharted 3 triangle hold prompt"},
+    {0x668cf3cc04ab6963ull, 512, Puck, Square, {255, 158, 158}, "Uncharted 3 square tapping prompt"},
+    {0x1b7e089f40b3bb21ull, 512, PressedPuck, Square, {255, 158, 158}, "Uncharted 3 square hold prompt"},
     {0x25d954ce23a8f5e2ull, 512, Puck, Triangle, {55, 216, 104}, "Uncharted 2 triangle tapping prompt"},
     {0xc96e34fbb203279eull, 512, PressedPuck, Triangle, {55, 216, 104},
      "Uncharted 2 triangle hold prompt"},
@@ -807,6 +827,52 @@ void DrawRoundButton(Canvas& up, const Font& font, const std::string& key, int x
     DrawLabel(up, font, key, cx, cy, 2 * radius - 34.0f, 80.0f, 1.0f);
 }
 
+/// A shoulder button prompt (L1/R1 bumper, L2/R2 trigger) as a key: dark face, light rim, the
+/// bound key. The outlines are measured on the game's pictures (upright); its masks cut them out.
+void DrawShoulder(Canvas& up, const Font& font, const std::string& key, u8 shape, int xbox = -1) {
+    const bool bumper = shape == Bumper;
+    const bool mirror = shape == RightTrigger;
+    // Approximate signed distance from the outline (negative inside).
+    const auto distance = [&](float x, float y) {
+        if (bumper) {
+            const float cx = 127.5f, half = 83.0f, top = 76.0f, mid = 112.0f, ry = 62.0f;
+            if (y <= mid) {
+                return RoundedRect(x, y, cx, mid, half, mid - top, 10.0f);
+            }
+            const float ex = (x - cx) / half, ey = (y - mid) / ry;
+            return (std::sqrt(ex * ex + ey * ey) - 1.0f) * ry;
+        }
+        if (mirror) {
+            x = 257.0f - x;
+        }
+        // L2: the left side leans out, the right side nearly upright, round top, flat bottom.
+        const float left = (66.0f - 0.275f * (y - 112.0f) - x) / 1.0371f;
+        const float right = (x - 192.0f - 0.075f * (y - 112.0f)) / 1.0028f;
+        float d = std::max({left, right, y - 202.0f});
+        if (y < 114.25f) {
+            d = std::max(d, std::hypot(x - 129.0f, y - 114.25f) - 62.25f);
+        }
+        return d;
+    };
+    const float top = bumper ? 76.0f : 52.0f, bottom = bumper ? 174.0f : 202.0f;
+    for (u32 y = 0; y < up.height; ++y) {
+        for (u32 x = 0; x < up.width; ++x) {
+            const float d = distance(x + 0.5f, y + 0.5f);
+            up.Blend(x, y, {0.03f, 0.03f, 0.03f}, Coverage(d));
+            const float t = std::clamp((y + 0.5f - top) / (bottom - top), 0.0f, 1.0f);
+            up.Blend(x, y, Mix(cap_top, cap_bottom, t), Coverage(d + 5.0f));
+            up.Blend(x, y, rim, 0.8f * std::min(Coverage(d + 9.0f), 1.0f - Coverage(d + 12.0f)));
+        }
+    }
+    const float cx = bumper ? 127.5f : mirror ? 128.0f : 129.0f, cy = bumper ? 118.0f : 136.0f;
+    const float width = bumper ? 116.0f : 96.0f, height = bumper ? 60.0f : 90.0f;
+    if (xbox >= 0) {
+        DrawGlyphFit(up, xbox, cx, cy, width, height, 1.0f, false);
+        return;
+    }
+    DrawLabel(up, font, key, cx, cy, width, std::min(height, 72.0f), 1.0f);
+}
+
 /// The tapping prompt's raised button (a puck seen from above at an angle) or the hold prompt's
 /// pressed one, as a key with the label lying on its face.
 void DrawPuck(Canvas& up, const Font& font, const std::string& key, bool pressed, int xbox = -1) {
@@ -898,6 +964,11 @@ std::vector<Patch> BuildPicture(const Picture& picture, u32 levels, Style style)
     case Puck:
     case PressedPuck:
         DrawPuck(up, font, bindings.keys[picture.icon], picture.shape == PressedPuck, xbox);
+        break;
+    case Bumper:
+    case LeftTrigger:
+    case RightTrigger:
+        DrawShoulder(up, font, bindings.keys[picture.icon], picture.shape, xbox);
         break;
     case HudDPad:
         if (style == Style::Xbox) {

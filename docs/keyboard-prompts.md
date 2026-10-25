@@ -22,11 +22,19 @@ back after PlayStation controller input. It also makes the bindings follow the k
 | `ad5ada34fd34c76b` | icon sheet, 512x512 RGBA8 | U1 | yes |
 | `8d03f2ff457f032d` | icon sheet colour, 512x512 RGBA8 (alpha 0) | U3 | yes |
 | `ae0c06306763d424` | icon sheet mask, 512x512 RGBA8 (alpha in R, G, B) | U3 | yes |
-| `5db884aa1bae54f9` | big round △, 256x256 BC1 | U2, U3 | yes |
-| `7af1abf688d8c824` | big round ○, 256x256 BC1 | U2 | image only |
-| `9edd4f2f0f64f6e5` | big round □ (the flashing-border prompt of the last fight), 256x256 BC1 | U2 | yes |
-| `25d954ce23a8f5e2` | △ tapping "puck", 512x512 BC1 | U2 | yes |
-| `c96e34fbb203279e` | △ hold puck, 512x512 BC1 | U2 | yes |
+| `5db884aa1bae54f9` | big round △, 256x256 BC1 | U1, U2, U3 | yes |
+| `7af1abf688d8c824` | big round ○, 256x256 BC1 | U1, U2, U3 | image only |
+| `9edd4f2f0f64f6e5` | big round □ (the flashing-border prompt of the last fight), 256x256 BC1 | U1, U2, U3 | yes |
+| `2bf5d90eb864162f` | big round ✕, 256x256 BC1 | U1, U2 | game files only |
+| `b88838d137123548`, `4999c8b20a45cd6d` | big L1, R1, 256x256 BC1 | U1, U2 | game files only |
+| `539b560401a1ac83`, `e2c351d65c6a63f1` | big L2, R2, 256x256 BC1 | U1, U2 | game files only |
+| `305c2c731ec227e6` | big round ✕, 256x256 BC1 (sRGB) | U3 | game files only |
+| `6c3fc301ede4114a`, `bd74a617a879f120` | big L1, R1, 256x256 BC1 (sRGB) | U3 | game files only |
+| `2e8ae3386e2a91dd`, `784278339a5a55bf` | big L2, R2, 256x256 BC1 (sRGB) | U3 | game files only |
+| `25d954ce23a8f5e2` | △ tapping "puck", 512x512 BC1 | U1, U2 | yes |
+| `c96e34fbb203279e` | △ hold puck, 512x512 BC1 | U1, U2 | yes |
+| `07ff3d0e4090be85`, `4181f3ae6bd1efff` | △ tapping and hold pucks, 512x512 BC1 (sRGB) | U3 | game files only |
+| `668cf3cc04ab6963`, `1b7e089f40b3bb21` | □ tapping and hold pucks, 512x512 BC1 (sRGB) | U3 | game files only |
 | `94d741f6b51815ee` | ○ tapping puck, 512x512 BC1 (sRGB) | U3 | image only |
 | `93b46ba81469882c` | ○ hold puck, 512x512 BC1 (sRGB) | U3 | image only |
 | `705083db743dd2f9` | weapon d-pad, 256x256 BC1 | U2 | image only |
@@ -45,8 +53,12 @@ with the cap turned away have no "L" and are not touched. `StickFrame` in `butto
 where the "L" sits in each frame, how it is tilted, and the cap face colours without it (measured on the
 game's pictures).
 
-Not collected yet: big ✕, L1 and R1 prompts, the stick prompt in Among Thieves and Drake's Deception
-(if they have one), and pictures only some screens use. Adding one is one table row (below).
+"Game files only": hashed from the game's `hud.pak` (U1 keeps the same pictures in `particle.pak`), all
+of `art/general/hud/buttons`, but not yet seen on screen. The shoulder prompts are drawn as keys in the
+shape of the game's L1/R1 and L2/R2 pictures (`Bumper`, `LeftTrigger`, `RightTrigger`).
+
+Not collected yet: the stick prompt in Among Thieves and Drake's Deception (if they have one), and
+pictures only some screens use. Adding one is one table row (below).
 
 ## Switching
 
@@ -129,6 +141,14 @@ The two tools are for development and off by default.
    - a big prompt: `pictures[]` (hash, size, shape, action, glow colour = a corner pixel of the
      picture, name). Shapes: `RoundButton`, `Puck`, `PressedPuck`, `HudDPad`.
 4. The log shows `Button prompts: <name> drawn as keyboard keys (<n> mip levels)` when it is used.
+
+Without a run: the level and HUD `.pak` files (`<game>data/build/main/pak*/ps4/`) hold the pictures
+uncompressed. Each texture has a `RAW_DATA` record after its name (`art/.../name.tga/<id>.ndb`) with the
+offset into the pak's GPU data, the size, the DXGI format (0x47/0x48 BC1, 0x50 BC4), the mip count and
+the width and height. The GPU data starts at the file size minus the 32-bit value at 0x20 (U1); in the
+U2 and U3 HUD paks at the sum of the values at 0x38 and 0x3c. The data is in the PS4's tiled layout;
+the hash is XXH3-64 of mip 0 as stored (width / 4 x height / 4 x 8 bytes for BC1), so it needs no
+untiling. To look at it, untile the 8x8-block micro tiles (block index bits x0 y0 x1 y1 x2 y2).
 
 ## Files
 
