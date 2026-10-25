@@ -222,6 +222,11 @@ void TextureCache::UnmapMemory(VAddr cpu_addr, size_t size) {
 /// A depth image made at an address that has held a deeper array gets all those layers at once; the
 /// game draws each layer again every frame. BB_DEPTH_ARRAY_PAD=0: off.
 /// (Mevlock 670bf18.)
+/// bbport: the padded image stays within the memory the depth images at that address have
+/// covered. Padded by layer count alone, a 4096x4096 depth target at the address of U3's shadow
+/// array in the London pub became 8 layers, 512 MiB over memory the game's CPU code writes every
+/// frame: each frame's write made the texture cache hash all of it again (~10 GB a second, the
+/// draw recording thread busy at 20 FPS).
 void TextureCache::PadDepthLayers(ImageInfo& info) {
     static const bool pad = [] {
         const char* env = std::getenv("BB_DEPTH_ARRAY_PAD");
@@ -231,11 +236,16 @@ void TextureCache::PadDepthLayers(ImageInfo& info) {
         return;
     }
     auto& seen = depth_array_layers[info.guest_address];
-    if (info.resources.layers > seen) {
-        seen = info.resources.layers;
-    } else if (seen > info.resources.layers && seen > 1) {
-        info.resources.layers = seen;
-        info.UpdateSize();
+    seen.bytes = std::max<u64>(seen.bytes, info.guest_size);
+    if (info.resources.layers > seen.layers) {
+        seen.layers = info.resources.layers;
+    } else if (seen.layers > info.resources.layers && seen.layers > 1) {
+        auto padded = info;
+        padded.resources.layers = seen.layers;
+        padded.UpdateSize();
+        if (padded.guest_size <= seen.bytes) {
+            info = padded;
+        }
     }
 }
 
