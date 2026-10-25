@@ -44,6 +44,24 @@ namespace {
 // flag set first thing in ~BufferCache: every wait on the landing thread is released then.
 std::atomic<BufferCache*> land_instance{nullptr};
 std::atomic<bool> land_stopping{false};
+
+/// bbport: writes the staged GPU bytes of one tracker page [at, at + TRACKER_BYTES_PER_PAGE)
+/// into guest memory. `copies` took arena bytes (from arena_addr) to `staged`; a copy may span
+/// several pages, so only its part on this page is written.
+template <typename Memory, typename Copies>
+void WriteBackPage(Memory* memory, VAddr arena_addr, const Copies& copies, const u8* staged,
+                   VAddr at) {
+    const VAddr page_end = at + TRACKER_BYTES_PER_PAGE;
+    for (const auto& copy : copies) {
+        const VAddr src = arena_addr + copy.srcOffset;
+        const VAddr begin = std::max(src, at);
+        const VAddr end = std::min<VAddr>(src + copy.size, page_end);
+        if (begin < end) {
+            memory->TryWriteBacking(std::bit_cast<u8*>(begin),
+                                    staged + copy.dstOffset + (begin - src), end - begin);
+        }
+    }
+}
 } // namespace
 
 static constexpr size_t GDS_BUFFER_SIZE = 64_KB;
@@ -198,7 +216,11 @@ bool BufferCache::DownloadOnSideQueue(VAddr page, u64 length) {
     const VAddr window_end = std::min(
         std::max(Common::AlignDown(page, Window) + Window, page + length),
         arena->cpu_addr + arena->size_bytes);
-    boost::container::small_vector<VAddr, 16> pages;
+    struct Candidate {
+        VAddr at;
+        u64 tick;
+    };
+    boost::container::small_vector<Candidate, 16> pages;
     u64 write_tick = 0;
     // bbport: without merging (BB_GPU_MERGE=0) a faulting page whose GPU work is submitted but
     // not done is waited for here, by its own tick, instead of the full read back waiting for
@@ -245,13 +267,13 @@ bool BufferCache::DownloadOnSideQueue(VAddr page, u64 length) {
                 }
                 continue;
             }
-            pages.push_back(at);
+            pages.push_back({at, tick});
             write_tick = std::max(write_tick, tick);
         }
     }
     boost::container::small_vector<vk::BufferCopy, 16> copies;
     u64 total = 0;
-    for (const VAddr at : pages) {
+    for (const auto& [at, tick] : pages) {
         gpu_modified_ranges.ForEachInRange(at, TRACKER_BYTES_PER_PAGE, [&](VAddr start, VAddr end) {
             if (!copies.empty() &&
                 copies.back().srcOffset + copies.back().size == start - arena->cpu_addr &&
@@ -273,7 +295,39 @@ bool BufferCache::DownloadOnSideQueue(VAddr page, u64 length) {
     if (total > SideQueue::StagingSize) {
         return false;
     }
-    if (total != 0) {
+    // bbport: the scan above is not the settle. A guest thread may have read back and settled
+    // a page meanwhile (ReadBackOnFaultThread) and the guest written it since; a neighbour may
+    // have turned CPU-modified. Each page is written back and stops being GPU data under its
+    // region's lock, and only while it is still GPU data with the tick scanned (a neighbour:
+    // not CPU-modified either), so no guest store is overwritten. The staging buffer stays
+    // ours (side.mutex) until then.
+    bool fault_settled = true;
+    const auto settle = [&](const u8* staged) {
+        for (const auto& [at, tick] : pages) {
+            const bool faulting = at >= page && at < page + length;
+            const auto settle_page = [&](RegionManager& manager) {
+                const u64 offset = at - manager.GetCpuAddr();
+                if (!manager.IsRegionModified<Type::GPU>(offset, TRACKER_BYTES_PER_PAGE)) {
+                    return; // read back by someone else meanwhile
+                }
+                if (manager.LatestGpuWriteTick(at, TRACKER_BYTES_PER_PAGE) != tick ||
+                    (!faulting &&
+                     manager.IsRegionModified<Type::CPU>(offset, TRACKER_BYTES_PER_PAGE))) {
+                    fault_settled &= !faulting;
+                    return;
+                }
+                if (staged) {
+                    WriteBackPage(memory, arena->cpu_addr, copies, staged, at);
+                }
+                gpu_modified_ranges.Subtract(at, TRACKER_BYTES_PER_PAGE);
+                manager.ChangeRegionState<Type::GPU, false>(at, TRACKER_BYTES_PER_PAGE);
+            };
+            memory_tracker->WithRegionLocked(at, TRACKER_BYTES_PER_PAGE, settle_page);
+        }
+    };
+    if (total == 0) {
+        settle(nullptr);
+    } else {
         std::scoped_lock lk{side.mutex};
         Vulkan::Check(side.device.resetCommandPool(*side.pool));
         Vulkan::Check(side.cmdbuf.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit}));
@@ -306,21 +360,15 @@ bool BufferCache::DownloadOnSideQueue(VAddr page, u64 length) {
         Vulkan::Check(side.device.waitForFences(*side.fence, true, UINT64_MAX));
         Vulkan::Check(side.device.resetFences(*side.fence));
         side.staging.Invalidate(0, total);
-        for (const auto& copy : copies) {
-            memory->TryWriteBacking(std::bit_cast<u8*>(arena->cpu_addr + copy.srcOffset),
-                                    side.staging.mapped_data.data() + copy.dstOffset, copy.size);
-        }
-    }
-    for (const VAddr at : pages) {
-        gpu_modified_ranges.Subtract(at, TRACKER_BYTES_PER_PAGE);
-        memory_tracker->UnmarkRegionAsGpuModified(at, TRACKER_BYTES_PER_PAGE);
+        settle(side.staging.mapped_data.data());
     }
     BbStats::gpu_side_download_ns.fetch_add(
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
                                                              start_time)
             .count(),
         std::memory_order_relaxed);
-    return true;
+    // A faulting page written by the GPU since the scan: the caller's other paths settle it.
+    return fault_settled;
 }
 
 bool BufferCache::ReadBackOnFaultThread(VAddr device_addr, u64 size) {
@@ -415,7 +463,46 @@ bool BufferCache::ReadBackOnFaultThread(VAddr device_addr, u64 size) {
     if (total > SideQueue::StagingSize) {
         return false;
     }
-    if (total != 0) {
+    // The pages whose GPU data is in guest memory now stop being GPU data, unless a write was
+    // marked on them meanwhile; the faulting range becomes the guest's (writable). The bytes go
+    // to guest memory in the same locked step, and only for pages still GPU data with the tick
+    // scanned and (neighbours) not CPU-modified: another thread faulting on the same window, or
+    // the GPU command thread's DownloadOnSideQueue, may have settled a page since the scan and
+    // the guest written it, and a late write-back would overwrite that store.
+    bool settled = true;
+    const auto settle = [&](const u8* staged) {
+        memory_tracker->WithRegionLocked(
+            window_start, window_end - window_start, [&](RegionManager& manager) {
+                for (const auto& candidate : pages) {
+                    const bool faulting = candidate.at >= page && candidate.at < page + length;
+                    const u64 offset = candidate.at - manager.GetCpuAddr();
+                    if (!manager.IsRegionModified<Type::GPU>(offset, TRACKER_BYTES_PER_PAGE)) {
+                        continue; // read back by someone else meanwhile
+                    }
+                    if (manager.LatestGpuWriteTick(candidate.at, TRACKER_BYTES_PER_PAGE) !=
+                        candidate.tick) {
+                        settled &= !faulting;
+                        continue;
+                    }
+                    if (!faulting &&
+                        manager.IsRegionModified<Type::CPU>(offset, TRACKER_BYTES_PER_PAGE)) {
+                        continue; // the guest writes this one now
+                    }
+                    if (staged) {
+                        WriteBackPage(memory, arena->cpu_addr, copies, staged, candidate.at);
+                    }
+                    gpu_modified_ranges.Subtract(candidate.at, TRACKER_BYTES_PER_PAGE);
+                    manager.ChangeRegionState<Type::GPU, false>(candidate.at,
+                                                               TRACKER_BYTES_PER_PAGE);
+                }
+                if (settled) {
+                    manager.ChangeRegionState<Type::CPU, true>(device_addr, size);
+                }
+            });
+    };
+    if (total == 0) {
+        settle(nullptr);
+    } else {
         auto& side = *side_queue;
         std::scoped_lock lk{side.mutex};
         Vulkan::Check(side.device.resetCommandPool(*side.pool));
@@ -451,34 +538,8 @@ bool BufferCache::ReadBackOnFaultThread(VAddr device_addr, u64 size) {
         Vulkan::Check(result);
         Vulkan::Check(side.device.resetFences(*side.fence));
         side.staging.Invalidate(0, total);
-        for (const auto& copy : copies) {
-            memory->TryWriteBacking(std::bit_cast<u8*>(arena->cpu_addr + copy.srcOffset),
-                                    side.staging.mapped_data.data() + copy.dstOffset, copy.size);
-        }
+        settle(side.staging.mapped_data.data());
     }
-    // The pages whose GPU data is in guest memory now stop being GPU data, unless a write was
-    // marked on them meanwhile; the faulting range becomes the guest's (writable).
-    bool settled = true;
-    memory_tracker->WithRegionLocked(
-        window_start, window_end - window_start, [&](RegionManager& manager) {
-            for (const auto& candidate : pages) {
-                const bool faulting = candidate.at >= page && candidate.at < page + length;
-                const u64 offset = candidate.at - manager.GetCpuAddr();
-                if (!manager.IsRegionModified<Type::GPU>(offset, TRACKER_BYTES_PER_PAGE)) {
-                    continue; // read back by someone else meanwhile
-                }
-                if (manager.LatestGpuWriteTick(candidate.at, TRACKER_BYTES_PER_PAGE) !=
-                    candidate.tick) {
-                    settled &= !faulting;
-                    continue;
-                }
-                gpu_modified_ranges.Subtract(candidate.at, TRACKER_BYTES_PER_PAGE);
-                manager.ChangeRegionState<Type::GPU, false>(candidate.at, TRACKER_BYTES_PER_PAGE);
-            }
-            if (settled) {
-                manager.ChangeRegionState<Type::CPU, true>(device_addr, size);
-            }
-        });
     if (!settled) {
         return false;
     }
