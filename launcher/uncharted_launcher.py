@@ -184,6 +184,12 @@ FIXES = {
         'Copies small GPU results back every frame (fixes black weapons and stuck brightness). '
         'Automatic: on in Uncharted 2 and 3.',
         {'on': {'BB_READBACK_SMALL_BUFFERS': '1'}, 'off': {'BB_READBACK_SMALL_BUFFERS': '0'}}),
+    'fix_small_gate': (
+        'Sinking characters fix',
+        'Stops characters sinking into the ground or bouncing in Uncharted 2 and 3. '
+        'Automatic: waits only for the GPU results the game rewrites. On: waits for every small result, '
+        'which fixes it for sure but costs speed (60 to 46 FPS in a heavy Uncharted 3 scene). Off: nothing waits.',
+        {'on': {'BB_READBACK_SMALL_GATE': '1'}, 'off': {'BB_READBACK_SMALL_GATE': '0'}}),
     'fix_vram': (
         'Small video memory mode',
         'Keeps 4-8 GB graphics cards inside their video memory. Automatic: on for cards up to 8 GB.',
