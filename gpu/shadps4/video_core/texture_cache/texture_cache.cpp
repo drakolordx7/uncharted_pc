@@ -292,9 +292,13 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         const auto new_image_id = slot_images.insert(instance, runtime, slot_image_views, new_info);
         RegisterImage(new_image_id);
 
+        // insert() may have grown slot_images and moved every image: `cache_image` would then
+        // point at freed storage, so look it up again.
+        auto& old_image = slot_images[cache_image_id];
+
         // Inherit image usage
         auto& new_image = slot_images[new_image_id];
-        new_image.usage = cache_image.usage;
+        new_image.usage = old_image.usage;
         new_image.flags &= ~ImageFlagBits::Dirty;
         // When creating a depth buffer through overlap resolution don't clear it on first use.
         new_image.info.meta_info.htile_clear_mask = 0;
@@ -304,16 +308,16 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         // light shadow array a layer at a time (512x512 x 48 above 1080p), so the cubes in layers
         // 12 and up kept a depth of 0 and shadowed everything (the hand torch lit a trapezoid).
         // (Mevlock 397eefb.)
-        const VAddr old_htile = cache_image.info.meta_info.htile_addr;
+        const VAddr old_htile = old_image.info.meta_info.htile_addr;
         if (old_htile && (!new_image.info.meta_info.htile_addr ||
                           new_image.info.meta_info.htile_addr == old_htile)) {
             new_image.info.meta_info.htile_addr = old_htile;
-            cache_image.info.meta_info.htile_addr = 0;
+            old_image.info.meta_info.htile_addr = 0;
             if (const auto it = surface_metas.find(old_htile); it != surface_metas.end()) {
                 it.value().owner = new_image_id;
             }
         }
-        runtime.CopyColorAndDepth(&cache_image, &new_image);
+        runtime.CopyColorAndDepth(&old_image, &new_image);
 
         // Free the cache image.
         FreeImage(cache_image_id);
@@ -849,10 +853,12 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
         }
         Image& stencil_image = slot_images[stencil_id];
         TouchImage(stencil_image);
-        stencil_image.AssociateDepth(image_id, image.image_uid);
+        // insert() above may have grown slot_images and moved every image, leaving `image`
+        // pointing at freed storage: look the depth image up again.
+        stencil_image.AssociateDepth(image_id, slot_images[image_id].image_uid);
     }
 
-    return image.FindView(desc.view_info, false);
+    return slot_images[image_id].FindView(desc.view_info, false);
 }
 
 namespace {

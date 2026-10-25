@@ -403,6 +403,15 @@ void PipelineCache::WarmUpThread() {
         } else {
             entry.gkey.Deserialize(ar);
             entry.gsdata.Deserialize(ar);
+            // Motion-vector pipelines are not preloaded: the shader meta is stored once per program,
+            // not per permutation, so the meta found for a motion pipeline's stages can be the plain
+            // permutation and the preload would build the 8-attachment motion key with plain
+            // shaders (the AMD driver refused some: "Failed to create graphics pipeline:
+            // ErrorUnknown" at start; the accepted ones drew without motion output). They are built
+            // at first use. Based on a fix by Joao Pedro Valadares (spacepepperoni/uncharted_Linux 7b366f7).
+            if (entry.gkey.motion_vectors) {
+                return;
+            }
         }
         entry.parsed = true;
     });
@@ -470,6 +479,20 @@ void PipelineCache::WarmUpThread() {
             db.Remove(Storage::BlobType::ShaderBinary,
                       Serialization::ShaderBinaryName(info.pgm_hash, stage.perm_idx));
             return;
+        }
+        // bbport: the stored binary is the guest's 1024-thread module; BB_CS_SPLIT_1024 applies
+        // to it like to a freshly compiled one (vk_shader_util.cpp).
+        if (info.hw_stage == Shader::HwStage::Compute) {
+            const u32 target = SplitWorkgroupTarget();
+            if (target != 0) {
+                std::vector<u32> split_spv = spv;
+                if (SplitWorkgroup(split_spv, target)) {
+                    spv = std::move(split_spv);
+                    stage.program->info.split_workgroup = target;
+                    std::printf("Compute shader %08x: 1024-thread group split into %u (cached)\n",
+                                u32(info.pgm_hash), target);
+                }
+            }
         }
         stage.module = CompileSPV(spv, device);
     });

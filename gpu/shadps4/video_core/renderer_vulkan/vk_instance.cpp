@@ -17,6 +17,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_vram.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
+#include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "bbport_hostmem.h"
 
 #include <vk_mem_alloc.h>
@@ -185,6 +186,12 @@ Instance::Instance(const Frontend::WindowSystemInfo& window_info, s32 physical_d
     format_properties = GetFormatProperties(physical_device);
     properties = physical_device.getProperties();
     memory_properties = physical_device.getMemoryProperties();
+    // bbport: GeForce GTX 10 series (Pascal, compute capability 6.x: GP100 0x15f0-0x15ff, GP10x
+    // 0x1b00-0x1d7f; Volta starts at 0x1d81) resets the display driver on the 1024-thread x 64
+    // register compute group of Uncharted (#400, #600): those cards run it as 2 x 512.
+    SetAutomaticWorkgroupSplit(properties.vendorID == 0x10de &&
+                               ((properties.deviceID >= 0x15f0 && properties.deviceID <= 0x15ff) ||
+                                (properties.deviceID >= 0x1b00 && properties.deviceID <= 0x1d7f)));
     CollectDeviceParameters();
     ASSERT_MSG(properties.apiVersion >= TargetVulkanApiVersion,
                "Vulkan {}.{} is required, but only {}.{} is supported by device!",
@@ -494,6 +501,7 @@ bool Instance::CreateDevice() {
     vk12_features = feature_chain.get<vk::PhysicalDeviceVulkan12Features>();
     vk13_features = feature_chain.get<vk::PhysicalDeviceVulkan13Features>();
     // bbport: DLSS (optional bridge DLL) needs its own device extensions on NVIDIA GPUs.
+    const size_t renderer_extension_count = enabled_extensions.size();
     std::vector<const char*> dlss_extensions;
     if (Dlss* dlss = Dlss::Get()) {
         dlss->AppendDeviceExtensions(*instance, physical_device, dlss_extensions);
@@ -746,6 +754,23 @@ bool Instance::CreateDevice() {
                                   &device_chain.get<vk::PhysicalDeviceFeatures2>());
     }
     auto [device_result, dev] = physical_device.createDeviceUnique(device_chain.get());
+    if (device_result != vk::Result::eSuccess && enabled_extensions.size() > renderer_extension_count) {
+        // bbport: NGX can list its extensions while a driver part they need is missing or out
+        // of date. DLSS is optional: retry without its extensions, with DLSS off for this run.
+        // From parsifal295 (PR #58).
+        LOG_WARNING(Render_Vulkan, "Device creation with the DLSS extensions failed: {}; retrying "
+                                   "without DLSS", vk::to_string(device_result));
+        if (Dlss* dlss = Dlss::Get()) {
+            dlss->Disable(fmt::format("the Vulkan device failed with its extensions: {} (update "
+                                      "or reinstall the NVIDIA driver)",
+                                      vk::to_string(device_result)));
+        }
+        enabled_extensions.resize(renderer_extension_count);
+        device_chain.get().enabledExtensionCount = static_cast<u32>(enabled_extensions.size());
+        auto retry = physical_device.createDeviceUnique(device_chain.get());
+        device_result = retry.result;
+        dev = std::move(retry.value);
+    }
     if (device_result != vk::Result::eSuccess) {
         LOG_CRITICAL(Render_Vulkan, "Failed to create device: {}", vk::to_string(device_result));
         return false;
