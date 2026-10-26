@@ -195,7 +195,7 @@ FIXES = {
     'fix_small_gate': (
         'Sinking characters fix',
         'Stops characters sinking into the ground or bouncing in Uncharted 2 and 3. '
-        'On is the full fix and costs FPS in heavy scenes. Automatic: waits only for the GPU results the game rewrites.',
+        'On is the full fix and costs FPS in heavy scenes. Automatic: on in Uncharted 3; in Uncharted 2 it waits only for the GPU results the game rewrites.',
         {'on': {'BB_READBACK_SMALL_GATE': '1'}, 'off': {'BB_READBACK_SMALL_GATE': '0'}}),
     'fix_vram': (
         'Small video memory mode',

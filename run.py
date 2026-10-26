@@ -268,6 +268,7 @@ def main():
     player_prio = env.get('BB_THREAD_PRIO')
     player_tiny = env.get('BB_TINY_READBACK')
     player_small = env.get('BB_READBACK_SMALL_BUFFERS')
+    player_gate = env.get('BB_READBACK_SMALL_GATE')
     player_copy = env.get('BB_SCALAR_COPY64_SYNC')
     all_cheats = env.setdefault('BB_CHEATS_ALL', env.get('BB_CHEATS', ''))
     while True:
@@ -290,6 +291,10 @@ def main():
         # guest memory: without it guns draw black and untextured (and, reported for U3, characters
         # sink into the ground: #601, #590). On for U2 and U3: the bytes land on the landing thread
         # once the GPU is done with them, so nothing waits (U3 Cartagena square: 60 FPS with and without).
+        # Sinking characters: in U3 the selective gate (Automatic) still let characters sink for players
+        # (fork #4, #622, #692); the full gate fixes it there. U2 keeps the selective gate.
+        if player_gate is None and exe == EXECUTABLES['u3']:
+            env['BB_READBACK_SMALL_GATE'] = '1'
         if player_small is None:
             env['BB_READBACK_SMALL_BUFFERS'] = '1' if exe in (EXECUTABLES['u2'], EXECUTABLES['u3']) else '0'
         # The mesh raycaster copies land in guest memory too (iSubMesh after checkpoints; U1 crashes
