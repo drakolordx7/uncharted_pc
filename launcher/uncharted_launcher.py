@@ -235,7 +235,7 @@ APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_
                 'mouse_look': True, 'mouse_sensitivity': '1.0', 'mouse_invert_y': False,
                 'pad_invert_y': False, 'art_banner': '', 'art_u1': '', 'art_u2': '', 'art_u3': '', 'steam_art': '', 'art_crops': {},
                 'shortcut_name': 'Uncharted: The Nathan Drake Collection', 'shortcut_icon': '', 'trophy_game': 'u1',
-                'auto_backup': True, 'backup_keep': '10', 'save_slots': {}, 'pad_vibration': True, 'pad_vibration_strength': '100', 'button_prompts': 'auto', 'aim_assist': 'on', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True,
+                'auto_backup': True, 'backup_keep': '10', 'save_slots': {}, 'pad_vibration': True, 'pad_vibration_strength': '100', 'walk_speed': '45', 'button_prompts': 'auto', 'aim_assist': 'on', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True,
                 **{key: 'auto' for key in FIXES},
                 **{f'{game}_infinite_{cheat}': False for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')}}
 
@@ -476,6 +476,14 @@ def vibration_strength(s):
         return 100
 
 
+def walk_speed(s):
+    """How far the walk key pushes the left stick, percent (the runtime clamps to 10..100 too)."""
+    try:
+        return min(100, max(10, int(float(s.get('walk_speed', 45)))))
+    except (TypeError, ValueError):
+        return 45
+
+
 def controller_probe_path():
     """The packaged or development loader, which also provides the lightweight controller probe."""
     configured = os.environ.get('BB_PROBE')
@@ -568,7 +576,8 @@ def write_input_ini(s):
              f"mouse_invert_y={1 if s.get('mouse_invert_y') else 0}",
              f"pad_invert_y={1 if s.get('pad_invert_y') else 0}",
              f"pad_vibration={1 if s.get('pad_vibration', True) else 0}",
-             f"pad_vibration_strength={vibration_strength(s)}"]
+             f"pad_vibration_strength={vibration_strength(s)}",
+             f"walk_speed={walk_speed(s)}"]
     lines += [f'key.{action}={keys.get(action, "")}' for action in DEFAULT_KEYS]
     lines += [f'pad.{action}={pad.get(action, "none")}' for action in DEFAULT_PAD]
     path = input_ini_path()
@@ -1681,6 +1690,10 @@ class Launcher:
         holder = self.tk.Frame(card, bg=CARD)
         holder.grid(row=self.next_row(card), column=0, columnspan=2, sticky='w', pady=(12, 0))
         self.pill(holder, _('Reset keys'), self.reset_keys).pack(side='left')
+        self.row(f, _('Walk speed'),
+                 Slider(self.tk, self.target(f), self.var('walk_speed'), 10, 100, 5,
+                        COLORS, self.px, self.font_ui_md, fmt='{:.0f}', width=300, suffix='%'),
+                 _('How far the walk key pushes the stick. Default is 45%.'))
 
         self.section(f, _('Controller'))
         self.pad_vars = {}
