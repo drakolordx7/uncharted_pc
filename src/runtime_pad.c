@@ -8,17 +8,18 @@
  *       up down left right, ls_up ls_down ls_left ls_right, rs_up rs_down rs_left rs_right,
  *       rotate_ccw rotate_cw (held: the left stick circles counter-clockwise / clockwise, for
  *       the valves and wheels that ask for the stick turned in circles), overlay (opens and
- *       closes the in-game menu, Insert by default; a key or Mouse Middle / 4 / 5).
+ *       closes the in-game menu, Insert by default; a key or Mouse Middle / 4 / 5), walk (held:
+ *       the movement keys push the left stick only part of the way, so the character walks).
  *   pad.<action>=<controller button>   SDL names (a b x y leftshoulder rightshoulder
  *       lefttrigger righttrigger leftstick rightstick back start dpup dpdown dpleft dpright
  *       touchpad misc1 paddle1..paddle4) or "none", for the button actions above.
  *   mouse_look=1  mouse_sensitivity=1.0  mouse_invert_y=0  pad_invert_y=0
- *   pad_vibration=1  pad_vibration_strength=100
+ *   pad_vibration=1  pad_vibration_strength=100  walk_speed=45 (walk key deflection, percent)
  *
  * Defaults (no file): WASD move, mouse look, left button R2 (fire), right button L2 (aim),
  * Space Cross, C Circle, F Square, E Triangle, Q L1, G R1, Left Shift L3, V R3, Escape/Enter
  * Options, Tab touchpad, arrow keys and the wheel the d-pad, IJKL the right stick, R and T
- * turn the left stick round counter-clockwise and clockwise. */
+ * turn the left stick round counter-clockwise and clockwise, Left Ctrl walks. */
 #define _GNU_SOURCE
 #include "runtime.h"
 #include "gpu/bbgpu.h"
@@ -117,7 +118,7 @@ enum { BIND_KEY=1, BIND_MOUSE, BIND_WHEEL, BIND_LAYOUT };
 typedef struct { uint8_t kind; int32_t code; } Bind;
 typedef struct { const char *name; uint32_t ps; const char *keys; const char *pad; } Action;
 enum { A_LS_UP=16, A_LS_DOWN, A_LS_LEFT, A_LS_RIGHT, A_RS_UP, A_RS_DOWN, A_RS_LEFT, A_RS_RIGHT,
-       A_ROT_CCW, A_ROT_CW, A_OVERLAY, ACTIONS };
+       A_ROT_CCW, A_ROT_CW, A_OVERLAY, A_WALK, ACTIONS };
 static const Action actions[ACTIONS]={
     {"cross",BTN_CROSS,"Space","a"}, {"circle",BTN_CIRCLE,"C","b"}, {"square",BTN_SQUARE,"F","x"},
     {"triangle",BTN_TRIANGLE,"E","y"}, {"l1",BTN_L1,"Q","leftshoulder"}, {"r1",BTN_R1,"G","rightshoulder"},
@@ -129,13 +130,14 @@ static const Action actions[ACTIONS]={
     {"ls_up",0,"W",NULL}, {"ls_down",0,"S",NULL}, {"ls_left",0,"A",NULL}, {"ls_right",0,"D",NULL},
     {"rs_up",0,"I",NULL}, {"rs_down",0,"K",NULL}, {"rs_left",0,"J",NULL}, {"rs_right",0,"L",NULL},
     {"rotate_ccw",0,"R",NULL}, {"rotate_cw",0,"T",NULL}, {"overlay",0,"Insert",NULL},
+    {"walk",0,"Left Ctrl",NULL},
 };
 #define PAD_TRIGGER_LEFT (-2)
 #define PAD_TRIGGER_RIGHT (-3)
 static struct {
     Bind keys[ACTIONS][2];
     int pad[16];               /* SDL_GamepadButton, PAD_TRIGGER_*, or -1 */
-    int mouse_look, mouse_invert_y, pad_invert_y, pad_vibration, pad_vibration_strength;
+    int mouse_look, mouse_invert_y, pad_invert_y, pad_vibration, pad_vibration_strength, walk_speed;
     float mouse_sensitivity;
 } input;
 
@@ -201,7 +203,7 @@ static void load_input(void) {
         if (a<16) input.pad[a]=parse_pad(actions[a].pad);
     }
     input.mouse_look=1; input.mouse_sensitivity=1.0f;
-    input.pad_vibration=1; input.pad_vibration_strength=100;
+    input.pad_vibration=1; input.pad_vibration_strength=100; input.walk_speed=45;
     const char *path=getenv("BB_INPUT_CONFIG");
     FILE *f=path && *path ? fopen(path,"r") : NULL;
     if (f) {
@@ -218,6 +220,10 @@ static void load_input(void) {
             else if (!strcmp(key,"pad_invert_y")) input.pad_invert_y=atoi(value)!=0;
             else if (!strcmp(key,"pad_vibration")) input.pad_vibration=atoi(value)!=0;
             else if (!strcmp(key,"pad_vibration_strength")) input.pad_vibration_strength=atoi(value);
+            else if (!strcmp(key,"walk_speed")) {
+                const int v=atoi(value);
+                input.walk_speed=v<10 ? 10 : v>100 ? 100 : v;
+            }
             else for (int a=0;a<ACTIONS;++a) {
                 if (!strncmp(key,"key.",4) && !strcmp(key+4,actions[a].name)) set_keys(a,value);
                 else if (a<16 && !strncmp(key,"pad.",4) && !strcmp(key+4,actions[a].name)) input.pad[a]=parse_pad(value);
@@ -1555,8 +1561,15 @@ static void sample_host(PadData *d) {
     if ((d->buttons & BTN_TOUCHPAD) && !d->touch_count) touch_click(d,0);
     const int lx=action_down(A_LS_RIGHT,k,mouse,now)-action_down(A_LS_LEFT,k,mouse,now);
     const int ly=action_down(A_LS_DOWN,k,mouse,now)-action_down(A_LS_UP,k,mouse,now);
-    if (lx) d->left_x=(uint8_t)(lx<0 ? 0 : 255);
-    if (ly) d->left_y=(uint8_t)(ly<0 ? 0 : 255);
+    if ((lx || ly) && action_down(A_WALK,k,mouse,now)) {
+        /* Walk: the key direction at walk_speed percent of full deflection (diagonals too). */
+        const float scale=127.5f*(float)input.walk_speed/100.0f/((lx && ly) ? 1.41421356f : 1.0f);
+        if (lx) d->left_x=(uint8_t)(int)(127.5f+(float)lx*scale+0.5f);
+        if (ly) d->left_y=(uint8_t)(int)(127.5f+(float)ly*scale+0.5f);
+    } else {
+        if (lx) d->left_x=(uint8_t)(lx<0 ? 0 : 255);
+        if (ly) d->left_y=(uint8_t)(ly<0 ? 0 : 255);
+    }
     host_rotate=action_down(A_ROT_CW,k,mouse,now)-action_down(A_ROT_CCW,k,mouse,now);
     const int rx=action_down(A_RS_RIGHT,k,mouse,now)-action_down(A_RS_LEFT,k,mouse,now);
     const int ry=action_down(A_RS_DOWN,k,mouse,now)-action_down(A_RS_UP,k,mouse,now);

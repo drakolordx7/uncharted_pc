@@ -128,10 +128,14 @@ STICK_ACTIONS = [
     ('rs_left', 'Look left', 'J'), ('rs_right', 'Look right', 'L'),
     ('rotate_ccw', 'Turn valve / wheel counter-clockwise (hold)', 'R'),
     ('rotate_cw', 'Turn valve / wheel clockwise (hold)', 'T'),
+    ('walk', 'Walk (hold with the movement keys)', 'Left Ctrl'),
 ]
 # Hold one of the last two and the left stick circles: the games' valves, wheels and cranks ask for
 # the stick turned in circles, which the eight movement-key directions cannot do (#609).
 ROTATE_ACTIONS = ('rotate_ccw', 'rotate_cw')
+# Keys added after players already had their own bindings: the default is left out where the player
+# already uses that key for something else.
+LATE_ACTIONS = ROTATE_ACTIONS + ('walk',)
 # Not a game action: opens and closes the in-game menu (the runtime reads it from input.ini, key.overlay).
 MENU_ACTIONS = [('overlay', 'Open in-game menu', 'Insert')]
 # The mouse buttons and the wheel the in-game menu cannot be opened with (the left and right buttons
@@ -553,8 +557,8 @@ def write_input_ini(s):
     """input.ini: the keyboard, mouse and controller bindings the game reads at start."""
     keys = {**DEFAULT_KEYS, **(s.get('key_bindings') or {})}
     saved = s.get('key_bindings') or {}
-    taken = {k.strip() for a, v in keys.items() if a not in ROTATE_ACTIONS or a in saved for k in v.split('|')}
-    for action in ROTATE_ACTIONS:  # a default key the player gave to something else stays theirs
+    taken = {k.strip() for a, v in keys.items() if a not in LATE_ACTIONS or a in saved for k in v.split('|')}
+    for action in LATE_ACTIONS:  # a default key the player gave to something else stays theirs
         if action not in saved and DEFAULT_KEYS[action] in taken:
             keys[action] = ''
     pad = {**DEFAULT_PAD, **(s.get('pad_bindings') or {})}
