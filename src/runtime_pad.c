@@ -2822,6 +2822,17 @@ static const unsigned char u2_compare_jz_patch[]={0xe9,0x11,0x06,0x00,0x00,0x90}
  * goes on with the next prompt (0x6284e3), as if the item were unknown. No callback: a plain 7-byte patch. */
 static const unsigned char u3_compare_cmp_code[]={0x41,0x81,0xf9,0x80,0x00,0x00,0x00};   /* 0x627d65: cmp r9d,0x80 */
 static const unsigned char u3_compare_cmp_patch[]={0x41,0x81,0xf9,0xff,0xff,0xff,0xff};  /* cmp r9d,-1 */
+/* U3: like U1 (u1_bar_flags), the prompt bar tests bit 0 of the flags in r9d for "SÉLECTIONNER" (0x6277e8: mov edx,r9d; and edx,1). The hook clears that bit in
+ * the saved r9 while a statistics line with its value on the right is selected (u3_sel_value, noted by u3_menu_buttons). */
+static volatile uint64_t u3_hide_select_us;
+static void __attribute__((ms_abi)) u3_bar_flags(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t r14) {
+    (void)unused0; (void)unused1; (void)image; (void)r14;
+    if (now_us()-u3_hide_select_us>=150000) return;
+    uint64_t r9=saved_register(6);
+    r9&=~(uint64_t)1;
+    safe_write(guest_callback_rsp-8u*6u,&r9,8);
+}
+static const unsigned char u3_bar_flags_code[]={0x44,0x89,0xca,0x83,0xe2,0x01};   /* mov edx, r9d; and edx, 1 */
 static volatile int u3_sel_value;   /* the selected U3 row has its value on the right: the cross is held back (the comparison with friends does not work offline) */
 static volatile uint64_t u2_keys_tables[8];   /* the text tables seen asked for it (a table asks its parent first: all of them are patched) */
 static void __attribute__((ms_abi)) u2_text_lookup_probe(uint64_t table, uint64_t id, uint64_t image, uint64_t r14) {
@@ -3732,6 +3743,7 @@ static const RuntimeGuestCallback guest_callbacks[]={
     {"U3 menu text probe (collection)",0x63d6f0,u2_text_probe_code,sizeof(u2_text_probe_code),8,u2_text_probe,NULL},
     {"U3 slider draw (collection)",0x5e2190,u2_bind_code,sizeof(u2_bind_code),8,u3_widget_hook,NULL},
     {"U3 prompt bar: no compare-with-friends prompt (collection)",0x627d65,u3_compare_cmp_code,sizeof(u3_compare_cmp_code),sizeof(u3_compare_cmp_patch),NULL,u3_compare_cmp_patch},
+    {"U3 prompt bar flags (collection)",0x6277e8,u3_bar_flags_code,sizeof(u3_bar_flags_code),6,u3_bar_flags,NULL},
     {"U2 menu builder probe (collection)",0x5c53a0,u2_menu_builder_code,sizeof(u2_menu_builder_code),6,u2_menu_builder_probe,NULL},
     {"U2 text lookup probe (collection)",0xcddc00,u2_text_lookup_code,sizeof(u2_text_lookup_code),6,u2_text_lookup_probe,NULL},
     {"U1 controls menu: keyboard row",0x145881,u1_add_keys_row_code,sizeof(u1_add_keys_row_code),5,u1_add_keys_row,NULL},
@@ -5311,6 +5323,7 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
             if (fabsf(r->y-sel.y)<2.0f && r->x>=sel.x+sel.w-1.0f) { sel_value=1; break; }
         }
     u3_sel_value=sel_value;
+    if (sel_value) u3_hide_select_us=now_us();
     pthread_mutex_unlock(&menu_text_lock);
     {   /* once, when the cursor reaches a rail or leaves it: to check that U3 draws one where U2 does */
         static int last_slid;
