@@ -126,8 +126,8 @@ STICK_ACTIONS = [
     ('ls_left', 'Move left', 'A'), ('ls_right', 'Move right', 'D'),
     ('rs_up', 'Look up', 'I'), ('rs_down', 'Look down', 'K'),
     ('rs_left', 'Look left', 'J'), ('rs_right', 'Look right', 'L'),
-    ('rotate_ccw', 'Turn valve / wheel counter-clockwise (hold)', 'R'),
-    ('rotate_cw', 'Turn valve / wheel clockwise (hold)', 'T'),
+    ('rotate_ccw', 'Turn valve / wheel (hold; A and D work too)', 'R'),
+    ('rotate_cw', 'Turn valve / wheel, second key (hold)', 'T'),
     ('walk', 'Walk (hold with the movement keys)', 'Left Ctrl'),
 ]
 # Hold one of the last two and the left stick circles: the games' valves, wheels and cranks ask for
