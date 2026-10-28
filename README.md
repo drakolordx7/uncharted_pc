@@ -21,7 +21,7 @@ No game files are included; you need your own dump of the collection (CUSA02343,
 
 Settings, saves and logs are stored in `user\`. To update, use the launcher's update prompt or unzip a new build over the old one.
 
-Controls are remapped on the Controls page. For prompts that ask you to rotate the left stick, hold R (or T for the other direction); the prompt on screen shows that key. Fixes that cost performance are on the Fixes page; Automatic enables each one only where it is expected to help.
+Controls are remapped on the Controls page. At a valve or wheel, hold A or D (R and T also work) and it turns the way it needs to; the prompt on screen shows the keys. Fixes that cost performance are on the Fixes page; Automatic enables each one only where it is expected to help.
 
 Saves are backed up on the Saves page, and automatically before each launch (the last 10 are kept). Its Edit button unlocks all chapters, Crushing and Brutal, and Uncharted 1's rewards; close the game first. Every edit makes a backup first.
 

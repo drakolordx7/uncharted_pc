@@ -940,6 +940,9 @@ void ReplaceButtonPrompts(Vulkan::Runtime& runtime, Image& image) {
     case vk::Format::eBc1RgbSrgbBlock:
         format = ButtonPrompts::Format::Bc1;
         break;
+    case vk::Format::eBc4UnormBlock:
+        format = ButtonPrompts::Format::Bc4;
+        break;
     default:
         return;
     }
@@ -950,7 +953,8 @@ void ReplaceButtonPrompts(Vulkan::Runtime& runtime, Image& image) {
     }
     const u8* guest = std::bit_cast<const u8*>(info.guest_address) + mip.offset;
     const auto* patches = ButtonPrompts::Find(XXH3_64bits(guest, mip.size), info.size.width,
-                                              info.size.height, info.resources.levels, format);
+                                              info.size.height, info.resources.levels, format,
+                                              guest, mip.size);
     if (!patches) {
         return;
     }

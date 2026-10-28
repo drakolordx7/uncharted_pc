@@ -38,7 +38,10 @@ back after PlayStation controller input. It also makes the bindings follow the k
 | `94d741f6b51815ee` | ○ tapping puck, 512x512 BC1 (sRGB) | U3 | image only |
 | `93b46ba81469882c` | ○ hold puck, 512x512 BC1 (sRGB) | U3 | image only |
 | `705083db743dd2f9` | weapon d-pad, 256x256 BC1 | U2 | image only |
-| `349208a673329cce`, `7515a2f4f6a1022d` | stick prompt frames (ring with arrows, stick cap showing its "L"), 256x512 BC1 | U1 | yes |
+| `62ce1cf45bcd3fa6`, `7515a2f4f6a1022d`, `349208a673329cce`, `8d9e67192111aafb` | stick prompt, counter-clockwise, frames 1-4, 256x512 BC1 | U1, U2 | frames 2, 3 |
+| `071de85cc9f9b927`, `a88cacd63b4d3120`, `1b6fd491c8e2509d`, `fd2317b11bf49f10` | its masks, frames 1-4, 256x512 BC4 | U1, U2 | no |
+| `c40e867f01db15da`, `520ae52d155398d0`, `c79c5d399daa5371`, `de307a2c8adf213f` | stick prompt, clockwise, frames 1-4, 256x512 BC1 | U1 | no |
+| `fa2b05a934e43c38`, `6517c5ecd522ad7f`, `c4c6e4617bc4ed1d`, `dd5680fbf43710c7` | its masks, frames 1-4, 256x512 BC4 | U1 | no |
 
 The icon sheet has the same layout in all three games (`ps4_sheet` in `button_prompts.cpp`); it
 holds the face buttons, shoulder buttons, sticks, d-pad variants, OPTIONS and the touchpad, which
@@ -46,19 +49,24 @@ menus and hints cut out. SHARE has no key and stays. Masks (BC4), glows, chevron
 are not buttons and are left alone.
 
 The stick prompt of valves and wheels ("turn the left stick in circles") is a ring with arrows over a
-stick cap that tips around in its socket, one picture per frame. In the frames where the cap shows its
-"L", the "L" and the cap face around it are redrawn with the key bound to `rotate_ccw` (R) or
-`rotate_cw` (T); the rest of the game's picture stays, and Xbox controllers keep the "L". The frames
-with the cap turned away have no "L" and are not touched. `StickFrame` in `button_prompts.cpp` holds
-where the "L" sits in each frame, how it is tilted, and the cap face colours without it (measured on the
-game's pictures).
+stick cap that tips around in its socket: four frames (`Rotate-Analog-FRAME1..4`, counter-clockwise)
+or their mirror images (`Rotate-Reverse-FRAME1..4`, clockwise), each a BC1 colour picture and a BC4
+mask, 256x512, upside down and 1D-tiled. With the keyboard every frame becomes the same still picture:
+the game's ring with its arrows, and below it, in place of the stick and socket, two keys side by side
+for `ls_left` and `ls_right` (A and D; a mouse for a mouse button). `BuildStick` in `button_prompts.cpp`
+takes the ring from the uploaded frame (the same in all four above the stick), redraws the bottom of
+the ring's glow, which the stick's glow touches in frames 2 and 3, and fills in the keys in colour and
+mask, for every mip level. `stick_keys` names the two actions. Xbox controllers keep the game's frames.
+The colour frames are also in Uncharted 2's `hud.pak` with the same hashes; the clockwise set and all
+of U1's full-size frames are in `particle.pak` or the texture stream (`texturedict1/chunk-1-tstrm.pak`).
+Drake's Deception has its own encodings (BC1 sRGB, masks in BC1, frame 1 128x256) and is not covered.
 
 "Game files only": hashed from the game's `hud.pak` (U1 keeps the same pictures in `particle.pak`), all
 of `art/general/hud/buttons`, but not yet seen on screen. The shoulder prompts are drawn as keys in the
 shape of the game's L1/R1 and L2/R2 pictures (`Bumper`, `LeftTrigger`, `RightTrigger`).
 
-Not collected yet: the stick prompt in Among Thieves and Drake's Deception (if they have one), and
-pictures only some screens use. Adding one is one table row (below).
+Not collected yet: the stick prompt in Drake's Deception, the right-stick variants
+(`Rotate-AnalogRight`, `Rotate-ReverseRight`), and pictures only some screens use. Adding one is one table row (below).
 
 ## Switching
 

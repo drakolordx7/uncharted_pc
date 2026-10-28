@@ -1232,7 +1232,34 @@ static void __attribute__((ms_abi)) cue_table_pretouch(uint64_t table, uint64_t 
         __asm__ volatile("lock orb $0, (%0)" : : "r"(at) : "memory","cc");
     }
 }
+/* Wheels and valves (U1). While a wheel waits to be turned, its script asks the native
+ * pad-get-gesture-interval every frame for one of the circle gestures: the left stick clockwise
+ * (hash 0xb50c63fd, the facility generator in "Unwelcome Guests") or counter-clockwise (0x47bb5537,
+ * the submarine hatches). The hook at the native's start notes which one; while it was asked in the
+ * last 0.3 s, the movement keys left and right and the rotate keys turn the left stick in circles
+ * that way (rotate_stick), so A or D turns any wheel. Arguments: rdi the count, rsi the array (pad,
+ * then the gesture name hash at +8). */
+static volatile int wheel_dir;            /* -1 counter-clockwise, 1 clockwise */
+static volatile uint64_t wheel_asked_us;
+static void __attribute__((ms_abi)) u1_gesture_query(uint64_t argc, uint64_t argv, uint64_t image, uint64_t r14, const RuntimeGuestRegs *regs) {
+    (void)image; (void)r14; (void)regs;
+    if (argc<2 || !argv) return;
+    const uint32_t hash=*(const uint32_t *)(uintptr_t)(argv+8);
+    const int dir=hash==0xb50c63fdu ? 1 : hash==0x47bb5537u ? -1 : 0;
+    if (!dir) return;
+    const uint64_t now=now_us();
+    if (wheel_dir!=dir || now-wheel_asked_us>1000000)
+        printf("Pad: a wheel waits for the left stick turned %s\n",dir>0 ? "clockwise" : "counter-clockwise");
+    wheel_dir=dir;
+    wheel_asked_us=now;
+}
 static const RuntimeGuestCallback guest_callbacks[]={
+    /* U1 script native pad-get-gesture-interval (1.00 at 0x2f3130, 1.02 at 0x2f37c0) */
+    {"U1 wheel gesture query",
+      "55 48 89 e5 41 57 41 56 41 54 53 48 83 ec 10 83 ff 02 0f 8c ?? ?? ?? ?? 48 63 06 41 be 01 00 "
+      "00 00 48 83 f8 04 77 0b 48 8d 0d ?? ?? ?? ?? 44 8b 34 81 44 8b 66 08 49 63 c6 48 69 d8 78 01 "
+      "00 00",
+      0x0, 6, u1_gesture_query, NULL},
     /* U1 follow camera, build 100 */
     {"U1 follow camera (mouse)",
       "55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec 28 01 00 00 "
@@ -1460,6 +1487,7 @@ static int prompts_pad_device(SDL_Gamepad *g) {
  * stick points (the movement keys held, or up). `rotate_dir`: -1 counter-clockwise, 1 clockwise. */
 #define ROTATE_TURNS_PER_SECOND 1.25f
 static int host_rotate;               /* the rotate keys held right now (set in sample_host) */
+static int host_sideways;             /* the movement keys left or right held (set in sample_host) */
 static float rotate_angle;            /* radians clockwise from up */
 static uint64_t rotate_last_us;
 static void rotate_stick(PadData *d, int rotate_dir, uint64_t now) {
@@ -1481,7 +1509,7 @@ static void rotate_stick(PadData *d, int rotate_dir, uint64_t now) {
 }
 
 static void sample_host(PadData *d) {
-    host_rotate=0;
+    host_rotate=host_sideways=0;
     memset(d,0,sizeof(*d));
     d->left_x=d->left_y=d->right_x=d->right_y=128;
     d->orientation[3]=1.0f;
@@ -1571,6 +1599,7 @@ static void sample_host(PadData *d) {
         if (ly) d->left_y=(uint8_t)(ly<0 ? 0 : 255);
     }
     host_rotate=action_down(A_ROT_CW,k,mouse,now)-action_down(A_ROT_CCW,k,mouse,now);
+    host_sideways=lx!=0;
     const int rx=action_down(A_RS_RIGHT,k,mouse,now)-action_down(A_RS_LEFT,k,mouse,now);
     const int ry=action_down(A_RS_DOWN,k,mouse,now)-action_down(A_RS_UP,k,mouse,now);
     if (rx) d->right_x=(uint8_t)(rx<0 ? 0 : 255);
@@ -1807,7 +1836,15 @@ static void sample(PadData *d) {
     if (injected.buttons & BTN_R2) d->r2=255;
     uint8_t *axes[4]={&d->left_x,&d->left_y,&d->right_x,&d->right_y};
     for (int i=0;i<4;++i) if (injected.stick[i]>=0) *axes[i]=(uint8_t)injected.stick[i];
-    rotate_stick(d,injected.rotate ? injected.rotate : host_rotate,now_us());
+    {
+        int dir=injected.rotate ? injected.rotate : host_rotate;
+        const uint64_t at=now_us();
+        /* At a wheel: left / right (keys, or the pad-file lx= at an end) and the rotate keys turn
+         * the stick the way the wheel wants (u1_gesture_query). */
+        if (wheel_asked_us && at-wheel_asked_us<300000 &&
+            (dir || host_sideways || injected.stick[0]==0 || injected.stick[0]==255)) dir=wheel_dir;
+        rotate_stick(d,dir,at);
+    }
     /* Builds without a joypad callback: the right stick held a little while the mouse turns the follow
      * camera's direction (follow_push, see follow_camera), unless the stick is in use */
     const uint64_t now=now_us();

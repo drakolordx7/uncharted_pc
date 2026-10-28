@@ -8,15 +8,16 @@
 
 #pragma once
 
+#include <cstddef>
 #include <vector>
 
 #include "common/types.h"
 
 namespace VideoCore::ButtonPrompts {
 
-enum class Format { Rgba8, Bc1 };
+enum class Format { Rgba8, Bc1, Bc4 };
 
-/// New contents for a rectangle of one mip level: RGBA8 pixels or BC1 blocks.
+/// New contents for a rectangle of one mip level: RGBA8 pixels or BC1 / BC4 blocks.
 struct Patch {
     u32 mip, x, y, width, height;
     std::vector<u8> data;
@@ -39,6 +40,8 @@ u32 Switches();
 
 /// The patches that draw the picture whose mip 0 guest data hashes to `hash` in the style shown
 /// now: empty when that is the game's own picture, null for images that are not known pictures.
-const std::vector<Patch>* Find(u64 hash, u32 width, u32 height, u32 levels, Format format);
+/// `guest` is mip 0's guest data (the stick prompt is built from it).
+const std::vector<Patch>* Find(u64 hash, u32 width, u32 height, u32 levels, Format format,
+                               const u8* guest = nullptr, size_t guest_size = 0);
 
 } // namespace VideoCore::ButtonPrompts
