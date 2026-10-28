@@ -3590,6 +3590,11 @@ static int u2_slider_widget(float cy, uint64_t now, uint64_t *ds, int *lo, int *
     pthread_mutex_unlock(&menu_text_lock);
     return best>=0;
 }
+/* U3 menu rows (0x5dca50, found 2026-10-28 from the return addresses of the text draw): each row is a button of its own, no list and no data source; the selected one has the
+ * byte widget+8 at 1 (the others 0). The hover sets that flag at once on the row under the cursor (and clears it on the others of the same column) instead of stepping the
+ * d-pad row by row. Written by u3_menu_buttons, applied by the hook of each row for 150 ms. */
+static volatile float u3_jf_x, u3_jf_y, u3_jf_w;
+static volatile uint64_t u3_jf_us;
 /* U3 slider draw (0x5e2190, found by disassembly 2026-10-28; (widget, ?, draw context), runs every frame: percent = (value - min) * 100 / (max - min)). Data source at
  * widget+0x18 as in U2, but its virtual slots moved: +0 get, +8 set(value), +0x38 minimum, +0x40 maximum. The hook registers the widget like U2's and carries a pending set(value). */
 static void __attribute__((ms_abi)) u3_widget_hook(uint64_t self, uint64_t frame, uint64_t image, uint64_t r14) {
@@ -3611,6 +3616,14 @@ static void __attribute__((ms_abi)) u3_widget_hook(uint64_t self, uint64_t frame
     const uint64_t now=now_us();
     float rc[4]={0,0,0,0};
     safe_read(rc,self+0x90,16);
+    if (u3_jf_us && now-u3_jf_us<150000 && rc[3]>=24.0f && rc[3]<=42.0f && hi==lo &&
+        (fabsf(rc[1]-u3_jf_y)<1.0f || (fabsf(rc[0]-u3_jf_x)<6.0f && fabsf(rc[2]-u3_jf_w)<12.0f))) {   /* the row under the cursor, or another row of the column of the selected one */
+        uint8_t cur_flag=0, want=fabsf(rc[1]-u3_jf_y)<1.0f ? 1 : 0;
+        if (safe_read(&cur_flag,self+8,1) && cur_flag<=1 && cur_flag!=want) {
+            ((u2_set_fn)(uintptr_t)(image+0x5ddc80))(self,want);   /* the game's own setFocused(widget, bool): flag, data source notice, colour fade */
+            if (mouse_debug()) printf("Mouse: U3 row %#llx selected flag %d -> %d (hover jump)\n",(unsigned long long)self,cur_flag,want);
+        }
+    }
     pthread_mutex_lock(&menu_text_lock);
     int slot=-1, oldest=0;
     for (int i=0;i<U2_WIDGETS;++i) { if (u2_widgets[i].w==self) { slot=i; break; } if (u2_widgets[i].us<u2_widgets[oldest].us) oldest=i; }
@@ -3742,6 +3755,7 @@ static const RuntimeGuestCallback guest_callbacks[]={
     {"U2 menu text probe (collection)",0x5b56d0,u2_text_probe_code,sizeof(u2_text_probe_code),8,u2_text_probe,NULL},
     {"U3 menu text probe (collection)",0x63d6f0,u2_text_probe_code,sizeof(u2_text_probe_code),8,u2_text_probe,NULL},
     {"U3 slider draw (collection)",0x5e2190,u2_bind_code,sizeof(u2_bind_code),8,u3_widget_hook,NULL},
+    {"U3 list widget draw (collection)",0x5dca50,u2_bind_code,sizeof(u2_bind_code),8,u3_widget_hook,NULL},
     {"U3 prompt bar: no compare-with-friends prompt (collection)",0x627d65,u3_compare_cmp_code,sizeof(u3_compare_cmp_code),sizeof(u3_compare_cmp_patch),NULL,u3_compare_cmp_patch},
     {"U3 prompt bar flags (collection)",0x6277e8,u3_bar_flags_code,sizeof(u3_bar_flags_code),6,u3_bar_flags,NULL},
     {"U2 menu builder probe (collection)",0x5c53a0,u2_menu_builder_code,sizeof(u2_menu_builder_code),6,u2_menu_builder_probe,NULL},
@@ -5312,6 +5326,7 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
         if (!r->us || now-r->us>=100000 || r->h<24.0f || r->h>42.0f || r->w<60.0f) continue;
         if (fabsf(r->h-34.2f)<0.2f) continue;                     /* the section titles, never chosen */
         if (r->s5>=2.5f && (!have_sel || r->s5>sel.s5)) { sel=*r; have_sel=1; }
+        if (r->w>600.0f && !(fabsf(r->x-380.0f)<1.0f && fabsf(r->w-520.0f)<1.0f)) continue;   /* a wide banner above the menu (1000 wide) is not a row: hovering it must not clear the selection */
         if (ux>=r->x-4.0f && ux<=r->x+r->w+4.0f && uy>=r->y && uy<r->y+r->h && (!have_hov || r->w<hov.w)) { hov=*r; have_hov=1; }
     }
     /* A statistics line (28.6 tall) has its value in a second text to its right (the same line, past the right edge of the label): the cross there opens
@@ -5397,12 +5412,18 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
     u2_hover=1;
     if (moved) { presses=0; dir=-1; }
     const float sy=sel.y+sel.h*0.5f, hy=hov.y+hov.h*0.5f;
-    if (fabsf(sy-hy)>1.0f) {   /* the row under the cursor is not the selected one: step the d-pad towards it */
+    static int jump_off=-1; if (jump_off<0) { const char *e=getenv("BB_U3_JUMP"); jump_off=e && e[0]=='0'; }
+    if (fabsf(sy-hy)>1.0f && !jump_off) {   /* the row under the cursor is not the selected one: its flag is set at once (u3_widget_hook) */
+        u3_jf_x=sel.x; u3_jf_y=hov.y; u3_jf_w=sel.w; u3_jf_us=now;
+        if (mouse_debug()) { static float ly; if (fabsf(ly-hov.y)>0.5f) { ly=hov.y; printf("Mouse: U3 hover jump to rect %.1f %.1f %.1f %.1f (selected %.1f %.1f %.1f %.1f)\n",hov.x,hov.y,hov.w,hov.h,sel.x,sel.y,sel.w,sel.h); } }
+        presses=0; dir=-1;
+        if (clicked) cross_until=0;
+    } else if (fabsf(sy-hy)>1.0f) {   /* BB_U3_JUMP=0: the d-pad is stepped towards it */
         const int want=hy>sy;
         if (dir!=want) { dir=want; presses=0; next_step=now; }
         if (wheel) presses=0;
         if (now<press_until) out|=want ? BTN_DOWN : BTN_UP;
-        else if (!wheel && now>=next_step && presses<16) { press_until=now+60000; next_step=now+u2_step_us(); ++presses; }
+        else if (!wheel && now>=next_step && presses<16) { press_until=now+(u2_step_us()/2<60000 ? u2_step_us()/2 : 60000); next_step=now+u2_step_us(); ++presses; }
     } else {
         presses=0; dir=-1;
         if (clicked && !have_slid) cross_until=now+120000;          /* on the selected row: cross, once (not on a slider: that is a drag) */
