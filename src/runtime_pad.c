@@ -2671,6 +2671,25 @@ static void u2_slider_note(const float *r, float rail_w) {
     u2_sliders[slot]=(U2Row){r[0],r[1],rail_w,r[3],0.0f,now,0.0f};
     pthread_mutex_unlock(&menu_text_lock);
 }
+/* U3 (collection): the same menu framework, but the rail of a slider is not sure to have U2's shape (100+ wide, 12 or less tall):
+ * noted with a looser test into the same table. Only the U3 menu code reads it there, so U2 is untouched. */
+static void u3_slider_note(const float *r, float rail_w) {
+    const uint64_t now=now_us();
+    pthread_mutex_lock(&menu_text_lock);
+    int slot=0;
+    for (int i=0;i<8;++i) {
+        if (fabsf(u2_sliders[i].x-r[0])<0.5f && fabsf(u2_sliders[i].y-r[1])<0.5f) { slot=i; break; }
+        if (u2_sliders[i].us<u2_sliders[slot].us) slot=i;
+    }
+    u2_sliders[slot]=(U2Row){r[0],r[1],rail_w,r[3],0.0f,now,0.0f};
+    pthread_mutex_unlock(&menu_text_lock);
+}
+static int u3_slider_debug(void) { static int on=-1; if (on<0) on=getenv("BB_U3_SLIDER_DEBUG")!=NULL; return on; }
+static int u3_slider_steps(void) {   /* BB_U3_SLIDER_STEPS: how many left / right presses carry a slider from one end to the other */
+    static int steps=-1;
+    if (steps<0) { const char *e=getenv("BB_U3_SLIDER_STEPS"); steps=e ? atoi(e) : 14; if (steps<2) steps=2; if (steps>100) steps=100; }
+    return steps;
+}
 static void u2_row_note(const float *r, float s5, float a) {
     const uint64_t now=now_us();
     pthread_mutex_lock(&menu_text_lock);
@@ -2703,7 +2722,29 @@ static void __attribute__((ms_abi)) u2_text_probe(uint64_t unused0, uint64_t unu
         if (safe_read(r,saved_register(5),16) && fabsf(r[0]-298.1f)<1.5f && fabsf(r[1]-156.2f)<1.5f && fabsf(r[2]-683.8f)<2.0f && fabsf(r[3]-318.8f)<2.0f) u2_popup_us=now_us();
         if (safe_read(r,saved_register(5),16) && safe_read(sz,saved_register(3)+0x3c,8) && sz[0]>=100.0f && sz[1]>0.0f && sz[1]<=12.0f && r[3]>=24.0f && r[3]<=42.0f)
             u2_slider_note(r,sz[0]);
-        if (safe_read(r,saved_register(5),16) && safe_read(st,saved_register(4),32) && r[3]>=24.0f && r[3]<=42.0f && r[2]>=20.0f) u2_row_note(r,st[5],st[7]);   /* taller texts are paragraphs: the help text under a row is drawn "selected" too */
+        /* U3: the rail of a slider, with a shape of its own (looser test, only read by the U3 menu code) */
+        if (runtime_u3_game && safe_read(r,saved_register(5),16) && safe_read(sz,saved_register(3)+0x3c,8) && sz[0]>=60.0f && sz[1]>0.0f && sz[1]<=12.0f && r[3]>=20.0f && r[3]<=44.0f)
+            u3_slider_note(r,sz[0]);
+        /* BB_U3_SLIDER_DEBUG=1: every short text of a U3 menu (a rail is one) is logged with its rectangle and its size, once per
+         * shape (20 lines a second at most): tells where the rail of a slider really is when U2's shape does not match. */
+        if (runtime_u3_game && u3_slider_debug() && safe_read(r,saved_register(5),16) && r[3]>0.0f && r[3]<=14.0f && r[2]>=20.0f && safe_read(sz,saved_register(3)+0x3c,8)) {
+            static struct { float x, y, w, h, s0, s1; } seen[24];
+            static int n, lines; static uint64_t sec;
+            const uint64_t t=now_us();
+            int dup=0;
+            for (int i=0;i<n;++i) if (fabsf(seen[i].x-r[0])<0.5f && fabsf(seen[i].y-r[1])<0.5f && fabsf(seen[i].w-r[2])<0.5f && fabsf(seen[i].h-r[3])<0.5f && fabsf(seen[i].s0-sz[0])<0.5f) { dup=1; break; }
+            if (!dup && t-sec>1000000) { sec=t; lines=0; }
+            if (!dup && lines<20) {
+                if (n<24) { seen[n].x=r[0]; seen[n].y=r[1]; seen[n].w=r[2]; seen[n].h=r[3]; seen[n].s0=sz[0]; seen[n].s1=sz[1]; ++n; }
+                ++lines;
+                printf("Mouse: U3 short text rect %.1f %.1f %.1f %.1f size %.1f %.1f%s\n",r[0],r[1],r[2],r[3],sz[0],sz[1],
+                       sz[0]>=100.0f && sz[1]<=12.0f ? " (U2's rail shape: a slider)" : "");
+            }
+        }
+        /* U3 marks the selected row with style[6] at 1 (it never touches style[5]): kept as 3 in s5, the value the menu code knows.
+         * style[7] is 1 on every U3 row: it is not the "chosen one of Oui / Non" sign of U2 and is left at 0. */
+        if (safe_read(r,saved_register(5),16) && safe_read(st,saved_register(4),32) && r[3]>=24.0f && r[3]<=42.0f && r[2]>=20.0f)
+            u2_row_note(r,runtime_u3_game ? st[6]*3.0f : st[5],runtime_u3_game ? 0.0f : st[7]);
     }
     if (!mouse_debug()) return;
     u2_host_probe(image);
@@ -2726,21 +2767,34 @@ static void __attribute__((ms_abi)) u2_text_probe(uint64_t unused0, uint64_t unu
     if (slot<0) for (int i=0;i<seen_count;++i) if (t.us-seen[i].us>=600000) { slot=i; break; }
     if (slot<0 && seen_count<96) slot=seen_count++;
     const int fresh=slot<0 || t.us-seen[slot].us>=600000;
-    const int changed=!fresh && memcmp(seen[slot].style,t.style,sizeof(t.style))!=0;
+    /* BB_TEXT_LOG_SELECT=1: only a change of the colour or of the selection markers is logged (style[1..3], [5], [6], [7]): the
+     * opacity and style[4] of a text pulse at every frame and would flood the log. */
+    static int select_only=-1;
+    if (select_only<0) select_only=getenv("BB_TEXT_LOG_SELECT")!=NULL;
+    int marker_changed=0;
+    if (!fresh) for (int k=0;k<8;++k) if (k!=0 && k!=4 && seen[slot].style[k]!=t.style[k]) marker_changed=1;
+    const int changed=!fresh && (select_only ? marker_changed : memcmp(seen[slot].style,t.style,sizeof(t.style))!=0);
     if (slot>=0) {
         const uint64_t keep=t.us;
         const int log_it=fresh || changed;
         const float old_style5=fresh ? 0.0f : seen[slot].style[5];
         seen[slot]=t; seen[slot].us=keep;
         if (!log_it) return;
+        {   /* at most 20 lines per second: a page sliding in changes every rect at every frame */
+            static uint64_t log_second; static int log_lines;
+            if (t.us-log_second>1000000) { log_second=t.us; log_lines=0; }
+            if (++log_lines>20) return;
+        }
         printf("Mouse: U2 text %s rect %.1f %.1f %.1f %.1f size %.1f %.1f align %u/%u style",changed ? "CHANGED" : "new",
                t.rect[0],t.rect[1],t.rect[2],t.rect[3],t.w,t.h,halign,(uint32_t)stack_arg);
-        for (int k=0;k<12;++k) printf(" %.2f",t.style[k]);
+        for (int k=0;k<8;++k) printf(" %.2f",t.style[k]);   /* the 32 bytes read from the style */
         if (changed) printf(" (style[5] was %.2f)",old_style5);
         printf("\n");
     }
 }
 static const unsigned char u2_text_probe_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56};
+/* U3 (collection, same menu framework as U2 but compiled differently): the text drawing routine is at 0x63d6f0, the same arguments
+ * (rdx style, rcx laid-out text, r8 rectangle, r9d alignment, the alignment on the stack). The same 8 bytes move there. */
 /* U2 text lookup probe (BB_MOUSE_DEBUG): the game's text function at 0xcddc60 (table, id) -> the string; every new id it is asked for is
  * logged with its text, to find the ids of the rows of a menu (the Commandes menu: "Rétablir les paramètres par défaut"...) and so the code
  * that builds them (a row is made with its id as an immediate). */
@@ -2763,6 +2817,12 @@ static void __attribute__((ms_abi)) u2_compare_prompt(uint64_t unused0, uint64_t
 static const unsigned char u2_compare_cmp_code[]={0x41,0x83,0x7f,0x48,0x00,0x0f,0x84};   /* 0x5a54c7: cmp dword [r15+0x48],0 (5 bytes moved) */
 static const unsigned char u2_compare_jz_code[]={0x0f,0x84,0x8b,0x04,0x00,0x00};   /* 0x5a54cc: jz 0x5a595d */
 static const unsigned char u2_compare_jz_patch[]={0xe9,0x11,0x06,0x00,0x00,0x90};   /* jmp 0x5a5ae2 */
+/* U3 (collection): the same "COMPARER LES AMIS" prompt (same text id 0x9a8d0b3e), drawn by the prompt bar at 0x627520. Its branch is the kind 0x80
+ * (test at 0x627d65, jump to the block at 0x62830b which builds the label); the kind is compared against -1 so the branch is never taken and the bar
+ * goes on with the next prompt (0x6284e3), as if the item were unknown. No callback: a plain 7-byte patch. */
+static const unsigned char u3_compare_cmp_code[]={0x41,0x81,0xf9,0x80,0x00,0x00,0x00};   /* 0x627d65: cmp r9d,0x80 */
+static const unsigned char u3_compare_cmp_patch[]={0x41,0x81,0xf9,0xff,0xff,0xff,0xff};  /* cmp r9d,-1 */
+static volatile int u3_sel_value;   /* the selected U3 row has its value on the right: the cross is held back (the comparison with friends does not work offline) */
 static volatile uint64_t u2_keys_tables[8];   /* the text tables seen asked for it (a table asks its parent first: all of them are patched) */
 static void __attribute__((ms_abi)) u2_text_lookup_probe(uint64_t table, uint64_t id, uint64_t image, uint64_t r14) {
     (void)r14;
@@ -3519,6 +3579,34 @@ static int u2_slider_widget(float cy, uint64_t now, uint64_t *ds, int *lo, int *
     pthread_mutex_unlock(&menu_text_lock);
     return best>=0;
 }
+/* U3 slider draw (0x5e2190, found by disassembly 2026-10-28; (widget, ?, draw context), runs every frame: percent = (value - min) * 100 / (max - min)). Data source at
+ * widget+0x18 as in U2, but its virtual slots moved: +0 get, +8 set(value), +0x38 minimum, +0x40 maximum. The hook registers the widget like U2's and carries a pending set(value). */
+static void __attribute__((ms_abi)) u3_widget_hook(uint64_t self, uint64_t frame, uint64_t image, uint64_t r14) {
+    (void)frame; (void)r14;
+    uint64_t ds=0, vt=0, f0=0, f8=0, f30=0, f38=0;
+    if (self<0x10000 || !safe_read(&ds,self+0x18,8) || ds<0x10000 || !safe_read(&vt,ds,8) || vt<0x10000) return;
+    if (!safe_read(&f0,vt,8) || !safe_read(&f8,vt+8,8) || !safe_read(&f30,vt+0x38,8) || !safe_read(&f38,vt+0x40,8)) return;
+    const uint64_t lo_code=image, hi_code=image+0x16488f0;
+    if (f0<lo_code || f0>=hi_code || f8<lo_code || f8>=hi_code || f30<lo_code || f30>=hi_code || f38<lo_code || f38>=hi_code) return;
+    int cur=(int32_t)((u2_vcall_fn)(uintptr_t)f0)(ds);
+    const int lo=(int32_t)((u2_vcall_fn)(uintptr_t)f30)(ds), hi=(int32_t)((u2_vcall_fn)(uintptr_t)f38)(ds);
+    if (u2_jump_pending && u2_jump_ds==ds) {
+        int v=u2_jump_val; if (v<lo) v=lo; if (v>hi) v=hi;
+        ((u2_set_fn)(uintptr_t)f8)(ds,v);
+        u2_jump_pending=0; u2_jump_keep=0;
+        if (mouse_debug()) printf("Mouse: U3 widget set(%d) on %#llx (was %d, range %d..%d)\n",v,(unsigned long long)ds,cur,lo,hi);
+        cur=v;
+    }
+    const uint64_t now=now_us();
+    float rc[4]={0,0,0,0};
+    safe_read(rc,self+0x90,16);
+    pthread_mutex_lock(&menu_text_lock);
+    int slot=-1, oldest=0;
+    for (int i=0;i<U2_WIDGETS;++i) { if (u2_widgets[i].w==self) { slot=i; break; } if (u2_widgets[i].us<u2_widgets[oldest].us) oldest=i; }
+    if (slot<0) { slot=oldest; if (mouse_debug()) printf("Mouse: U3 widget %#llx data source %#llx range %d..%d value %d rect x %.1f y %.1f w %.1f h %.1f\n",(unsigned long long)self,(unsigned long long)ds,lo,hi,cur,rc[0],rc[1],rc[2],rc[3]); }
+    u2_widgets[slot]=(U2Widget){self,ds,cur,lo,hi,now,rc[1],rc[3]};
+    pthread_mutex_unlock(&menu_text_lock);
+}
 static const unsigned char u2_bind_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56};
 /* U2 Trésors, the 3D model (menutreasurescene.cpp, FUN_005d74f0(scene), every frame; Ghidra 2026-10-23). The scene keeps the model's orientation as a 4x4 matrix
  * (floats 12..27) and two angular speeds, float 0x1c (+0x70, around the vertical) and 0x1d (+0x74), that the right stick adds to (twice its deadzoned value, per frame) and that
@@ -3641,6 +3729,9 @@ static const RuntimeGuestCallback guest_callbacks[]={
     {"U2 prompt bar: compare-with-friends prompt (hook, collection)",0x5a54c7,u2_compare_cmp_code,sizeof(u2_compare_cmp_code),5,u2_compare_prompt,NULL},
     {"U2 prompt bar: no compare-with-friends prompt (collection)",0x5a54cc,u2_compare_jz_code,sizeof(u2_compare_jz_code),sizeof(u2_compare_jz_patch),NULL,u2_compare_jz_patch},
     {"U2 menu text probe (collection)",0x5b56d0,u2_text_probe_code,sizeof(u2_text_probe_code),8,u2_text_probe,NULL},
+    {"U3 menu text probe (collection)",0x63d6f0,u2_text_probe_code,sizeof(u2_text_probe_code),8,u2_text_probe,NULL},
+    {"U3 slider draw (collection)",0x5e2190,u2_bind_code,sizeof(u2_bind_code),8,u3_widget_hook,NULL},
+    {"U3 prompt bar: no compare-with-friends prompt (collection)",0x627d65,u3_compare_cmp_code,sizeof(u3_compare_cmp_code),sizeof(u3_compare_cmp_patch),NULL,u3_compare_cmp_patch},
     {"U2 menu builder probe (collection)",0x5c53a0,u2_menu_builder_code,sizeof(u2_menu_builder_code),6,u2_menu_builder_probe,NULL},
     {"U2 text lookup probe (collection)",0xcddc00,u2_text_lookup_code,sizeof(u2_text_lookup_code),6,u2_text_lookup_probe,NULL},
     {"U1 controls menu: keyboard row",0x145881,u1_add_keys_row_code,sizeof(u1_add_keys_row_code),5,u1_add_keys_row,NULL},
@@ -4874,7 +4965,7 @@ static int u2_menu_active(uint64_t now) {
     const int carousel=u2_popup_us && now-u2_popup_us<700000 && u2_popup_us<=now+1000000;   /* (the carousel has no row to highlight either) */
     if (hi || layout || credits || carousel) seen=now;
     const int on=seen && now-seen<300000;
-    if (on!=u2_menu_on) { u2_menu_on=on; u2_menu_reset=on; u2_menu_key_guard=1; bbgpu_menu_state(on); printf("Runtime: U2 menu mouse %s\n",on ? "on" : "off"); }
+    if (on!=u2_menu_on) { u2_menu_on=on; u2_menu_reset=on; u2_menu_key_guard=1; bbgpu_menu_state(on); printf("Runtime: %s menu mouse %s\n",runtime_u3_game ? "U3" : "U2",on ? "on" : "off"); }
     return on;
 }
 /* ---- U2 sliders set by position ---------------------------------------------------------------
@@ -5158,6 +5249,154 @@ static void u2_selprobe_step(uint64_t now) {
 static int u2_direct_off(void) { static int off=-1; if (off<0) { const char *e=getenv("BB_U2_SLIDER_DIRECT"); off=e && atoi(e)==0; } return off; }   /* BB_U2_SLIDER_DIRECT=0: the old search of the value in memory */
 static int u2_mj_on(void) { static int on=-1; if (on<0) { const char *e=getenv("BB_U2_MJUMP"); on=!(e && atoi(e)==0); } return on; }   /* BB_U2_MJUMP=0: d-pad steps only */
 static uint64_t u2_step_us(void) { static int ms=-1; if (ms<0) { const char *e=getenv("BB_U2_STEP_MS"); ms=e ? atoi(e) : 120; if (ms<30) ms=30; if (ms>400) ms=400; } return (uint64_t)ms*1000u; }
+/* ---- U3 menus ---------------------------------------------------------------------------------
+ * Same drawn rows as U2 (1280 x 720; 33.6 tall, 36 for a prompt, 40 for a dialog button), but the selected row is marked by style[6]
+ * at 1 instead of style[5] (u2_row_note keeps it as s5 = 3, see u2_text_probe). Nothing else of U2's menus exists here yet (no list
+ * widget hook, no model, no carousel): the cursor picks the row under it, the d-pad steps the selection onto that row (one press per
+ * BB_U2_STEP_MS, 16 at most for one move), a click on the selected row presses cross, the wheel goes one row up / down, the right
+ * button goes back. */
+static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
+    static float last_x=-1e9f, last_y=-1e9f;
+    static int last_left, dir=-1, presses;
+    static uint64_t next_step, press_until, cross_until;
+    static int sl_drag, sl_dir, sl_est, sl_queue, sl_zero, sl_pend;
+    static float sl_f;
+    static int sl_direct, sl_lo, sl_hi, sl_lastv; static uint64_t sl_ds;
+    static float sl_x, sl_w;
+    static uint64_t sl_press_until, sl_next_step;
+    /* The sliders already moved on this screen: their place (in steps) is kept, so a second click does not go back to the left end
+     * first. Cleared as soon as the top rail changes (another screen). The game's value is not read (no address known for U3). */
+    static int sl_mem[8]={-1,-1,-1,-1,-1,-1,-1,-1}, sl_slot=-1;
+    static float sl_mx[8], sl_my[8], sl_top=-1e9f;
+    uint32_t out=0;
+    const int wheel=now<wheel_until_us[0] || now<wheel_until_us[1];
+    if (now<wheel_until_us[0]) out|=BTN_UP;          /* one row up / down per notch, as U2 */
+    if (now<wheel_until_us[1]) out|=BTN_DOWN;
+    if (mouse & 8u) out|=BTN_CIRCLE;                 /* right button: back */
+    SDL_Window *w=SDL_GetMouseFocus();
+    if (!w) { sl_drag=0; return out; }
+    float mx=0, my=0; int ww=0, wh=0;
+    SDL_GetMouseState(&mx,&my);
+    SDL_GetWindowSize(w,&ww,&wh);
+    if (ww<=0 || wh<=0) { sl_drag=0; return out; }
+    const float scale=fminf((float)ww/UI_WIDTH,(float)wh/UI_HEIGHT);
+    const float ux=(mx-((float)ww-UI_WIDTH*scale)*0.5f)/scale, uy=(my-((float)wh-UI_HEIGHT*scale)*0.5f)/scale;
+    const int moved=fabsf(mx-last_x)>=1.0f || fabsf(my-last_y)>=1.0f;
+    last_x=mx; last_y=my;
+    const int left=(mouse & 1u)!=0, clicked=left && !last_left;
+    last_left=left;
+    U2Row hov={0}, sel={0}, slid={0};
+    int have_hov=0, have_sel=0, sel_value=0, have_slid=0;
+    float rail_top=1e9f;
+    pthread_mutex_lock(&menu_text_lock);
+    for (int i=0;i<8;++i) {   /* the rails of the sliders (u2_sliders, filled by the text hook for U3 too) */
+        const U2Row *s=&u2_sliders[i];
+        if (!s->us || now-s->us>=150000 || s->w<20.0f) continue;
+        if (s->y<rail_top) rail_top=s->y;
+        if (!have_slid && ux>=s->x-10.0f && ux<=s->x+s->w+10.0f && uy>=s->y-2.0f && uy<s->y+s->h+2.0f) { slid=*s; have_slid=1; }
+    }
+    for (int i=0;i<U2_ROWS;++i) {
+        const U2Row *r=&u2_rows[i];
+        if (!r->us || now-r->us>=100000 || r->h<24.0f || r->h>42.0f || r->w<60.0f) continue;
+        if (fabsf(r->h-34.2f)<0.2f) continue;                     /* the section titles, never chosen */
+        if (r->s5>=2.5f && (!have_sel || r->s5>sel.s5)) { sel=*r; have_sel=1; }
+        if (ux>=r->x-4.0f && ux<=r->x+r->w+4.0f && uy>=r->y && uy<r->y+r->h && (!have_hov || r->w<hov.w)) { hov=*r; have_hov=1; }
+    }
+    /* A statistics line (28.6 tall) has its value in a second text to its right (the same line, past the right edge of the label): the cross there opens
+     * the comparison with friends, which does not work offline (U1 and U2 remove it the same way). Sub menu lines (Facile, Normal...: no value) keep it. */
+    if (have_sel && sel.h>=26.0f && sel.h<=30.0f)
+        for (int i=0;i<U2_ROWS;++i) {
+            const U2Row *r=&u2_rows[i];
+            if (!r->us || now-r->us>=100000 || r->w<5.0f) continue;
+            if (fabsf(r->y-sel.y)<2.0f && r->x>=sel.x+sel.w-1.0f) { sel_value=1; break; }
+        }
+    u3_sel_value=sel_value;
+    pthread_mutex_unlock(&menu_text_lock);
+    {   /* once, when the cursor reaches a rail or leaves it: to check that U3 draws one where U2 does */
+        static int last_slid;
+        if (have_slid!=last_slid) {
+            last_slid=have_slid;
+            if (mouse_debug()) printf("Mouse: U3 slider rail %s rect %.1f %.1f %.1f %.1f\n",have_slid ? "under the cursor" : "left",slid.x,slid.y,slid.w,slid.h);
+        }
+    }
+    /* A slider: the button held on its rail presses left / right, the game's own steps. The game's value is not read in memory (no
+     * address known for U3), so the bar is carried by counting steps: to its left end once (the reference), then to the cursor's
+     * place on the rail (BB_U3_SLIDER_STEPS, 10 by default). The queue keeps going after the button is released, otherwise a quick
+     * click would drop the end of the move. The row is already the selected one: no stepping, no cross. */
+    if (rail_top<1e8f && fabsf(rail_top-sl_top)>0.5f) {   /* another screen: the remembered places mean nothing here */
+        for (int i=0;i<8;++i) sl_mem[i]=-1;
+        sl_top=rail_top; sl_slot=-1;
+    }
+    if (sl_drag && !left) sl_drag=0;   /* the button is up: the move goes on to its target */
+    if (clicked && have_slid && !sl_drag) {
+        sl_drag=1; sl_pend=1; sl_x=slid.x; sl_w=slid.w; sl_queue=0; sl_next_step=now; sl_press_until=0; sl_dir=0;
+        int slot=-1, free_slot=-1;
+        for (int i=0;i<8;++i) {
+            if (sl_mem[i]>=0 && fabsf(sl_mx[i]-slid.x)<0.5f && fabsf(sl_my[i]-slid.y)<0.5f) { slot=i; break; }
+            if (sl_mem[i]<0 && free_slot<0) free_slot=i;
+        }
+        if (slot<0) slot=free_slot>=0 ? free_slot : 0;
+        sl_slot=slot; sl_mx[slot]=slid.x; sl_my[slot]=slid.y;
+        if (sl_mem[slot]>=0) { sl_est=sl_mem[slot]; sl_zero=0; }   /* this one was moved before: straight to the cursor */
+        else { sl_est=0; sl_zero=u3_slider_steps()+3; sl_mem[slot]=0; }
+        printf("Runtime: U3 slider drag start rail %.1f %.1f %.1f %.1f steps %d from %d\n",slid.x,slid.y,slid.w,slid.h,u3_slider_steps(),sl_est);
+        sl_direct=0;   /* the control behind the rail (u3_widget_hook): its value is set at once, no presses */
+        if (!u2_direct_off() && u2_slider_widget(slid.y+slid.h*0.5f,now,&sl_ds,&sl_lo,&sl_hi)) {
+            sl_direct=1; sl_lastv=-99999; sl_zero=0; sl_queue=0; sl_pend=0;
+            printf("Runtime: U3 slider direct: range %d..%d\n",sl_lo,sl_hi);
+        }
+    }
+    if (sl_direct && sl_drag) {
+        const int v=sl_lo+(int)floorf(sl_f*(float)(sl_hi-sl_lo)+0.5f);
+        if (v!=sl_lastv && !u2_jump_pending) { u2_jump_ds=sl_ds; u2_jump_val=v; u2_jump_keep=0; u2_jump_pending=1; sl_lastv=v; }
+    }
+    if (sl_drag) {   /* the target follows the cursor while the button is down; a quick click releases before the bar reached its left end */
+        float f=(ux-sl_x)/(sl_w>1.0f ? sl_w : 1.0f);
+        sl_f=f<0.0f ? 0.0f : f>1.0f ? 1.0f : f;
+    }
+    if (!sl_direct && (sl_drag || sl_pend) && sl_zero<=0) {   /* aiming: the last cursor place on the rail is the target (not while the bar is still going to its left end) */
+        if (!sl_drag) sl_pend=0;
+        const int want=(int)floorf(sl_f*(float)u3_slider_steps()+0.5f);
+        if (want!=sl_est) {
+            sl_queue+=want-sl_est; sl_est=want;
+            if (sl_queue>60) sl_queue=60;
+            if (sl_queue<-60) sl_queue=-60;
+        }
+    }
+    if (sl_zero>0) {   /* first, the bar to its left end: the position counts from there */
+        if (now<sl_press_until) out|=BTN_LEFT;
+        else if (now>=sl_next_step) { --sl_zero; sl_est=0; sl_press_until=now+45000; sl_next_step=now+90000; out|=BTN_LEFT; }
+    } else if (sl_queue) {
+        if (now<sl_press_until) out|=sl_dir>0 ? BTN_RIGHT : BTN_LEFT;
+        else if (now>=sl_next_step) {
+            sl_dir=sl_queue>0; sl_queue+=sl_dir ? -1 : 1;
+            sl_press_until=now+45000; sl_next_step=now+90000;
+            out|=sl_dir>0 ? BTN_RIGHT : BTN_LEFT;
+            if (!sl_queue && sl_slot>=0) sl_mem[sl_slot]=sl_est;   /* arrived: the place is now known for this rail */
+        }
+    }
+    if (sl_drag || sl_zero>0 || sl_queue) { u2_hover=0; presses=0; dir=-1; return out; }
+    if (k && (k[SDL_SCANCODE_W] || k[SDL_SCANCODE_A] || k[SDL_SCANCODE_S] || k[SDL_SCANCODE_D] ||
+              k[SDL_SCANCODE_UP] || k[SDL_SCANCODE_DOWN] || k[SDL_SCANCODE_LEFT] || k[SDL_SCANCODE_RIGHT])) {
+        u2_hover=0; presses=0; return out;   /* the keys are being used: the cursor does not move the selection */
+    }
+    if (!have_hov || !have_sel) { u2_hover=0; presses=0; dir=-1; return out; }
+    u2_hover=1;
+    if (moved) { presses=0; dir=-1; }
+    const float sy=sel.y+sel.h*0.5f, hy=hov.y+hov.h*0.5f;
+    if (fabsf(sy-hy)>1.0f) {   /* the row under the cursor is not the selected one: step the d-pad towards it */
+        const int want=hy>sy;
+        if (dir!=want) { dir=want; presses=0; next_step=now; }
+        if (wheel) presses=0;
+        if (now<press_until) out|=want ? BTN_DOWN : BTN_UP;
+        else if (!wheel && now>=next_step && presses<16) { press_until=now+60000; next_step=now+u2_step_us(); ++presses; }
+    } else {
+        presses=0; dir=-1;
+        if (clicked && !have_slid) cross_until=now+120000;          /* on the selected row: cross, once (not on a slider: that is a drag) */
+    }
+    if (now<cross_until) out|=BTN_CROSS;
+    return out;
+}
 static uint32_t u2_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
     /* rows the game never selected when asked to (the text of a choice box, a title): the hover gives up on them for 30 s */
     static struct { float x, y; uint64_t until; } skips[16];
@@ -5784,7 +6023,7 @@ static void sample_host(PadData *d) {
     /* the wheel is the d-pad left / right of the play (weapon change): in a menu it moves up / down instead, not both at once */
     if (u2_menu && (now<wheel_until_us[0] || now<wheel_until_us[1])) d->buttons&=~(BTN_UP|BTN_DOWN|BTN_LEFT|BTN_RIGHT);
     u2_keys_label_patch(now);
-    if (u2_menu) { d->buttons|=u2_menu_buttons(k,mouse,now); 
+    if (u2_menu) { d->buttons|=runtime_u3_game ? u3_menu_buttons(k,mouse,now) : u2_menu_buttons(k,mouse,now); 
         if (u2_model_drag && (mouse & 1u)) {   /* the model of Trésors turns with the native mouse (u2_model_hook), not with an emulated stick */
             const float k=0.004f*input.mouse_sensitivity;   /* radians per pixel */
             u2_model_ax+=mdx*k; u2_model_ay+=(input.mouse_invert_y ? -mdy : mdy)*k;
@@ -5793,6 +6032,7 @@ static void sample_host(PadData *d) {
     } else u2_hover=0;
     bbgpu_menu_drag(u2_menu && (mouse & 1u) && u2_model_drag);
     if (u2_menu && u2_compare_us && now-u2_compare_us<300000 && !u2_sel_plain_row) d->buttons&=~BTN_CROSS;   /* statistics: no "compare with friends" (the rows that open a sub menu keep the cross) */
+    if (u2_menu && runtime_u3_game && u3_sel_value) d->buttons&=~BTN_CROSS;   /* U3: the same, on a statistics line with its value on the right */
     {   /* the row that now reads "Touches clavier / souris": the cross (Space, the click) opens the bindings window instead of the controller picture */
         static int cross_was_down;
         const int cross=(d->buttons & BTN_CROSS)!=0;

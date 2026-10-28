@@ -803,6 +803,7 @@ static unsigned char *near_image_memory(size_t size) {
     return memory;
 }
 volatile uint64_t guest_callback_rsp;   /* the guest's rsp when a callback was entered (read by the callback) */
+volatile int runtime_u3_game;           /* 1 once a U3 callback was installed: the U3 menus mark their selected row differently */
 static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t image_size) {
     size_t count=0;
     const RuntimeGuestCallback *callbacks=runtime_guest_callbacks(&count);
@@ -821,8 +822,10 @@ static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t imag
     for (size_t i=0;i<count;++i) {
         const RuntimeGuestCallback *c=&callbacks[i];
         if ((is_u1 || getenv("BB_SKIP_U2_WIDGET")) && strstr(c->name,"U2 list widget")) continue;
+        if (!runtime_u3_game && strstr(c->name,"U3 list widget")) continue;   /* only once an unmistakable U3 hook (the text probe) is in */
         if (!mapped(segments,ns,c->offset,c->signature_size) ||
             memcmp(image+c->offset,c->signature,c->signature_size)) continue;
+        if (!strncmp(c->name,"U3 ",3)) runtime_u3_game=1;
         if (!c->callback) {
             memcpy(image+c->offset,c->patch,c->moved);
             installed[i]=1;
