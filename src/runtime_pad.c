@@ -2654,6 +2654,8 @@ static const unsigned char u1_text_draw_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x
 typedef struct { float rect[4], w, h, style[12]; uint64_t us; } U2ProbeText;
 /* The rows of a U2 menu, for the mouse (U2 has no menu objects to ask): every text drawn keeps its rectangle and style[5], which the
  * game takes from 0 to 3 on the selected row. Read by u2_menu_buttons (menu_text_lock). */
+static volatile uint64_t u2_keys_host;   /* where the text of our Commandes row is in memory (u2_keys_label_patch) */
+static volatile uint64_t u3_keys_row_us; static volatile float u3_keys_row_y;   /* U3: the moment our row was drawn and its top, found by that text's address in the layout object */
 typedef struct { float x, y, w, h, s5; uint64_t us; float a; } U2Row;   /* a: style[7], 1 on the chosen one of the Oui / Non of a confirmation, 0 on the other */
 #define U2_ROWS 256   /* the Commandes screen alone draws about 80 texts of row size (labels, values, icon cells) */
 static U2Row u2_rows[U2_ROWS];
@@ -2782,6 +2784,15 @@ static void __attribute__((ms_abi)) u2_text_probe(uint64_t unused0, uint64_t unu
                 printf("\n");
             }
         }
+        /* U3: our "Touches clavier / souris" row: the layout object of its text holds the address of that text */
+        if (runtime_u3_game && u2_keys_host && safe_read(r,saved_register(5),16) && r[3]>=24.0f && r[3]<=42.0f) {
+            uint64_t lay[32];
+            if (safe_read(lay,saved_register(3),sizeof lay)) for (int k=0;k<32;++k) if (lay[k]>=u2_keys_host && lay[k]<u2_keys_host+4u) {
+                u3_keys_row_y=r[1]; u3_keys_row_us=now_us();
+                static int shown; if (mouse_debug() && !shown) { shown=1; printf("Mouse: U3 keys row drawn at y %.1f (layout word %d)\n",r[1],k); }
+                break;
+            }
+        }
         /* U3: a row whose label text is empty (width 0, in the left column) is a ghost, drawn but not meant to be chosen (Sortie audio under "Avant"): the hover skips it */
         if (runtime_u3_game && safe_read(r,saved_register(5),16) && safe_read(sz,saved_register(3)+0x3c,8) && sz[0]<0.5f && fabsf(r[0]-96.0f)<3.0f && r[3]>=24.0f && r[3]<=42.0f) {
             const uint64_t t=now_us();
@@ -2897,7 +2908,7 @@ static void __attribute__((ms_abi)) u2_text_lookup_probe(uint64_t table, uint64_
         for (int i=0;i<8;++i) { if (u2_keys_tables[i]==table) break; if (!u2_keys_tables[i]) { u2_keys_tables[i]=table; break; } }
     }
     static uint32_t seen[8192]; static int seen_count, busy;
-    if (busy || !mouse_debug() || image<0x10000) return;
+    if (busy || !mouse_debug() || image<0x10000 || runtime_u3_game) return;   /* (the debug lookup below is U2's address) */
     if (!u2_image) u2_image=image;
     const uint32_t id32=(uint32_t)id;
     for (int i=0;i<seen_count;++i) if (seen[i]==id32) return;
@@ -3151,9 +3162,93 @@ static void u3_photo_walk(uint64_t list, int depth) {
         }
     }
 }
+/* U3 probe (BB_MOUSE_DEBUG=1): the lists holding the "Commandes" (dd40dc7b) or "Rétablir" (b69a538a) text ids of U2, with all their records */
+static void u3_cmd_walk(uint64_t list, int depth) {
+    int32_t count=0; uint64_t arr=0;
+    if (depth>8 || !safe_read(&count,list,4) || !safe_read(&arr,list+8,8) || count<=0 || count>400) return;
+    int hit=0;
+    for (int r=0;r<count && !hit;++r) {
+        uint8_t rec[0x70];
+        if (!safe_read(rec,arr+0x70u*(uint64_t)r,0x70)) break;
+        for (int off=0;off<=0x6c;off+=4) { uint32_t w; memcpy(&w,rec+off,4); if (w==0xdd40dc7bu || w==0xb69a538au) { hit=1; printf("Runtime: U3 cmd word %x at record %d +%#x\n",w,r,off);
+            static int dumps; if (dumps++<6) { const uint64_t a=arr+0x70u*(uint64_t)r+(uint64_t)off-0x70u; uint32_t d[96]; if (safe_read(d,a,sizeof d)) { printf("Runtime: U3 cmd dump from %#llx (word at +0x70):",(unsigned long long)a); for (int k=0;k<96;++k) printf("%s%x",k%8?" ":"\n  ",d[k]); printf("\n"); } } } }
+    }
+    if (hit) {
+        printf("Runtime: U3 cmd list %#llx depth %d (%d records at %#llx):",(unsigned long long)list,depth,count,(unsigned long long)arr);
+        for (int r=0;r<count;++r) { uint32_t type=0, id=0, text=0; safe_read(&type,arr+0x70u*(uint64_t)r+0x10,4); safe_read(&id,arr+0x70u*(uint64_t)r+8,4); safe_read(&text,arr+0x70u*(uint64_t)r+0x28,4); printf(" [%d t%u %x/%x]",r,type,id,text); }
+        printf("\n");
+    }
+    for (int r=0;r<count;++r) {
+        uint8_t rec[0x70];
+        if (!safe_read(rec,arr+0x70u*(uint64_t)r,0x70)) break;
+        for (int off=0;off<=0x68;off+=8) {
+            uint64_t q; memcpy(&q,rec+off,8);
+            if (u2_is_list_head(q)) u3_cmd_walk(q,depth+1);
+        }
+    }
+}
+/* U3: the same row of ours in Options > Commandes as U2 (see u2_menu_def_patch), but U3's records are 0x68 bytes long (the fields keep their offsets:
+ * id +8, type +0x10, text id +0x28, target page +0x48). The list holding the "Commandes" record (type 2, text dd40dc7b) is found by walking the tree;
+ * its array is copied with a clone of that record added right after it. Off with BB_U2_ROW_INSERT=0. */
+#define U3_REC 0x68u
+static int u3_row_walk(uint64_t list, int depth, int *budget) {
+    int32_t count=0; uint64_t arr=0;
+    if (depth>8 || --*budget<0 || !safe_read(&count,list,4) || !safe_read(&arr,list+8,8) || count<=0 || count>400 || arr<0x10000) return 0;
+    uint8_t *old=malloc((size_t)count*0x70u);
+    if (!old) return 0;
+    if (!safe_read(old,arr,(size_t)count*0x70u)) { free(old); return 0; }
+    int at=-1, have=0;
+    for (int r=0;r<count;++r) {
+        uint32_t type, text;
+        memcpy(&type,old+U3_REC*(size_t)r+0x10,4); memcpy(&text,old+U3_REC*(size_t)r+0x28,4);
+        if (text==U2_KEYS_HOST_TEXT_ID) have=1;
+        if (text==U2_KEYS_TEXT_ID && type==2) at=r;
+    }
+    if (have) { u2_row_inserted=1; free(old); return 1; }
+    if (at>=0) {
+        uint8_t *fresh=u2_def_alloc((size_t)(count+1)*U3_REC,arr);
+        if (!fresh) { printf("Runtime: U3 keys row: no memory near the definition\n"); free(old); return 1; }
+        memcpy(fresh,old,U3_REC*(size_t)(at+1));
+        memcpy(fresh+U3_REC*(size_t)(at+1),old+U3_REC*(size_t)at,U3_REC);
+        memcpy(fresh+U3_REC*(size_t)(at+2),old+U3_REC*(size_t)(at+1),U3_REC*(size_t)(count-at-1));
+        const uint32_t new_id=U2_ROW_NEW_ID, new_text=U2_KEYS_HOST_TEXT_ID;
+        memcpy(fresh+U3_REC*(size_t)(at+1)+8,&new_id,4);
+        memcpy(fresh+U3_REC*(size_t)(at+1)+0x28,&new_text,4);
+        const int32_t ncount=count+1;
+        const uint64_t nptr=(uint64_t)(uintptr_t)fresh;
+        if (safe_write(list+8,&nptr,8) && safe_write(list,&ncount,4)) {
+            u2_row_inserted=1;
+            printf("Runtime: U3 keys row inserted (%d rows, after row %d; list %#llx, new array %#llx)\n",ncount,at,(unsigned long long)list,(unsigned long long)nptr);
+        } else printf("Runtime: U3 keys row: the definition cannot be written\n");
+        free(old);
+        return 1;
+    }
+    for (int r=0;r<count;++r) for (int off=0;off<=0x68;off+=8) {   /* children: scanned on both strides */
+        uint64_t q; memcpy(&q,old+U3_REC*(size_t)r+off,8);
+        if (u2_is_list_head(q) && u3_row_walk(q,depth+1,budget)) { free(old); return 1; }
+    }
+    for (int r=0;r<count;++r) for (int off=0;off<=0x68;off+=8) {
+        uint64_t q; memcpy(&q,old+0x70u*(size_t)r+off,8);
+        if (u2_is_list_head(q) && u3_row_walk(q,depth+1,budget)) { free(old); return 1; }
+    }
+    free(old);
+    return 0;
+}
 static void __attribute__((ms_abi)) u3_menu_builder_hook(uint64_t menu, uint64_t unused, uint64_t image, uint64_t r14) {
     (void)menu; (void)unused; (void)r14;
-    static int tries;
+    static int tries, probed, row_tries;
+    {
+        static int enabled=-1;
+        if (enabled<0) { const char *e=getenv("BB_U2_ROW_INSERT"); enabled=!(e && e[0]=='0'); }
+        if (enabled && image>=0x10000 && !u2_row_inserted && row_tries<40) {
+            const uint64_t d=((u2_get_data_fn)(uintptr_t)(image+0x11f2e30))(0x74ffceebu);
+            if (d>0x10000) { ++row_tries; int budget=20000; if (!u3_row_walk(d,0,&budget) && row_tries==40) printf("Runtime: U3 keys row: the Commandes record was not found\n"); }
+        }
+    }
+    if (mouse_debug() && image>=0x10000 && !probed) {
+        const uint64_t d=((u2_get_data_fn)(uintptr_t)(image+0x11f2e30))(0x74ffceebu);
+        if (d>0x10000) { probed=1; u3_cmd_walk(d,0); printf("Runtime: U3 cmd probe done\n"); }
+    }
     const char *e=getenv("BB_U3_PHOTO_ROW");
     if (image<0x10000 || tries>=40 || (e && e[0]=='1')) return;
     const uint64_t def=((u2_get_data_fn)(uintptr_t)(image+0x11f2e30))(0x74ffceebu);
@@ -3867,6 +3962,7 @@ static const RuntimeGuestCallback guest_callbacks[]={
     {"U3 prompt bar flags (collection)",0x6277e8,u3_bar_flags_code,sizeof(u3_bar_flags_code),6,u3_bar_flags,NULL},
     {"U2 menu builder probe (collection)",0x5c53a0,u2_menu_builder_code,sizeof(u2_menu_builder_code),6,u2_menu_builder_probe,NULL},
     {"U2 text lookup probe (collection)",0xcddc00,u2_text_lookup_code,sizeof(u2_text_lookup_code),6,u2_text_lookup_probe,NULL},
+    {"U3 text lookup probe (collection)",0xf32ae0,u2_text_lookup_code,sizeof(u2_text_lookup_code),6,u2_text_lookup_probe,NULL},
     {"U1 controls menu: keyboard row",0x145881,u1_add_keys_row_code,sizeof(u1_add_keys_row_code),5,u1_add_keys_row,NULL},
     {"U1 compare-with-friends prompt (hook)",0x128f64,u1_compare_code,sizeof(u1_compare_code),5,u1_compare_prompt,NULL},
     {"U1 compare-with-friends prompt (skip 1)",0x128f69,u1_compare_je_code,sizeof(u1_compare_je_code),sizeof(u1_compare_je_patch),NULL,u1_compare_je_patch},
@@ -5448,6 +5544,7 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
         for (int i=0;i<8;++i)
             if (u3_empty_us[i] && now-u3_empty_us[i]<300000 && fabsf(u3_empty_y[i]-hov.y)<1.0f) { have_hov=0; break; }   /* a ghost row: not a target */
     u3_sel_value=sel_value;
+    u2_keys_row_sel=have_sel && u3_keys_row_us && now-u3_keys_row_us<150000 && fabsf(sel.y-u3_keys_row_y)<1.0f;
     if (sel_value) u3_hide_select_us=now_us();
     /* The < > of a row (u3_arrows: two 16 wide texts side by side): a click on the left one presses left, on the right one right, once the row is the selected one
      * (the row is jumped to first, as for a hover, then the press). */
@@ -6088,6 +6185,7 @@ static void u2_keys_label_patch(uint64_t now) {
                         for (uint32_t q=0;q<count;++q) if (arr[2*q]==U2_KEYS_HOST_TEXT_ID) { j=q; break; }
                         if (j==count) { if (logged<14) { ++logged; printf("Runtime: U2 keys row: the host text id is not in this table\n"); } break; }
                         const uint64_t host=base+arr[2*j+1];
+                        u2_keys_host=host;
                         char cur[160]={0};
                         size_t n=sizeof(cur)-1;
                         while (n>0 && !safe_read(cur,host,n)) --n;
