@@ -3836,6 +3836,49 @@ static void __attribute__((ms_abi)) u3_widget_hook(uint64_t self, uint64_t frame
     pthread_mutex_unlock(&menu_text_lock);
 }
 static const unsigned char u2_bind_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56};
+/* U3 list (0x5e3e60, found 2026-10-29 with a probe; Bonus > Cinématiques / Trésors / Statistiques): one widget draws all the rows and keeps the selected row in its data source
+ * (widget+0x18; +0 get, +8 set, +0x38 minimum, +0x40 maximum, as the sliders), rows of 28.55 from the top of its rectangle (+0x90); the scroll bar is its left edge. The hook
+ * runs u3_widget_hook (the pending set(value)) and notes the list for u3_menu_buttons. */
+static struct { uint64_t w, ds, us; int cur, lo, hi, first, vis; float rc[4]; } u3_list;
+static volatile int u3_keep_view;   /* the pending jump is a hover / click: the view stays */
+/* Widget+0x184 = rows seen, +0x188 = first row seen (found 2026-10-29 by correlating a dump with the highlighted row: the view follows the selection with the highlight held on the
+ * 6th row, so first = cur - 5 until the ends). The wheel and the bar write +0x188 (u2_scroll_*, on the game's thread, as U2 does with +0x248): the selection stays where it is. */
+static void __attribute__((ms_abi)) u3_list_hook(uint64_t self, uint64_t frame, uint64_t image, uint64_t r14) {
+    /* a hover / click jump: the view must not follow the new selection (the game would bring it to the 6th row and the list would run under the cursor): the widget is told it
+     * has already followed (+0x16c holds the selection it last saw) and the first row seen is put back. BB_U3_KEEP=0 turns this off. */
+    uint64_t ds_pre=0; int32_t first_pre=-1;
+    const int keep=u2_jump_pending && u3_keep_view && safe_read(&ds_pre,self+0x18,8) && ds_pre==u2_jump_ds && safe_read(&first_pre,self+0x188,4);
+    u3_widget_hook(self,frame,image,r14);
+    int32_t vis0=0, first0=-1;
+    if (keep && !u2_jump_pending) { const int32_t v=u2_jump_val; safe_write(self+0x16c,&v,4); safe_write(self+0x188,&first_pre,4); u3_keep_view=0; }
+    safe_read(&vis0,self+0x184,4); safe_read(&first0,self+0x188,4);
+    if (u2_scroll_pending && u2_scroll_w==self && vis0>=3 && vis0<=32) {
+        int32_t t=u2_scroll_top;
+        if (u3_list.w==self) { if (t>u3_list.hi+1-vis0) t=u3_list.hi+1-vis0; if (t<u3_list.lo) t=u3_list.lo; }
+        safe_write(self+0x188,&t,4); first0=t;
+        u2_scroll_pending=0;
+    }
+    uint64_t ds=0, vt=0, f0=0, f30=0, f38=0; float rc[4]={0,0,0,0};
+    if (self<0x10000 || !safe_read(rc,self+0x90,16) || rc[3]<100.0f) return;
+    if (!safe_read(&ds,self+0x18,8) || ds<0x10000 || !safe_read(&vt,ds,8) || vt<0x10000) return;
+    if (!safe_read(&f0,vt,8) || !safe_read(&f30,vt+0x38,8) || !safe_read(&f38,vt+0x40,8)) return;
+    if (f0<image || f0>=image+0x16488f0 || f30<image || f30>=image+0x16488f0 || f38<image || f38>=image+0x16488f0) return;
+    const int cur=(int32_t)((u2_vcall_fn)(uintptr_t)f0)(ds), lo=(int32_t)((u2_vcall_fn)(uintptr_t)f30)(ds), hi=(int32_t)((u2_vcall_fn)(uintptr_t)f38)(ds);
+    if (hi-lo<4) return;
+    if (getenv("BB_U3_LISTDUMP")) {   /* (probe) the widget's bytes each time the selection changes, with the y of the highlighted row: the first row seen is cur - (y - top) / 28.55 */
+        static int last_cur=-99; static unsigned n;
+        if (cur!=last_cur && n<200) {
+            last_cur=cur; ++n;
+            uint32_t buf[0x180]; float hy=-1.0f;
+            pthread_mutex_lock(&menu_text_lock);
+            for (int i=0;i<U2_ROWS;++i) { const U2Row *r=&u2_rows[i]; if (r->us && now_us()-r->us<100000 && fabsf(r->h-28.6f)<0.4f && r->s5>=2.5f) hy=r->y; }
+            pthread_mutex_unlock(&menu_text_lock);
+            if (safe_read(buf,self,sizeof(buf))) { printf("Mouse: U3 LISTDUMP cur %d hy %.1f top %.1f:",cur,hy,rc[1]); for (int i=0;i<0x180;++i) if (buf[i]) printf(" %x=%x",i*4,buf[i]); printf("\n"); }
+        }
+    }
+    u3_list.first=(vis0>=3 && vis0<=32 && first0>=lo && first0<=hi) ? first0 : -1; u3_list.vis=vis0;
+    u3_list.w=self; u3_list.ds=ds; u3_list.cur=cur; u3_list.lo=lo; u3_list.hi=hi; memcpy(u3_list.rc,rc,sizeof(rc)); u3_list.us=now_us();
+}
 /* U2 Trésors, the 3D model (menutreasurescene.cpp, FUN_005d74f0(scene), every frame; Ghidra 2026-10-23). The scene keeps the model's orientation as a 4x4 matrix
  * (floats 12..27) and two angular speeds, float 0x1c (+0x70, around the vertical) and 0x1d (+0x74), that the right stick adds to (twice its deadzoned value, per frame) and that
  * the game clamps to +-2 rad/s and lets die down. Each frame the matrix is turned by speed x dt (dt: the float at image+0x111628c). Native mouse: while the left button is held on the
@@ -3960,6 +4003,7 @@ static const RuntimeGuestCallback guest_callbacks[]={
     {"U3 menu text probe (collection)",0x63d6f0,u2_text_probe_code,sizeof(u2_text_probe_code),8,u2_text_probe,NULL},
     {"U3 slider draw (collection)",0x5e2190,u2_bind_code,sizeof(u2_bind_code),8,u3_widget_hook,NULL},
     {"U3 list widget draw (collection)",0x5dca50,u2_bind_code,sizeof(u2_bind_code),8,u3_widget_hook,NULL},
+    {"U3 list widget draw (rows, scroll bar)",0x5e3e60,u2_bind_code,sizeof(u2_bind_code),8,u3_list_hook,NULL},
     {"U3 menu builder (photo row)",0x649660,u2_menu_builder_code,sizeof(u2_menu_builder_code),6,u3_menu_builder_hook,NULL},
     {"U3 list widget draw (option rows)",0x5de7c0,u2_bind_code,sizeof(u2_bind_code),8,u3_option_row_hook,NULL},
     {"U3 prompt bar: no compare-with-friends prompt (collection)",0x627d65,u3_compare_cmp_code,sizeof(u3_compare_cmp_code),sizeof(u3_compare_cmp_patch),NULL,u3_compare_cmp_patch},
@@ -5513,8 +5557,31 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
     static float sl_mx[8], sl_my[8], sl_top=-1e9f;
     uint32_t out=0;
     const int wheel=now<wheel_until_us[0] || now<wheel_until_us[1];
-    if (now<wheel_until_us[0]) out|=BTN_UP;          /* one row up / down per notch, as U2 */
-    if (now<wheel_until_us[1]) out|=BTN_DOWN;
+    static int ls_pend, ls_click;   /* the cursor moved / was clicked over the rows of a list and the selection has not followed yet */
+    const int list_on=u3_list.us && now-u3_list.us<150000;   /* a list with a scroll bar (u3_list_hook): the wheel moves its selection by set(value), three rows a notch */
+    if (now<wheel_until_us[0] && !list_on) out|=BTN_UP;          /* one row up / down per notch, as U2 */
+    if (now<wheel_until_us[1] && !list_on) out|=BTN_DOWN;
+    if (list_on) {
+        static uint64_t seen[2];
+        for (int i=0;i<2;++i) {
+            if (wheel_until_us[i]==seen[i]) continue;
+            seen[i]=wheel_until_us[i];
+            if (now>=wheel_until_us[i]) continue;
+            ls_pend=ls_click=0;   /* the rows move under a still cursor: no hover jump back */
+            if (u3_list.first>=0 && u3_list.hi-u3_list.lo+1>u3_list.vis) {   /* the view scrolls, the selection stays */
+                int t=(u2_scroll_pending && u2_scroll_w==u3_list.w ? u2_scroll_top : u3_list.first)+(i==0 ? -3 : 3);
+                if (t>u3_list.hi+1-u3_list.vis) t=u3_list.hi+1-u3_list.vis;
+                if (t<u3_list.lo) t=u3_list.lo;
+                u2_scroll_w=u3_list.w; u2_scroll_top=t; u2_scroll_pending=1;
+                continue;
+            }
+            int base=u2_jump_pending && u2_jump_ds==u3_list.ds ? u2_jump_val : u3_list.cur;
+            base+=i==0 ? -3 : 3;
+            if (base<u3_list.lo) base=u3_list.lo;
+            if (base>u3_list.hi) base=u3_list.hi;
+            u2_jump_ds=u3_list.ds; u2_jump_val=base; u2_jump_keep=0; u2_jump_pending=1;
+        }
+    }
     if (mouse & 8u) out|=BTN_CIRCLE;                 /* right button: back */
     SDL_Window *w=SDL_GetMouseFocus();
     if (!w) { sl_drag=0; return out; }
@@ -5673,6 +5740,74 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
     if (k && (k[SDL_SCANCODE_W] || k[SDL_SCANCODE_A] || k[SDL_SCANCODE_S] || k[SDL_SCANCODE_D] ||
               k[SDL_SCANCODE_UP] || k[SDL_SCANCODE_DOWN] || k[SDL_SCANCODE_LEFT] || k[SDL_SCANCODE_RIGHT])) {
         u2_hover=0; presses=0; return out;   /* the keys are being used: the cursor does not move the selection */
+    }
+    /* A list with a scroll bar (Bonus > Cinématiques, Trésors, Statistiques): the rows are not widgets of their own, the list keeps the selected row in a data source.
+     * Cursor over the rows: the selection jumps under it (set(value), counted from the highlighted row); click: jump, then cross once the list has landed; button held on the
+     * bar (the left edge of the list): the selection goes to the place of the cursor along the bar (the game scrolls the view to it and the thumb follows). */
+    static int ls_drag, ls_want=-1, ls_cross_want=-1; static uint64_t ls_last_us, ls_cross_deadline, ls_landed;
+    if (!list_on || !left) ls_drag=0;
+    if (list_on) {
+        const float P=28.55f, lx=u3_list.rc[0], ly=u3_list.rc[1], lw=u3_list.rc[2];
+        const int n=u3_list.hi-u3_list.lo+1;
+        int vis=(int)floorf(u3_list.rc[3]/P+0.5f); if (vis<1) vis=1;
+        const float rail_h=(float)vis*P;
+        /* the highlighted row of the list itself (28.6 tall, in the list's first column): the texts of the side panel (x 705) are drawn "selected" too.
+         * It also gives the top of the first row seen (Trésors: 119, not the rectangle's 114), kept while the highlight is out of view. */
+        U2Row lsel={0}; int have_lsel=0;
+        static float ls_y0; static uint64_t ls_y0_w;
+        pthread_mutex_lock(&menu_text_lock);
+        for (int i=0;i<U2_ROWS;++i) {
+            const U2Row *r=&u2_rows[i];
+            if (!r->us || now-r->us>=100000 || fabsf(r->h-28.6f)>=0.4f || r->x<lx || r->x>lx+120.0f || r->s5<2.5f) continue;
+            if (!have_lsel || r->s5>lsel.s5) { lsel=*r; have_lsel=1; }
+        }
+        pthread_mutex_unlock(&menu_text_lock);
+        if (ls_y0_w!=u3_list.w) { ls_y0_w=u3_list.w; ls_y0=ly; }
+        if (have_lsel && !u2_jump_pending && now-ls_last_us>250000 && u3_list.first>=0 && u3_list.cur>=u3_list.first && u3_list.cur<u3_list.first+vis) ls_y0=lsel.y-(float)(u3_list.cur-u3_list.first)*P;
+        const int in_rail=ux>=lx-8.0f && ux<=lx+22.0f && uy>=ly && uy<ly+rail_h;
+        const int over_rows=ux>lx+22.0f && ux<=lx+lw && uy>=ls_y0 && uy<ls_y0+rail_h;
+        if (clicked && in_rail) { ls_drag=1; if (mouse_debug()) printf("Mouse: U3 list bar press (rect %.1f %.1f %.1f %.1f, %d values, %d rows seen)\n",lx,ly,lw,u3_list.rc[3],n,vis); }
+        if (moved) ls_pend=1;
+        if (clicked) ls_click=1;
+        if (!over_rows) ls_pend=ls_click=0;
+        if (ls_drag && left) {
+            float th=rail_h*(float)vis/(float)n; if (th<12.0f) th=12.0f;
+            float f=(uy-th*0.5f-ly)/(rail_h-th); f=f<0.0f ? 0.0f : f>1.0f ? 1.0f : f;
+            if (u3_list.first>=0 && n>u3_list.vis) {   /* the bar moves the view, not the selection */
+                const int t=u3_list.lo+(int)floorf(f*(float)(n-u3_list.vis)+0.5f);
+                if (!u2_scroll_pending) { u2_scroll_w=u3_list.w; u2_scroll_top=t; u2_scroll_pending=1; }
+            } else {
+                const int v=u3_list.lo+(int)floorf(f*(float)(n-1)+0.5f);
+                if (v!=u3_list.cur && !u2_jump_pending) { u2_jump_ds=u3_list.ds; u2_jump_val=v; u2_jump_keep=0; u2_jump_pending=1; }
+            }
+        } else if (over_rows && (ls_pend || ls_click)) {
+            const int row=(int)floorf((uy-ls_y0)/P);
+            static int keep_off=-1; if (keep_off<0) { const char *e=getenv("BB_U3_KEEP"); keep_off=e && e[0]=='0'; }
+            const int edge=(row<=0 || row>=vis-1) && n>vis;   /* (the first and last rows seen make the game scroll: only a click goes there) */
+            const int landed=ls_want<0 || u3_list.cur==ls_want || now-ls_last_us>300000;
+            const int want=u3_list.first>=0 ? u3_list.first+row : u3_list.cur+(int)floorf((uy-lsel.y)/P);   /* (counted from the first row seen: the bar may have scrolled the highlight out of view) */
+            if (!have_lsel && u3_list.first<0) { /* (the highlight is not drawn yet: wait) */ }
+            else if (want>=u3_list.lo && want<=u3_list.hi && want!=u3_list.cur && landed && !u2_jump_pending && (ls_click || !edge || !keep_off)) {   /* (the view stays put now: edge rows are fine too) */
+                u3_keep_view=!keep_off;
+                u2_jump_ds=u3_list.ds; u2_jump_val=want; u2_jump_keep=0; u2_jump_pending=1; ls_last_us=now; ls_want=want;
+                if (ls_click) { ls_cross_want=want; ls_cross_deadline=now+1500000; ls_landed=0; }
+                if (mouse_debug()) printf("Mouse: U3 list jump %d -> %d (row %d/%d, selected row top %.1f, cursor %.1f)%s\n",u3_list.cur,want,row,vis,lsel.y,uy,ls_click ? " click" : "");
+                ls_pend=ls_click=0;
+            } else if (want==u3_list.cur) {
+                if (ls_click) cross_until=now+120000;
+                ls_pend=ls_click=0;
+            }
+        }
+        if (ls_cross_want>=0) {   /* a click moved the selection: cross once the list reports it (and has been there 120 ms) */
+            if (now>ls_cross_deadline) ls_cross_want=-1;
+            else if (u3_list.cur==ls_cross_want) { if (!ls_landed) ls_landed=now; else if (now-ls_landed>=120000) { ls_cross_want=-1; ls_landed=0; cross_until=now+120000; } }
+            else ls_landed=0;
+        }
+        if (over_rows || in_rail || ls_drag) {
+            u2_hover=1; presses=0; dir=-1;
+            if (now<cross_until) out|=BTN_CROSS;
+            return out;
+        }
     }
     if (!have_hov || !have_sel) { u2_hover=0; presses=0; dir=-1; return out; }
     u2_hover=1;
