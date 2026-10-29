@@ -2696,6 +2696,7 @@ static float u3_empty_y[8]; static uint64_t u3_empty_us[8];   /* y of the rows w
 /* U3: the < > of a row are two texts 16 wide and 33.6 tall, side by side (x 378 and 394 on the audio volume rows); seen lately, kept here (width < 20 is not a row) */
 static U2Row u3_arrows[16];
 static volatile uint64_t u3_gallery_stick_until; static volatile int u3_gallery_stick_dir;   /* a click on its < >: the left stick pushed that way for a moment */
+static volatile uint64_t u3_gallery_wake_until;   /* the mouse moved over the viewer: its stick wake-up lasts until then */
 static volatile uint64_t u3_gallery_us;   /* the art gallery viewer's < > text seen (Bonus > Récompenses > Galeries d'art) */
 static void u3_arrow_note(const float *r) {
     const uint64_t now=now_us();
@@ -3805,6 +3806,13 @@ static void u3_row_jump(uint64_t self, uint64_t image, const float *rc, uint64_t
         }
     }
 }
+/* The rows drawn lately (buttons and option rows): the Chapitres carousel (u3_carousel_hook) switches itself off while one of them is focused, and switches them off when it is hovered. */
+static struct { uint64_t w, us; } u3_rowreg[8];
+static void u3_row_reg(uint64_t self, uint64_t now) {
+    int slot=0;
+    for (int i=0;i<8;++i) { if (u3_rowreg[i].w==self) { slot=i; break; } if (u3_rowreg[i].us<u3_rowreg[slot].us) slot=i; }
+    u3_rowreg[slot].w=self; u3_rowreg[slot].us=now;
+}
 /* The rows of the option screens (0x5de7c0, drawn from 0x5deae5: label + value of Jeu, Audio, Affichage...): the same kind of widget (rect +0x90, flag +8, data source +0x18),
  * but its data source has no usable min/max, so no check on them. */
 static void __attribute__((ms_abi)) u3_option_row_hook(uint64_t self, uint64_t frame, uint64_t image, uint64_t r14) {
@@ -3812,8 +3820,57 @@ static void __attribute__((ms_abi)) u3_option_row_hook(uint64_t self, uint64_t f
     float rc[4]={0,0,0,0};
     if (self<0x10000 || !safe_read(rc,self+0x90,16)) return;
     u3_row_jump(self,image,rc,now_us(),1);
+    u3_row_reg(self,now_us());
     static uint64_t last; const uint64_t now=now_us();
     if (mouse_debug() && now-last>2000000) { last=now; printf("Mouse: U3 option row hook alive: %#llx rect %.1f %.1f %.1f %.1f\n",(unsigned long long)self,rc[0],rc[1],rc[2],rc[3]); }
+}
+/* The carousel of the Chapitres screen (0x5eccb0, found 2026-10-29 from the return address 0x5ee5ba of its header text): a widget with a data source (+0x18, same slots as the
+ * sliders) that keeps the focus flag +8 as the rows do. Without this the game kept it focused whatever row the cursor was on (Difficulté / Mode de jeu then never got the click). */
+static struct { uint64_t w, ds, us; int cur, lo, hi; float rc[4]; } u3_car;   /* the carousel on screen: its value (chapter), range and rectangle (tall = opened, with the pictures) */
+static void __attribute__((ms_abi)) u3_carousel_hook(uint64_t self, uint64_t frame, uint64_t image, uint64_t r14) {
+    (void)frame; (void)r14;
+    float rc[4]={0,0,0,0};
+    if (self<0x10000 || !safe_read(rc,self+0x90,16)) return;
+    const uint64_t now=now_us();
+    {   /* the chapter: data source +0x18, get +0, set +8, minimum +0x38, maximum +0x40 (as the sliders); a pending set(value) of the wheel / the arrows is applied here */
+        uint64_t ds=0, vt=0, f0=0, f8=0, f30=0, f38=0;
+        if (safe_read(&ds,self+0x18,8) && ds>=0x10000 && safe_read(&vt,ds,8) && vt>=0x10000 && safe_read(&f0,vt,8) && safe_read(&f8,vt+8,8) && safe_read(&f30,vt+0x38,8) && safe_read(&f38,vt+0x40,8) &&
+            f0>=image && f0<image+0x16488f0 && f8>=image && f8<image+0x16488f0 && f30>=image && f30<image+0x16488f0 && f38>=image && f38<image+0x16488f0) {
+            int cur=(int32_t)((u2_vcall_fn)(uintptr_t)f0)(ds);
+            const int lo=(int32_t)((u2_vcall_fn)(uintptr_t)f30)(ds), hi=(int32_t)((u2_vcall_fn)(uintptr_t)f38)(ds);
+            if (u2_jump_pending && u2_jump_ds==ds) {
+                int v=u2_jump_val; if (v<lo) v=lo; if (v>hi) v=hi;
+                ((u2_set_fn)(uintptr_t)f8)(ds,v);
+                u2_jump_pending=0; u2_jump_keep=0;
+                if (mouse_debug()) printf("Mouse: U3 carousel set(%d) (was %d, range %d..%d)\n",v,cur,lo,hi);
+                cur=v;
+            }
+            u3_car.w=self; u3_car.ds=ds; u3_car.cur=cur; u3_car.lo=lo; u3_car.hi=hi; memcpy(u3_car.rc,rc,sizeof(rc)); u3_car.us=now;
+        }
+    }
+    /* the widget is 289 tall (header + carousel), not a 24..42 row: the focus follows the hovered row by hand */
+    uint8_t cur_flag=0;
+    if (!safe_read(&cur_flag,self+8,1) || cur_flag>1) return;
+    const float cy=u3_jf_y+u3_jf_h*0.5f;
+    const int hov_car=u3_jf_us && now-u3_jf_us<150000 && fabsf(rc[0]-u3_jf_x)<12.0f && cy>=rc[1] && cy<rc[1]+rc[3];
+    int rows_on=0;
+    for (int i=0;i<8;++i) {   /* the rows focused right now (the jump to a row does not refresh the hover: the state is read, not deduced) */
+        uint8_t f=0;
+        if (!u3_rowreg[i].w || now-u3_rowreg[i].us>100000 || !safe_read(&f,u3_rowreg[i].w+8,1) || f!=1) continue;
+        if (hov_car) { ((u2_set_fn)(uintptr_t)(image+0x5ddc80))(u3_rowreg[i].w,0); if (mouse_debug()) printf("Mouse: U3 carousel hovered: row %#llx off\n",(unsigned long long)u3_rowreg[i].w); }
+        else rows_on=1;
+    }
+    const int want=hov_car ? 1 : (rows_on ? 0 : cur_flag);
+    if (cur_flag!=want) {
+        ((u2_set_fn)(uintptr_t)(image+0x5ddc80))(self,want);
+        if (mouse_debug()) printf("Mouse: U3 carousel focus %d -> %d\n",cur_flag,want);
+    }
+    static uint64_t last;
+    if (mouse_debug() && now-last>2000000) {
+        last=now;
+        uint8_t fl=0; safe_read(&fl,self+8,1);
+        printf("Mouse: U3 carousel hook alive: %#llx rect %.1f %.1f %.1f %.1f flag %d\n",(unsigned long long)self,rc[0],rc[1],rc[2],rc[3],fl);
+    }
 }
 /* U3 slider draw (0x5e2190, found by disassembly 2026-10-28; (widget, ?, draw context), runs every frame: percent = (value - min) * 100 / (max - min)). Data source at
  * widget+0x18 as in U2, but its virtual slots moved: +0 get, +8 set(value), +0x38 minimum, +0x40 maximum. The hook registers the widget like U2's and carries a pending set(value). */
@@ -3836,7 +3893,7 @@ static void __attribute__((ms_abi)) u3_widget_hook(uint64_t self, uint64_t frame
     const uint64_t now=now_us();
     float rc[4]={0,0,0,0};
     safe_read(rc,self+0x90,16);
-    if (hi==lo) u3_row_jump(self,image,rc,now,1);
+    if (hi==lo) { u3_row_jump(self,image,rc,now,1); u3_row_reg(self,now); }
     pthread_mutex_lock(&menu_text_lock);
     int slot=-1, oldest=0;
     for (int i=0;i<U2_WIDGETS;++i) { if (u2_widgets[i].w==self) { slot=i; break; } if (u2_widgets[i].us<u2_widgets[oldest].us) oldest=i; }
@@ -4047,6 +4104,7 @@ static const RuntimeGuestCallback guest_callbacks[]={
     {"U3 list widget draw (rows, scroll bar)",0x5e3e60,u2_bind_code,sizeof(u2_bind_code),8,u3_list_hook,NULL},
     {"U3 menu builder (photo row)",0x649660,u2_menu_builder_code,sizeof(u2_menu_builder_code),6,u3_menu_builder_hook,NULL},
     {"U3 list widget draw (option rows)",0x5de7c0,u2_bind_code,sizeof(u2_bind_code),8,u3_option_row_hook,NULL},
+    {"U3 carousel draw (chapters)",0x5eccb0,u2_bind_code,sizeof(u2_bind_code),8,u3_carousel_hook,NULL},
     {"U3 prompt bar: no compare-with-friends prompt (collection)",0x627d65,u3_compare_cmp_code,sizeof(u3_compare_cmp_code),sizeof(u3_compare_cmp_patch),NULL,u3_compare_cmp_patch},
     {"U3 prompt bar flags (collection)",0x6277e8,u3_bar_flags_code,sizeof(u3_bar_flags_code),6,u3_bar_flags,NULL},
     {"U2 menu builder probe (collection)",0x5c53a0,u2_menu_builder_code,sizeof(u2_menu_builder_code),6,u2_menu_builder_probe,NULL},
@@ -5276,6 +5334,7 @@ static int u2_menu_active(uint64_t now) {
     pthread_mutex_lock(&menu_text_lock);
     for (int i=0;i<U2_ROWS && !hi;++i) if (u2_rows[i].us && now-u2_rows[i].us<150000 && u2_rows[i].s5>=2.5f) hi=1;
     if (!hi) hi=u2_list_rows_on(now);   /* (the bar can scroll the highlighted row out of sight: the rows of the list still say it is a menu) */
+    if (!hi && runtime_u3_game && u3_list.us && now-u3_list.us<150000) hi=1;   /* U3: same, the list widget is being drawn (a drag of the bar sent the highlight out of view and the mouse went back to the game) */
     pthread_mutex_unlock(&menu_text_lock);
     const int layout=u2_layout_us && now-u2_layout_us<400000 && u2_layout_us<=now+1000000;
     u2_layout_on=layout;
@@ -5608,8 +5667,23 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
     }
     const int list_on=u3_list.us && now-u3_list.us<150000;   /* a list with a scroll bar (u3_list_hook): the wheel moves its selection by set(value), three rows a notch */
     const int dlg=u3_dialog_us && now-u3_dialog_us<300000;   /* an information box is open: the menu below does not scroll */
-    if (now<wheel_until_us[0] && !list_on && !dlg) out|=BTN_UP;          /* one row up / down per notch, as U2 */
-    if (now<wheel_until_us[1] && !list_on && !dlg) out|=BTN_DOWN;
+    const int car_on=u3_car.us && now-u3_car.us<150000 && u3_car.rc[3]>200.0f && u3_car.hi>u3_car.lo;   /* the Chapitres carousel is opened: wheel and < > change the chapter */
+    if (now<wheel_until_us[0] && !list_on && !car_on && !dlg) out|=BTN_UP;          /* one row up / down per notch, as U2 */
+    if (now<wheel_until_us[1] && !list_on && !car_on && !dlg) out|=BTN_DOWN;
+    if (car_on && !dlg) {
+        static uint64_t cseen[2];
+        for (int i=0;i<2;++i) {
+            if (wheel_until_us[i]==cseen[i]) continue;
+            cseen[i]=wheel_until_us[i];
+            if (now>=wheel_until_us[i]) continue;
+            int base=u2_jump_pending && u2_jump_ds==u3_car.ds ? u2_jump_val : u3_car.cur;
+            base+=i==0 ? -1 : 1;
+            if (base<u3_car.lo) base=u3_car.lo;
+            if (base>u3_car.hi) base=u3_car.hi;
+            u2_jump_ds=u3_car.ds; u2_jump_val=base; u2_jump_keep=0; u2_jump_pending=1;
+            if (mouse_debug()) printf("Mouse: U3 carousel wheel %s -> %d (range %d..%d)\n",i==0 ? "up" : "down",base,u3_car.lo,u3_car.hi);
+        }
+    }
     if (list_on && !dlg) {
         static uint64_t seen[2];
         for (int i=0;i<2;++i) {
@@ -5647,6 +5721,7 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
     last_x=mx; last_y=my;
     const int left=(mouse & 1u)!=0, clicked=left && !last_left;
     last_left=left;
+    if (moved && u3_gallery_us && now-u3_gallery_us<4000000) u3_gallery_wake_until=now+200000;
     {   /* Trésors: a left drag to the right of the list turns the 3D model (u3_model_hook; the caller feeds u2_model_ax / ay from the mouse motion) */
         const int model_on=u3_model_us && now-u3_model_us<200000;
         if (!left || !model_on) u2_model_drag=0; else if (clicked && ux>=712.0f && uy>=130.0f && uy<=600.0f) u2_model_drag=1;
@@ -5667,6 +5742,7 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
         if (!r->us || now-r->us>=100000 || r->h<24.0f || r->h>42.0f || r->w<60.0f) continue;
         if (fabsf(r->h-34.2f)<0.2f) continue;                     /* the section titles, never chosen */
         if (r->s5>=2.5f && (!have_sel || r->s5>sel.s5)) { sel=*r; have_sel=1; }
+        if (runtime_u3_game && r->s5>=2.5f && fabsf(r->x-96.0f)<3.0f && fabsf(r->w-400.0f)<3.0f && fabsf(r->y-282.0f)<1.0f) u3_credits_sel_us=now;   /* (the Crédits label itself: `sel` may be another text of the same line with the same strength, e.g. one at x 212) */
         if (r->w>750.0f && !(fabsf(r->x-380.0f)<1.0f && fabsf(r->w-520.0f)<1.0f)) continue;   /* a wide banner above the menu (1000 wide) is not a row: hovering it must not clear the selection */
         if (ux>=r->x-4.0f && ux<=r->x+r->w+4.0f && uy>=r->y && uy<r->y+r->h && (!have_hov || r->w<hov.w)) { hov=*r; have_hov=1; }
     }
@@ -5689,6 +5765,20 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
      * (the row is jumped to first, as for a hover, then the press). */
     static int ar_dir; static float ar_cy, ar_x, ar_y, ar_h, ar_w; static uint64_t ar_until, ar_seen, ar_press_until;
     int arrow_click=0;
+    static uint64_t car_until;
+    if (clicked && car_on) {   /* the arrows of the opened carousel sit outside its rectangle (x -21 and +21 around it, middle of its height) */
+        const float *r=u3_car.rc;
+        const int left_a=ux>=r[0]-55.0f && ux<=r[0]-4.0f, right_a=ux>=r[0]+r[2]+4.0f && ux<=r[0]+r[2]+55.0f;
+        if ((left_a || right_a) && uy>=r[1]+60.0f && uy<=r[1]+r[3]-60.0f) {
+            int base=u2_jump_pending && u2_jump_ds==u3_car.ds ? u2_jump_val : u3_car.cur;
+            base+=left_a ? -1 : 1;
+            if (base<u3_car.lo) base=u3_car.lo;
+            if (base>u3_car.hi) base=u3_car.hi;
+            u2_jump_ds=u3_car.ds; u2_jump_val=base; u2_jump_keep=0; u2_jump_pending=1;
+            car_until=now+250000;
+            if (mouse_debug()) printf("Mouse: U3 carousel arrow %s -> %d\n",left_a ? "left" : "right",base);
+        }
+    }
     if (clicked && u3_gallery_us && now-u3_gallery_us<4000000 && uy>=596.0f && uy<=664.0f && ((ux>=92.0f && ux<=146.0f) || (ux>=1134.0f && ux<=1188.0f))) {
         ar_dir=ux<640.0f ? 2 : 3; ar_until=0; arrow_click=1;   /* gallery viewer: no row to select; it reads the left stick (A / D work), not the d-pad */
         u3_gallery_stick_dir=ar_dir==2 ? -1 : 1; u3_gallery_stick_until=now+150000;        if (mouse_debug()) printf("Mouse: U3 gallery arrow press: %s\n",ar_dir==2 ? "left" : "right");
@@ -5797,7 +5887,7 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
         } else ar_seen=0;
     }
     if (now<ar_press_until) out|=ar_dir==2 ? BTN_LEFT : BTN_RIGHT;
-    if (now<ar_until || now<ar_press_until || now<u3_gallery_stick_until) { u2_hover=0; presses=0; dir=-1; return out; }
+    if (now<ar_until || now<ar_press_until || now<u3_gallery_stick_until || now<car_until) { u2_hover=0; presses=0; dir=-1; return out; }
     if (k && (k[SDL_SCANCODE_W] || k[SDL_SCANCODE_A] || k[SDL_SCANCODE_S] || k[SDL_SCANCODE_D] ||
               k[SDL_SCANCODE_UP] || k[SDL_SCANCODE_DOWN] || k[SDL_SCANCODE_LEFT] || k[SDL_SCANCODE_RIGHT])) {
         u2_hover=0; presses=0; return out;   /* the keys are being used: the cursor does not move the selection */
@@ -6592,6 +6682,7 @@ static void sample_host(PadData *d) {
     int ly=action_down(A_LS_DOWN,k,mouse,now)-action_down(A_LS_UP,k,mouse,now);
     if (lx) d->left_x=(uint8_t)(lx<0 ? 0 : 255);
     if (runtime_u3_game && now<u3_gallery_stick_until) d->left_x=(uint8_t)(u3_gallery_stick_dir<0 ? 0 : 255);
+    if (runtime_u3_game && now<u3_gallery_wake_until && now>=u3_gallery_stick_until) d->left_y=(uint8_t)200;   /* the viewer's < > fade out after a while without a controller input: a small vertical push (no image change) wakes them when the mouse moves */
     if (u1_on_jetski()) {
         /* on the jetski, forward / back (the keys of the left stick's up / down) are the throttle (R1) and the brake (Square) */
         if (action_down(A_LS_UP,k,mouse,now)) d->buttons|=BTN_R1;
