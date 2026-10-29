@@ -3130,6 +3130,39 @@ static void __attribute__((ms_abi)) u2_menu_builder_probe(uint64_t menu, uint64_
         }
     }
 }
+/* U3: the same photo mode row ("Mode photo activé avec", text id a3da9f13, last record of its page) dropped from the menu definition (func 0x11f2e30, hash 0x74ffceeb),
+ * from U3's menu builder (0x649660). Off with BB_U3_PHOTO_ROW=1. */
+/* U3's definition tree does not have U2's page layout: walk every list of the tree (same 0x70-byte records) and find the record holding the text id in any word */
+static void u3_photo_walk(uint64_t list, int depth) {
+    int32_t count=0; uint64_t arr=0;
+    if (depth>8 || !safe_read(&count,list,4) || !safe_read(&arr,list+8,8) || count<=0 || count>400) return;
+    for (int r=0;r<count;++r) {
+        uint8_t rec[0x70];
+        if (!safe_read(rec,arr+0x70u*(uint64_t)r,0x70)) break;
+        for (int off=0;off<=0x6c;off+=4) {
+            uint32_t w; memcpy(&w,rec+off,4);
+            if (w!=0xa3da9f13u) continue;
+            printf("Runtime: U3 photo mode row: list %#llx depth %d record %d of %d word +%#x\n",(unsigned long long)list,depth,r,count,off);
+            if (r==count-1) { const int32_t nc=count-1; if (safe_write(list,&nc,4)) printf("Runtime: U3 photo mode row removed (%d rows left)\n",nc); return; }
+        }
+        for (int off=0;off<=0x68;off+=8) {
+            uint64_t q; memcpy(&q,rec+off,8);
+            if (u2_is_list_head(q)) u3_photo_walk(q,depth+1);
+        }
+    }
+}
+static void __attribute__((ms_abi)) u3_menu_builder_hook(uint64_t menu, uint64_t unused, uint64_t image, uint64_t r14) {
+    (void)menu; (void)unused; (void)r14;
+    static int tries;
+    const char *e=getenv("BB_U3_PHOTO_ROW");
+    if (image<0x10000 || tries>=40 || (e && e[0]=='1')) return;
+    const uint64_t def=((u2_get_data_fn)(uintptr_t)(image+0x11f2e30))(0x74ffceebu);
+    int32_t pages=0; uint64_t parr=0;
+    if (def<=0x10000 || !safe_read(&pages,def,4) || !safe_read(&parr,def+8,8) || pages<=0 || pages>400) return;
+    ++tries;
+    (void)pages; (void)parr;
+    u3_photo_walk(def,0);
+}
 static const unsigned char u2_menu_builder_code[]={0x55,0x48,0x89,0xe5,0x41,0x57};
 static const unsigned char u2_text_lookup_code[]={0x55,0x48,0x89,0xe5,0x41,0x56};   /* 0xcddc00, the search the callers use (0xcddc60 wraps it with a default, no caller) */
 static const unsigned char u1_menu_item_begin_code[]={0x48,0x8b,0x07,0x4c,0x89,0xf6,0x4c,0x89,0xfa};
@@ -3828,6 +3861,7 @@ static const RuntimeGuestCallback guest_callbacks[]={
     {"U3 menu text probe (collection)",0x63d6f0,u2_text_probe_code,sizeof(u2_text_probe_code),8,u2_text_probe,NULL},
     {"U3 slider draw (collection)",0x5e2190,u2_bind_code,sizeof(u2_bind_code),8,u3_widget_hook,NULL},
     {"U3 list widget draw (collection)",0x5dca50,u2_bind_code,sizeof(u2_bind_code),8,u3_widget_hook,NULL},
+    {"U3 menu builder (photo row)",0x649660,u2_menu_builder_code,sizeof(u2_menu_builder_code),6,u3_menu_builder_hook,NULL},
     {"U3 list widget draw (option rows)",0x5de7c0,u2_bind_code,sizeof(u2_bind_code),8,u3_option_row_hook,NULL},
     {"U3 prompt bar: no compare-with-friends prompt (collection)",0x627d65,u3_compare_cmp_code,sizeof(u3_compare_cmp_code),sizeof(u3_compare_cmp_patch),NULL,u3_compare_cmp_patch},
     {"U3 prompt bar flags (collection)",0x6277e8,u3_bar_flags_code,sizeof(u3_bar_flags_code),6,u3_bar_flags,NULL},
