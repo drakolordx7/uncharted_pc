@@ -2735,6 +2735,10 @@ static void __attribute__((ms_abi)) u2_text_probe(uint64_t unused0, uint64_t unu
     {
         float r[4], st[8], sz[2];
         if (safe_read(r,saved_register(5),16) && r[3]>=700.0f && r[3]<=800.0f && r[2]>=40.0f) u2_credits_us=now_us();
+        if (runtime_u3_game && mouse_debug() && safe_read(r,saved_register(5),16) && r[3]>=150.0f) {   /* probe: shape of the U3 credits text */
+            static uint64_t last_us; const uint64_t t=now_us();
+            if (t-last_us>500000) { last_us=t; printf("U3 big text rect x=%.1f y=%.1f w=%.1f h=%.1f\n",r[0],r[1],r[2],r[3]); }
+        }
         if (safe_read(r,saved_register(5),16) && fabsf(r[0]-298.1f)<1.5f && fabsf(r[1]-156.2f)<1.5f && fabsf(r[2]-683.8f)<2.0f && fabsf(r[3]-318.8f)<2.0f) u2_popup_us=now_us();
         if (safe_read(r,saved_register(5),16) && safe_read(sz,saved_register(3)+0x3c,8) && sz[0]>=100.0f && sz[1]>0.0f && sz[1]<=12.0f && r[3]>=24.0f && r[3]<=42.0f)
             u2_slider_note(r,sz[0]);
@@ -5173,6 +5177,7 @@ static int u1_on_jetski(void) {
  * cursor) until the selected row is the one under the cursor; a click does the same, then presses cross. Not yet: wheel, sliders,
  * lists, Yes/No boxes. */
 static int u2_menu_on, u2_hover, u2_menu_reset;
+static volatile uint64_t u3_credits_sel_us;   /* U3: the last row of the Options panel (Crédits) was the selected one at this moment */
 static volatile int u2_credits_on;     /* the credits are on screen (u2_credits_us) */
 static volatile int u2_layout_on;      /* the controller's picture is on screen (u2_layout_us) */
 static volatile int u2_keys_row_sel;   /* the Commandes row (the first of the two wide rows of that screen) is the selected one */
@@ -5193,7 +5198,16 @@ static int u2_menu_active(uint64_t now) {
     u2_credits_on=credits;
     const int carousel=u2_popup_us && now-u2_popup_us<700000 && u2_popup_us<=now+1000000;   /* (the carousel has no row to highlight either) */
     if (hi || layout || credits || carousel) seen=now;
-    const int on=seen && now-seen<300000;
+    int on=seen && now-seen<300000;
+    /* U3 credits: drawn without any text the hook sees, so the menu would go off. Right after the cross on the last row of the Options
+     * panel (u3_credits_sel_us) the menu is kept on (Esc and the side button go back) until a menu row is drawn again. */
+    if (runtime_u3_game) {
+        static int guess; static uint64_t guess_us;
+        if (hi || layout || carousel) guess=0;
+        else if (!guess && !on && u2_menu_on && u3_credits_sel_us && now-u3_credits_sel_us<2000000) { guess=1; guess_us=now; printf("Runtime: U3 credits assumed on screen\n"); }
+        if (guess && now-guess_us>600000000) guess=0;
+        if (guess) { on=1; seen=now; u2_credits_on=1; }
+    }
     if (on!=u2_menu_on) { u2_menu_on=on; u2_menu_reset=on; u2_menu_key_guard=1; bbgpu_menu_state(on); printf("Runtime: %s menu mouse %s\n",runtime_u3_game ? "U3" : "U2",on ? "on" : "off"); }
     return on;
 }
@@ -5544,6 +5558,7 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
         for (int i=0;i<8;++i)
             if (u3_empty_us[i] && now-u3_empty_us[i]<300000 && fabsf(u3_empty_y[i]-hov.y)<1.0f) { have_hov=0; break; }   /* a ghost row: not a target */
     u3_sel_value=sel_value;
+    if (have_sel && fabsf(sel.x-96.0f)<3.0f && fabsf(sel.w-400.0f)<3.0f && fabsf(sel.y-282.0f)<1.0f) u3_credits_sel_us=now;   /* (measured 2026-10-29: the Crédits row of the Options panel; a row "Rétablir" is below it) */
     u2_keys_row_sel=have_sel && u3_keys_row_us && now-u3_keys_row_us<150000 && fabsf(sel.y-u3_keys_row_y)<1.0f;
     if (sel_value) u3_hide_select_us=now_us();
     /* The < > of a row (u3_arrows: two 16 wide texts side by side): a click on the left one presses left, on the right one right, once the row is the selected one
