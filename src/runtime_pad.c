@@ -2690,6 +2690,7 @@ static int u3_slider_steps(void) {   /* BB_U3_SLIDER_STEPS: how many left / righ
     if (steps<0) { const char *e=getenv("BB_U3_SLIDER_STEPS"); steps=e ? atoi(e) : 14; if (steps<2) steps=2; if (steps>100) steps=100; }
     return steps;
 }
+static float u3_empty_y[8]; static uint64_t u3_empty_us[8];   /* y of the rows with an empty label, seen lately (ghost rows) */
 static void u2_row_note(const float *r, float s5, float a) {
     const uint64_t now=now_us();
     pthread_mutex_lock(&menu_text_lock);
@@ -2740,6 +2741,31 @@ static void __attribute__((ms_abi)) u2_text_probe(uint64_t unused0, uint64_t unu
                 printf("Mouse: U3 short text rect %.1f %.1f %.1f %.1f size %.1f %.1f%s\n",r[0],r[1],r[2],r[3],sz[0],sz[1],
                        sz[0]>=100.0f && sz[1]<=12.0f ? " (U2's rail shape: a slider)" : "");
             }
+        }
+        /* BB_U3_CALLERS=1: for each distinct row-shaped text rect of a U3 menu, the words of the stack that point into the code (who draws it), once per rect */
+        if (runtime_u3_game && getenv("BB_U3_CALLERS") && safe_read(r,saved_register(5),16) && r[3]>=24.0f && r[3]<=42.0f && r[2]>=20.0f) {
+            static float seen[96][4]; static int n;
+            int dup=0;
+            for (int i=0;i<n;++i) if (fabsf(seen[i][0]-r[0])<0.5f && fabsf(seen[i][1]-r[1])<0.5f && fabsf(seen[i][2]-r[2])<0.5f && fabsf(seen[i][3]-r[3])<0.5f) { dup=1; break; }
+            if (!dup) {
+                if (n<96) { memcpy(seen[n],r,16); ++n; } else n=0;
+                printf("Mouse: U3 text callers rect %.1f %.1f %.1f %.1f:",r[0],r[1],r[2],r[3]);
+                for (int k=0;k<96;++k) {
+                    uint64_t wd=0;
+                    if (safe_read(&wd,guest_callback_rsp+8u*(uint64_t)k,8) && wd>image+0x1000 && wd<image+0x16488f0) printf(" +%d:%#llx",k*8,(unsigned long long)(wd-image));
+                }
+                printf("\n");
+            }
+        }
+        /* U3: a row whose label text is empty (width 0, in the left column) is a ghost, drawn but not meant to be chosen (Sortie audio under "Avant"): the hover skips it */
+        if (runtime_u3_game && safe_read(r,saved_register(5),16) && safe_read(sz,saved_register(3)+0x3c,8) && sz[0]<0.5f && fabsf(r[0]-96.0f)<3.0f && r[3]>=24.0f && r[3]<=42.0f) {
+            const uint64_t t=now_us();
+            pthread_mutex_lock(&menu_text_lock);
+            int slot=-1, oldest=0;
+            for (int i=0;i<8;++i) { if (fabsf(u3_empty_y[i]-r[1])<0.5f) { slot=i; break; } if (u3_empty_us[i]<u3_empty_us[oldest]) oldest=i; }
+            if (slot<0) slot=oldest;
+            u3_empty_y[slot]=r[1]; u3_empty_us[slot]=t;
+            pthread_mutex_unlock(&menu_text_lock);
         }
         /* U3 marks the selected row with style[6] at 1 (it never touches style[5]): kept as 3 in s5, the value the menu code knows.
          * style[7] is 1 on every U3 row: it is not the "chosen one of Oui / Non" sign of U2 and is left at 0. */
@@ -3595,6 +3621,33 @@ static int u2_slider_widget(float cy, uint64_t now, uint64_t *ds, int *lo, int *
  * d-pad row by row. Written by u3_menu_buttons, applied by the hook of each row for 150 ms. */
 static volatile float u3_jf_x, u3_jf_y, u3_jf_w;
 static volatile uint64_t u3_jf_us;
+static volatile float u3_jf_h;
+static volatile uint64_t u3_jf_hit_us;   /* the widget of the row under the cursor was drawn lately: only then are the others cleared (a title, a description, a prompt is no row: clearing every flag sends the selection back to the first line) */
+/* Rows are matched by their vertical centre: the widget of an option row (26.9 tall, y 140.9) is not the rectangle of its text (33.6 tall, y 137.5). loose: the width of the
+ * widget (592) is not the one of the text (302...), the column is then told by its left edge alone. */
+static void u3_row_jump(uint64_t self, uint64_t image, const float *rc, uint64_t now, int loose) {
+    const int hit=fabsf((rc[1]+rc[3]*0.5f)-(u3_jf_y+u3_jf_h*0.5f))<1.0f;
+    if (u3_jf_us && now-u3_jf_us<150000 && rc[3]>=24.0f && rc[3]<=42.0f &&
+        (hit || (fabsf(rc[0]-u3_jf_x)<6.0f && (loose || fabsf(rc[2]-u3_jf_w)<12.0f)))) {   /* the row under the cursor, or another row of the column of the selected one */
+        uint8_t cur_flag=0, want=hit ? 1 : 0;
+        if (hit) u3_jf_hit_us=now;
+        if (!hit && now-u3_jf_hit_us>=100000) return;
+        if (safe_read(&cur_flag,self+8,1) && cur_flag<=1 && cur_flag!=want) {
+            ((u2_set_fn)(uintptr_t)(image+0x5ddc80))(self,want);   /* the game's own setFocused(widget, bool): flag, data source notice, colour fade */
+            if (mouse_debug()) printf("Mouse: U3 row %#llx selected flag %d -> %d (hover jump)\n",(unsigned long long)self,cur_flag,want);
+        }
+    }
+}
+/* The rows of the option screens (0x5de7c0, drawn from 0x5deae5: label + value of Jeu, Audio, Affichage...): the same kind of widget (rect +0x90, flag +8, data source +0x18),
+ * but its data source has no usable min/max, so no check on them. */
+static void __attribute__((ms_abi)) u3_option_row_hook(uint64_t self, uint64_t frame, uint64_t image, uint64_t r14) {
+    (void)frame; (void)r14;
+    float rc[4]={0,0,0,0};
+    if (self<0x10000 || !safe_read(rc,self+0x90,16)) return;
+    u3_row_jump(self,image,rc,now_us(),1);
+    static uint64_t last; const uint64_t now=now_us();
+    if (mouse_debug() && now-last>2000000) { last=now; printf("Mouse: U3 option row hook alive: %#llx rect %.1f %.1f %.1f %.1f\n",(unsigned long long)self,rc[0],rc[1],rc[2],rc[3]); }
+}
 /* U3 slider draw (0x5e2190, found by disassembly 2026-10-28; (widget, ?, draw context), runs every frame: percent = (value - min) * 100 / (max - min)). Data source at
  * widget+0x18 as in U2, but its virtual slots moved: +0 get, +8 set(value), +0x38 minimum, +0x40 maximum. The hook registers the widget like U2's and carries a pending set(value). */
 static void __attribute__((ms_abi)) u3_widget_hook(uint64_t self, uint64_t frame, uint64_t image, uint64_t r14) {
@@ -3616,14 +3669,7 @@ static void __attribute__((ms_abi)) u3_widget_hook(uint64_t self, uint64_t frame
     const uint64_t now=now_us();
     float rc[4]={0,0,0,0};
     safe_read(rc,self+0x90,16);
-    if (u3_jf_us && now-u3_jf_us<150000 && rc[3]>=24.0f && rc[3]<=42.0f && hi==lo &&
-        (fabsf(rc[1]-u3_jf_y)<1.0f || (fabsf(rc[0]-u3_jf_x)<6.0f && fabsf(rc[2]-u3_jf_w)<12.0f))) {   /* the row under the cursor, or another row of the column of the selected one */
-        uint8_t cur_flag=0, want=fabsf(rc[1]-u3_jf_y)<1.0f ? 1 : 0;
-        if (safe_read(&cur_flag,self+8,1) && cur_flag<=1 && cur_flag!=want) {
-            ((u2_set_fn)(uintptr_t)(image+0x5ddc80))(self,want);   /* the game's own setFocused(widget, bool): flag, data source notice, colour fade */
-            if (mouse_debug()) printf("Mouse: U3 row %#llx selected flag %d -> %d (hover jump)\n",(unsigned long long)self,cur_flag,want);
-        }
-    }
+    if (hi==lo) u3_row_jump(self,image,rc,now,1);
     pthread_mutex_lock(&menu_text_lock);
     int slot=-1, oldest=0;
     for (int i=0;i<U2_WIDGETS;++i) { if (u2_widgets[i].w==self) { slot=i; break; } if (u2_widgets[i].us<u2_widgets[oldest].us) oldest=i; }
@@ -3756,6 +3802,7 @@ static const RuntimeGuestCallback guest_callbacks[]={
     {"U3 menu text probe (collection)",0x63d6f0,u2_text_probe_code,sizeof(u2_text_probe_code),8,u2_text_probe,NULL},
     {"U3 slider draw (collection)",0x5e2190,u2_bind_code,sizeof(u2_bind_code),8,u3_widget_hook,NULL},
     {"U3 list widget draw (collection)",0x5dca50,u2_bind_code,sizeof(u2_bind_code),8,u3_widget_hook,NULL},
+    {"U3 list widget draw (option rows)",0x5de7c0,u2_bind_code,sizeof(u2_bind_code),8,u3_option_row_hook,NULL},
     {"U3 prompt bar: no compare-with-friends prompt (collection)",0x627d65,u3_compare_cmp_code,sizeof(u3_compare_cmp_code),sizeof(u3_compare_cmp_patch),NULL,u3_compare_cmp_patch},
     {"U3 prompt bar flags (collection)",0x6277e8,u3_bar_flags_code,sizeof(u3_bar_flags_code),6,u3_bar_flags,NULL},
     {"U2 menu builder probe (collection)",0x5c53a0,u2_menu_builder_code,sizeof(u2_menu_builder_code),6,u2_menu_builder_probe,NULL},
@@ -5337,6 +5384,9 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
             if (!r->us || now-r->us>=100000 || r->w<5.0f) continue;
             if (fabsf(r->y-sel.y)<2.0f && r->x>=sel.x+sel.w-1.0f) { sel_value=1; break; }
         }
+    if (have_hov)
+        for (int i=0;i<8;++i)
+            if (u3_empty_us[i] && now-u3_empty_us[i]<300000 && fabsf(u3_empty_y[i]-hov.y)<1.0f) { have_hov=0; break; }   /* a ghost row: not a target */
     u3_sel_value=sel_value;
     if (sel_value) u3_hide_select_us=now_us();
     pthread_mutex_unlock(&menu_text_lock);
@@ -5414,7 +5464,16 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
     const float sy=sel.y+sel.h*0.5f, hy=hov.y+hov.h*0.5f;
     static int jump_off=-1; if (jump_off<0) { const char *e=getenv("BB_U3_JUMP"); jump_off=e && e[0]=='0'; }
     if (fabsf(sy-hy)>1.0f && !jump_off) {   /* the row under the cursor is not the selected one: its flag is set at once (u3_widget_hook) */
-        u3_jf_x=sel.x; u3_jf_y=hov.y; u3_jf_w=sel.w; u3_jf_us=now;
+        float col_x=sel.x, col_w=sel.w;   /* the column comes from the hovered line's label (leftmost text of that line): the selected "row" may be its value text (Bonus, Audio), far to the right */
+        pthread_mutex_lock(&menu_text_lock);
+        for (int i=0, found=0;i<U2_ROWS;++i) {
+            const U2Row *r=&u2_rows[i];
+            if (!r->us || now-r->us>=100000 || r->h<24.0f || r->h>42.0f || r->w<60.0f || r->w>650.0f || fabsf(r->y-hov.y)>=1.0f) continue;
+            if (!found || r->x<col_x) { col_x=r->x; col_w=r->w; found=1; }
+        }
+        pthread_mutex_unlock(&menu_text_lock);
+        if (fabsf(hov.y-u3_jf_y)>0.5f || now-u3_jf_us>150000) u3_jf_hit_us=0;   /* another target: its widget must be seen again */
+        u3_jf_x=col_x; u3_jf_y=hov.y; u3_jf_h=hov.h; u3_jf_w=col_w; u3_jf_us=now;
         if (mouse_debug()) { static float ly; if (fabsf(ly-hov.y)>0.5f) { ly=hov.y; printf("Mouse: U3 hover jump to rect %.1f %.1f %.1f %.1f (selected %.1f %.1f %.1f %.1f)\n",hov.x,hov.y,hov.w,hov.h,sel.x,sel.y,sel.w,sel.h); } }
         presses=0; dir=-1;
         if (clicked) cross_until=0;
