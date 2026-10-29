@@ -6203,6 +6203,7 @@ static void sample_host(PadData *d) {
     menu_update(k,mouse);
     for (int a=0;a<16;++a) if (key_action_down(a,k,mouse,now)) d->buttons|=actions[a].ps;
     if (u1_image && u1_camera_dt_offset && !menu_mode && !pad_only) d->buttons&=~BTN_DOWN; /* U1 in play: no photo mode (a controller gets its d-pad as it is) */
+    if (runtime_u3_game && !pad_only && !u2_menu_active(now)) d->buttons&=~BTN_DOWN;   /* U3 in play: the photo mode row is gone from Options, so no photo mode either (keyboard and mouse; a controller keeps its d-pad) */
     if (menu_mode && !menu_guard && !pad_only) d->buttons|=menu_mouse_buttons(k,mouse,now);
     else menu_hover=0;
     const int u2_menu=u2_menu_active(now) && !pad_only;
