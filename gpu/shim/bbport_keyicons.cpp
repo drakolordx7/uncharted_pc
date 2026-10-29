@@ -3082,6 +3082,7 @@ constexpr uint64_t SchemaHash = 0xcf2985e2610ea662ull;
 constexpr uint64_t SchemaMaskHash = 0x16bc917ddadab17cull;
 constexpr uint64_t SchemaMaskHashU2 = 0xb1f24fd1dd0f8d61ull; // U2 draws the same picture (same hash) with a mask of its own (PlayStation pad + touchpad
                                                              // callout): it gets U1's Xbox mask, the validated one
+constexpr uint64_t SchemaMaskHashU3 = 0xff11e0c8da8cf736ull; // U3: same picture, mask of its own (PlayStation pad + touchpad), same treatment
 
 bool XSchemaColor(uint8_t* data, size_t size) {
     constexpr int W = 2048, H = 1024;
@@ -3317,7 +3318,7 @@ void NoteUnknownTexture(uint64_t hash, uint32_t width, uint32_t height, const ui
 bool IsTextureTarget(uint64_t hash) {
     bool is_mask;
     Role role;
-    return FindKeyTarget(hash, &role) != nullptr || FindStickFrame(hash, &is_mask) != nullptr || hash == JournalMaskHash || hash == JournalMaskHashU2 || hash == SchemaHash || hash == SchemaMaskHash || hash == SchemaMaskHashU2;
+    return FindKeyTarget(hash, &role) != nullptr || FindStickFrame(hash, &is_mask) != nullptr || hash == JournalMaskHash || hash == JournalMaskHashU2 || hash == SchemaHash || hash == SchemaMaskHash || hash == SchemaMaskHashU2 || hash == SchemaMaskHashU3;
 }
 
 bool IsPulseMask(uint64_t hash) {
@@ -3423,7 +3424,7 @@ bool PatchU1Texture(uint64_t hash, uint8_t* data, size_t size, uint32_t levels) 
         if (hash == SchemaHash) {
             return XSchemaColor(data, size);
         }
-        if (hash == SchemaMaskHash || hash == SchemaMaskHashU2) {
+        if (hash == SchemaMaskHash || hash == SchemaMaskHashU2 || hash == SchemaMaskHashU3) {
             return XSchemaMask(data, size, levels);
         }
         Role role = Role::Color;
