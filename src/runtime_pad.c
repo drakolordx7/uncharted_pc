@@ -5373,7 +5373,7 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
         if (!r->us || now-r->us>=100000 || r->h<24.0f || r->h>42.0f || r->w<60.0f) continue;
         if (fabsf(r->h-34.2f)<0.2f) continue;                     /* the section titles, never chosen */
         if (r->s5>=2.5f && (!have_sel || r->s5>sel.s5)) { sel=*r; have_sel=1; }
-        if (r->w>600.0f && !(fabsf(r->x-380.0f)<1.0f && fabsf(r->w-520.0f)<1.0f)) continue;   /* a wide banner above the menu (1000 wide) is not a row: hovering it must not clear the selection */
+        if (r->w>750.0f && !(fabsf(r->x-380.0f)<1.0f && fabsf(r->w-520.0f)<1.0f)) continue;   /* a wide banner above the menu (1000 wide) is not a row: hovering it must not clear the selection */
         if (ux>=r->x-4.0f && ux<=r->x+r->w+4.0f && uy>=r->y && uy<r->y+r->h && (!have_hov || r->w<hov.w)) { hov=*r; have_hov=1; }
     }
     /* A statistics line (28.6 tall) has its value in a second text to its right (the same line, past the right edge of the label): the cross there opens
@@ -5468,7 +5468,7 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
         pthread_mutex_lock(&menu_text_lock);
         for (int i=0, found=0;i<U2_ROWS;++i) {
             const U2Row *r=&u2_rows[i];
-            if (!r->us || now-r->us>=100000 || r->h<24.0f || r->h>42.0f || r->w<60.0f || r->w>650.0f || fabsf(r->y-hov.y)>=1.0f) continue;
+            if (!r->us || now-r->us>=100000 || r->h<24.0f || r->h>42.0f || r->w<60.0f || r->w>750.0f || fabsf(r->y-hov.y)>=1.0f) continue;
             if (!found || r->x<col_x) { col_x=r->x; col_w=r->w; found=1; }
         }
         pthread_mutex_unlock(&menu_text_lock);
