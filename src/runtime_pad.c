@@ -2722,6 +2722,7 @@ static void u2_row_note(const float *r, float s5, float a) {
     pthread_mutex_unlock(&menu_text_lock);
 }
 static volatile uint64_t u2_credits_us;   /* the credits: three paragraphs as tall as the screen (700+), scrolling, never highlighted (measured 2026-10-23) */
+static volatile uint64_t u3_dialog_us;   /* U3: an information box (a locked reward: x 358, 564 wide) is on screen above the menu: the wheel and the hover must leave the menu below alone */
 static volatile uint64_t u2_popup_us;   /* the chapter carousel of the Chapitres page: its panel is a "text" 683.8 x 318.8 at 298.1, 156.2 (it has no highlighted row) */
 static volatile uint64_t u2_image;   /* U2 image base, seen by the text hook (F8 probe) */
 static void u2_host_probe(uint64_t image);
@@ -2740,6 +2741,10 @@ static void __attribute__((ms_abi)) u2_text_probe(uint64_t unused0, uint64_t unu
         if (runtime_u3_game && mouse_debug() && safe_read(r,saved_register(5),16) && r[3]>=150.0f) {   /* probe: shape of the U3 credits text */
             static uint64_t last_us; const uint64_t t=now_us();
             if (t-last_us>500000) { last_us=t; printf("U3 big text rect x=%.1f y=%.1f w=%.1f h=%.1f\n",r[0],r[1],r[2],r[3]); }
+        }
+        if (runtime_u3_game && safe_read(r,saved_register(5),16) && fabsf(r[0]-358.0f)<2.0f && fabsf(r[2]-564.0f)<3.0f && r[3]>=150.0f) {
+            u3_dialog_us=now_us();
+            if (mouse_debug()) { static uint64_t dlg_log; if (u3_dialog_us-dlg_log>1000000) { dlg_log=u3_dialog_us; printf("Mouse: U3 information box detected rect %.1f %.1f %.1f %.1f\n",r[0],r[1],r[2],r[3]); } }
         }
         if (safe_read(r,saved_register(5),16) && fabsf(r[0]-298.1f)<1.5f && fabsf(r[1]-156.2f)<1.5f && fabsf(r[2]-683.8f)<2.0f && fabsf(r[3]-318.8f)<2.0f) u2_popup_us=now_us();
         if (safe_read(r,saved_register(5),16) && safe_read(sz,saved_register(3)+0x3c,8) && sz[0]>=100.0f && sz[1]>0.0f && sz[1]<=12.0f && r[3]>=24.0f && r[3]<=42.0f)
@@ -3844,13 +3849,13 @@ static const unsigned char u2_bind_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x
  * (widget+0x18; +0 get, +8 set, +0x38 minimum, +0x40 maximum, as the sliders), rows of 28.55 from the top of its rectangle (+0x90); the scroll bar is its left edge. The hook
  * runs u3_widget_hook (the pending set(value)) and notes the list for u3_menu_buttons. */
 static struct { uint64_t w, ds, us; int cur, lo, hi, first, vis; float rc[4]; } u3_list;
-static volatile int u3_keep_view;   /* the pending jump is a hover / click: the view stays */
-/* Widget+0x184 = rows seen, +0x188 = first row seen (found 2026-10-29 by correlating a dump with the highlighted row: the view follows the selection with the highlight held on the
 static volatile uint64_t u3_model_us;   /* the Trésors scene's update ran a moment ago: the 3D model is on screen (u3_model_hook) */
 typedef uint64_t (__attribute__((sysv_abi)) *u3_vcall3_fn)(uint64_t,uint64_t,uint64_t);
 typedef uint64_t (__attribute__((sysv_abi)) *u3_notify_fn)(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t);
 /* Trésors: the selection the hover jumped to, to tell the 3D scene (u3_model_hook sends it from the scene's own update: from the list's draw the game's mailbox call faults) */
 static volatile int u3_note_pending; static volatile int32_t u3_note_value; static volatile uint64_t u3_note_ds, u3_note_fn, u3_note_queue;
+static volatile int u3_keep_view;   /* the pending jump is a hover / click: the view stays */
+/* Widget+0x184 = rows seen, +0x188 = first row seen (found 2026-10-29 by correlating a dump with the highlighted row: the view follows the selection with the highlight held on the
  * 6th row, so first = cur - 5 until the ends). The wheel and the bar write +0x188 (u2_scroll_*, on the game's thread, as U2 does with +0x248): the selection stays where it is. */
 static void __attribute__((ms_abi)) u3_list_hook(uint64_t self, uint64_t frame, uint64_t image, uint64_t r14) {
     /* a hover / click jump: the view must not follow the new selection (the game would bring it to the 6th row and the list would run under the cursor): the widget is told it
@@ -3905,11 +3910,9 @@ static volatile float u2_model_ax, u2_model_ay;   /* mouse motion since the last
 /* Hooked at 0x5d7c05, just after the game clamped both speeds to +-2 rad/s and before it turns the matrix by speed x dt (r14 is the scene there): the speeds written here are
  * not limited, so the model follows the mouse one to one. */
 static const unsigned char u2_model_code[]={0xc5,0xfa,0x10,0x85,0x70,0xfd,0xff,0xff};   /* vmovss xmm0, [rbp-0x290] */
+static void u2_model_turn(uint64_t image, uint64_t self, uint64_t dt_off);
 static void __attribute__((ms_abi)) u2_model_hook(uint64_t rdi, uint64_t frame, uint64_t image, uint64_t self) {
     (void)frame; (void)rdi;
-static void u2_model_turn(uint64_t image, uint64_t self, uint64_t dt_off);
-    /* After a release the model goes on turning, slowing down (U2_MODEL_COAST seconds to lose most of its speed): the speed of the last 60 ms of the gesture decays. */
-    static float sx, sy;
     u2_model_turn(image,self,0x111628cu);
 }
 /* U3 Trésors: the same scene (menutreasurescene.cpp, update function; the speeds are at +0x70 / +0x74 of r15, dt is the float at image+0x17b4bac). Hooked at
@@ -3927,6 +3930,8 @@ static void __attribute__((ms_abi)) u3_model_hook(uint64_t rdi, uint64_t frame, 
     u2_model_turn(image,saved_register(12),0x17b4bacu);   /* (r15 is the scene here) */
 }
 static void u2_model_turn(uint64_t image, uint64_t self, uint64_t dt_off) {
+    /* After a release the model goes on turning, slowing down (U2_MODEL_COAST seconds to lose most of its speed): the speed of the last 60 ms of the gesture decays. */
+    static float sx, sy;
     static int coast_on=-1; static float coast_tau=0.5f;
     if (coast_on<0) { const char *e=getenv("BB_U2_MODEL_COAST"); coast_tau=e && atof(e)>=0.0 ? (float)atof(e) : 0.5f; coast_on=coast_tau>0.0f; }
     float dt=0.0f;
@@ -4032,9 +4037,9 @@ static const RuntimeGuestCallback guest_callbacks[]={
     {"U2 stick filter (collection)",0x4316cc,u2_stick_filter_code,sizeof(u2_stick_filter_code),5,u2_stick_filter,NULL},
     {"U2 list widget update (collection)",0x57e410,u2_bind_code,sizeof(u2_bind_code),8,u2_widget_hook,NULL},
     {"U2 treasure model (mouse, collection)",0x5d7c05,u2_model_code,sizeof(u2_model_code),8,u2_model_hook,NULL},
+    {"U3 treasure model (mouse, collection)",0x65f6b0,u3_model_code,sizeof(u3_model_code),8,u3_model_hook,NULL},
     {"U2 prompt bar: compare-with-friends prompt (hook, collection)",0x5a54c7,u2_compare_cmp_code,sizeof(u2_compare_cmp_code),5,u2_compare_prompt,NULL},
     {"U2 prompt bar: no compare-with-friends prompt (collection)",0x5a54cc,u2_compare_jz_code,sizeof(u2_compare_jz_code),sizeof(u2_compare_jz_patch),NULL,u2_compare_jz_patch},
-    {"U3 treasure model (mouse, collection)",0x65f6b0,u3_model_code,sizeof(u3_model_code),8,u3_model_hook,NULL},
     {"U2 menu text probe (collection)",0x5b56d0,u2_text_probe_code,sizeof(u2_text_probe_code),8,u2_text_probe,NULL},
     {"U3 menu text probe (collection)",0x63d6f0,u2_text_probe_code,sizeof(u2_text_probe_code),8,u2_text_probe,NULL},
     {"U3 slider draw (collection)",0x5e2190,u2_bind_code,sizeof(u2_bind_code),8,u3_widget_hook,NULL},
@@ -5595,10 +5600,17 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
     const int wheel=now<wheel_until_us[0] || now<wheel_until_us[1];
     static int ls_pend, ls_click;   /* the cursor moved / was clicked over the rows of a list and the selection has not followed yet */
     static int ls_wlock, ls_wlock_set; static float ls_wx, ls_wy;   /* after a wheel notch, a hand tremor of a few pixels is not a hover move (the rows run under the cursor) */
+    {   /* a request to set a value that no control picked up (its page closed, the list left) must not block every later one: it expires, as in U2 */
+        static uint64_t pend_since;
+        if (!u2_jump_pending) pend_since=0;
+        else if (!pend_since) pend_since=now;
+        else if (now-pend_since>500000) { u2_jump_pending=0; u2_jump_keep=0; u3_keep_view=0; pend_since=0; if (mouse_debug()) printf("Mouse: U3 stale jump request dropped\n"); }
+    }
     const int list_on=u3_list.us && now-u3_list.us<150000;   /* a list with a scroll bar (u3_list_hook): the wheel moves its selection by set(value), three rows a notch */
-    if (now<wheel_until_us[0] && !list_on) out|=BTN_UP;          /* one row up / down per notch, as U2 */
-    if (now<wheel_until_us[1] && !list_on) out|=BTN_DOWN;
-    if (list_on) {
+    const int dlg=u3_dialog_us && now-u3_dialog_us<300000;   /* an information box is open: the menu below does not scroll */
+    if (now<wheel_until_us[0] && !list_on && !dlg) out|=BTN_UP;          /* one row up / down per notch, as U2 */
+    if (now<wheel_until_us[1] && !list_on && !dlg) out|=BTN_DOWN;
+    if (list_on && !dlg) {
         static uint64_t seen[2];
         for (int i=0;i<2;++i) {
             if (wheel_until_us[i]==seen[i]) continue;
@@ -5635,14 +5647,14 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
     last_x=mx; last_y=my;
     const int left=(mouse & 1u)!=0, clicked=left && !last_left;
     last_left=left;
-    U2Row hov={0}, sel={0}, slid={0};
-    int have_hov=0, have_sel=0, sel_value=0, have_slid=0;
-    float rail_top=1e9f;
     {   /* Trésors: a left drag to the right of the list turns the 3D model (u3_model_hook; the caller feeds u2_model_ax / ay from the mouse motion) */
         const int model_on=u3_model_us && now-u3_model_us<200000;
         if (!left || !model_on) u2_model_drag=0; else if (clicked && ux>=712.0f && uy>=130.0f && uy<=600.0f) u2_model_drag=1;
         if (u2_model_drag) { u2_hover=0; presses=0; dir=-1; return out; }
     }
+    U2Row hov={0}, sel={0}, slid={0};
+    int have_hov=0, have_sel=0, sel_value=0, have_slid=0;
+    float rail_top=1e9f;
     pthread_mutex_lock(&menu_text_lock);
     for (int i=0;i<8;++i) {   /* the rails of the sliders (u2_sliders, filled by the text hook for U3 too) */
         const U2Row *s=&u2_sliders[i];
@@ -5819,7 +5831,7 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
         if (clicked && in_rail) { ls_drag=1; if (mouse_debug()) printf("Mouse: U3 list bar press (rect %.1f %.1f %.1f %.1f, %d values, %d rows seen)\n",lx,ly,lw,u3_list.rc[3],n,vis); }
         if (ls_wlock && !ls_wlock_set) { ls_wx=mx; ls_wy=my; ls_wlock_set=1; }
         if (ls_wlock && hypotf(mx-ls_wx,my-ls_wy)>=24.0f) ls_wlock=0;
-        if (moved && !ls_wlock) ls_pend=1;
+        if (moved && !ls_wlock && !dlg) ls_pend=1;
         if (clicked) { ls_click=1; ls_wlock=0; }
         if (!over_rows) ls_pend=ls_click=0;
         if (ls_drag && left) {
@@ -5850,6 +5862,7 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
                 ls_pend=ls_click=0;
             }
         }
+        if (mouse_debug() && moved) { static uint64_t dbg3; if (now-dbg3>300000) { dbg3=now; printf("Mouse: U3 list hover idle: over_rows %d in_rail %d model_zone %d wlock %d dlg %d pend %d jump_pending %d cursor %.0f,%.0f list x %.0f y0 %.1f w %.0f vis %d first %d cur %d\n",over_rows,in_rail,in_model_zone,ls_wlock,dlg,ls_pend,u2_jump_pending,ux,uy,lx,ls_y0,lw,vis,u3_list.first,u3_list.cur); } }
         if (ls_cross_want>=0) {   /* a click moved the selection: cross once the list reports it (and has been there 120 ms) */
             if (now>ls_cross_deadline) ls_cross_want=-1;
             else if (u3_list.cur==ls_cross_want) { if (!ls_landed) ls_landed=now; else if (now-ls_landed>=120000) { ls_cross_want=-1; ls_landed=0; cross_until=now+120000; } }
