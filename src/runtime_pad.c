@@ -2695,6 +2695,8 @@ static int u3_slider_steps(void) {   /* BB_U3_SLIDER_STEPS: how many left / righ
 static float u3_empty_y[8]; static uint64_t u3_empty_us[8];   /* y of the rows with an empty label, seen lately (ghost rows) */
 /* U3: the < > of a row are two texts 16 wide and 33.6 tall, side by side (x 378 and 394 on the audio volume rows); seen lately, kept here (width < 20 is not a row) */
 static U2Row u3_arrows[16];
+static volatile uint64_t u3_gallery_stick_until; static volatile int u3_gallery_stick_dir;   /* a click on its < >: the left stick pushed that way for a moment */
+static volatile uint64_t u3_gallery_us;   /* the art gallery viewer's < > text seen (Bonus > Récompenses > Galeries d'art) */
 static void u3_arrow_note(const float *r) {
     const uint64_t now=now_us();
     pthread_mutex_lock(&menu_text_lock);
@@ -2808,6 +2810,8 @@ static void __attribute__((ms_abi)) u2_text_probe(uint64_t unused0, uint64_t unu
             pthread_mutex_unlock(&menu_text_lock);
         }
         if (runtime_u3_game && safe_read(r,saved_register(5),16) && r[2]>=10.0f && r[2]<=20.0f && r[3]>=33.0f && r[3]<=34.2f) u3_arrow_note(r);
+        /* U3 art gallery viewer: its < > are two 38.4 wide glyphs in one rect 100, 600, 1080 x 60 (left and right aligned), no row, no 16 wide pair */
+        if (runtime_u3_game && safe_read(r,saved_register(5),16) && fabsf(r[0]-100.0f)<1.0f && fabsf(r[1]-600.0f)<1.0f && fabsf(r[2]-1080.0f)<1.0f && fabsf(r[3]-60.0f)<1.0f) u3_gallery_us=now_us();
         /* U3 marks the selected row with style[6] at 1 (it never touches style[5]): kept as 3 in s5, the value the menu code knows.
          * style[7] is 1 on every U3 row: it is not the "chosen one of Oui / Non" sign of U2 and is left at 0. */
         if (safe_read(r,saved_register(5),16) && safe_read(st,saved_register(4),32) && r[3]>=24.0f && r[3]<=42.0f && r[2]>=20.0f)
@@ -5636,7 +5640,11 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
      * (the row is jumped to first, as for a hover, then the press). */
     static int ar_dir; static float ar_cy, ar_x, ar_y, ar_h, ar_w; static uint64_t ar_until, ar_seen, ar_press_until;
     int arrow_click=0;
-    if (clicked) {
+    if (clicked && u3_gallery_us && now-u3_gallery_us<4000000 && uy>=596.0f && uy<=664.0f && ((ux>=92.0f && ux<=146.0f) || (ux>=1134.0f && ux<=1188.0f))) {
+        ar_dir=ux<640.0f ? 2 : 3; ar_until=0; arrow_click=1;   /* gallery viewer: no row to select; it reads the left stick (A / D work), not the d-pad */
+        u3_gallery_stick_dir=ar_dir==2 ? -1 : 1; u3_gallery_stick_until=now+150000;        if (mouse_debug()) printf("Mouse: U3 gallery arrow press: %s\n",ar_dir==2 ? "left" : "right");
+    }
+    if (clicked && !arrow_click) {
         for (int i=0;i<16 && !arrow_click;++i) {
             const U2Row *a=&u3_arrows[i];
             if (!a->us || now-a->us>=150000) continue;
@@ -5740,7 +5748,7 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
         } else ar_seen=0;
     }
     if (now<ar_press_until) out|=ar_dir==2 ? BTN_LEFT : BTN_RIGHT;
-    if (now<ar_until || now<ar_press_until) { u2_hover=0; presses=0; dir=-1; return out; }
+    if (now<ar_until || now<ar_press_until || now<u3_gallery_stick_until) { u2_hover=0; presses=0; dir=-1; return out; }
     if (k && (k[SDL_SCANCODE_W] || k[SDL_SCANCODE_A] || k[SDL_SCANCODE_S] || k[SDL_SCANCODE_D] ||
               k[SDL_SCANCODE_UP] || k[SDL_SCANCODE_DOWN] || k[SDL_SCANCODE_LEFT] || k[SDL_SCANCODE_RIGHT])) {
         u2_hover=0; presses=0; return out;   /* the keys are being used: the cursor does not move the selection */
@@ -6524,6 +6532,7 @@ static void sample_host(PadData *d) {
         static uint32_t last_buttons=~0u;
         if (d->buttons!=last_buttons) { last_buttons=d->buttons; printf("Runtime: menu buttons %#x\n",d->buttons); }
     }
+    if (runtime_u3_game && now<u3_gallery_stick_until) d->buttons&=~BTN_R2;   /* the click itself is the mouse's fire button (R2): not with the stick push of a gallery arrow */
     if (d->buttons & BTN_L2) d->l2=255;
     if (d->buttons & BTN_R2) d->r2=255;
     // The touchpad button without a finger on a touch surface is a left-side click.
@@ -6531,6 +6540,7 @@ static void sample_host(PadData *d) {
     const int lx=action_down(A_LS_RIGHT,k,mouse,now)-action_down(A_LS_LEFT,k,mouse,now);
     int ly=action_down(A_LS_DOWN,k,mouse,now)-action_down(A_LS_UP,k,mouse,now);
     if (lx) d->left_x=(uint8_t)(lx<0 ? 0 : 255);
+    if (runtime_u3_game && now<u3_gallery_stick_until) d->left_x=(uint8_t)(u3_gallery_stick_dir<0 ? 0 : 255);
     if (u1_on_jetski()) {
         /* on the jetski, forward / back (the keys of the left stick's up / down) are the throttle (R1) and the brake (Square) */
         if (action_down(A_LS_UP,k,mouse,now)) d->buttons|=BTN_R1;
