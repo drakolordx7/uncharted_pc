@@ -3846,6 +3846,11 @@ static const unsigned char u2_bind_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x
 static struct { uint64_t w, ds, us; int cur, lo, hi, first, vis; float rc[4]; } u3_list;
 static volatile int u3_keep_view;   /* the pending jump is a hover / click: the view stays */
 /* Widget+0x184 = rows seen, +0x188 = first row seen (found 2026-10-29 by correlating a dump with the highlighted row: the view follows the selection with the highlight held on the
+static volatile uint64_t u3_model_us;   /* the Trésors scene's update ran a moment ago: the 3D model is on screen (u3_model_hook) */
+typedef uint64_t (__attribute__((sysv_abi)) *u3_vcall3_fn)(uint64_t,uint64_t,uint64_t);
+typedef uint64_t (__attribute__((sysv_abi)) *u3_notify_fn)(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t);
+/* Trésors: the selection the hover jumped to, to tell the 3D scene (u3_model_hook sends it from the scene's own update: from the list's draw the game's mailbox call faults) */
+static volatile int u3_note_pending; static volatile int32_t u3_note_value; static volatile uint64_t u3_note_ds, u3_note_fn, u3_note_queue;
  * 6th row, so first = cur - 5 until the ends). The wheel and the bar write +0x188 (u2_scroll_*, on the game's thread, as U2 does with +0x248): the selection stays where it is. */
 static void __attribute__((ms_abi)) u3_list_hook(uint64_t self, uint64_t frame, uint64_t image, uint64_t r14) {
     /* a hover / click jump: the view must not follow the new selection (the game would bring it to the 6th row and the list would run under the cursor): the widget is told it
@@ -3854,7 +3859,15 @@ static void __attribute__((ms_abi)) u3_list_hook(uint64_t self, uint64_t frame, 
     const int keep=u2_jump_pending && u3_keep_view && safe_read(&ds_pre,self+0x18,8) && ds_pre==u2_jump_ds && safe_read(&first_pre,self+0x188,4);
     u3_widget_hook(self,frame,image,r14);
     int32_t vis0=0, first0=-1;
-    if (keep && !u2_jump_pending) { const int32_t v=u2_jump_val; safe_write(self+0x16c,&v,4); safe_write(self+0x188,&first_pre,4); u3_keep_view=0; }
+    if (keep && !u2_jump_pending) {
+        const int32_t v=u2_jump_val; safe_write(self+0x16c,&v,4); safe_write(self+0x188,&first_pre,4); u3_keep_view=0;
+        if (u3_model_us && now_us()-u3_model_us<200000) {   /* Trésors: the 3D model only follows when the widget tells the scene (the block at 0x5e39d3 of its update, which runs when it follows a selection itself and recentres the view): the same call, made here */
+            uint64_t ds=0, vt=0, fn48=0, q=0; uint8_t flags=0, on=0;
+            if (safe_read(&on,self+8,1) && on && safe_read(&flags,self+0xa8,1) && (flags&0x40) && safe_read(&ds,self+0x18,8) && safe_read(&vt,ds,8) && safe_read(&fn48,vt+0x48,8) && safe_read(&q,self+0x178,8) && q>0x10000 &&
+                fn48>=image && fn48<image+0x16488f0) { u3_note_ds=ds; u3_note_fn=fn48; u3_note_queue=q+0x10; u3_note_value=v; u3_note_pending=1; }
+        }
+
+    }
     safe_read(&vis0,self+0x184,4); safe_read(&first0,self+0x188,4);
     if (u2_scroll_pending && u2_scroll_w==self && vis0>=3 && vis0<=32) {
         int32_t t=u2_scroll_top;
@@ -3894,12 +3907,30 @@ static volatile float u2_model_ax, u2_model_ay;   /* mouse motion since the last
 static const unsigned char u2_model_code[]={0xc5,0xfa,0x10,0x85,0x70,0xfd,0xff,0xff};   /* vmovss xmm0, [rbp-0x290] */
 static void __attribute__((ms_abi)) u2_model_hook(uint64_t rdi, uint64_t frame, uint64_t image, uint64_t self) {
     (void)frame; (void)rdi;
+static void u2_model_turn(uint64_t image, uint64_t self, uint64_t dt_off);
     /* After a release the model goes on turning, slowing down (U2_MODEL_COAST seconds to lose most of its speed): the speed of the last 60 ms of the gesture decays. */
     static float sx, sy;
+    u2_model_turn(image,self,0x111628cu);
+}
+/* U3 Trésors: the same scene (menutreasurescene.cpp, update function; the speeds are at +0x70 / +0x74 of r15, dt is the float at image+0x17b4bac). Hooked at
+ * 0x65f6b0, the instruction after the second clamp's store, before the matrix is turned. */
+static const unsigned char u3_model_code[]={0xc5,0xfa,0x10,0x85,0x80,0xfc,0xff,0xff};   /* vmovss xmm0, [rbp-0x380] */
+static void __attribute__((ms_abi)) u3_model_hook(uint64_t rdi, uint64_t frame, uint64_t image, uint64_t r14) {
+    (void)frame; (void)rdi; (void)r14;
+    u3_model_us=now_us();
+    if (u3_note_pending) {   /* the hover jump of Trésors: tell the scene which model to show, as the list does itself when it follows a selection (get the text of the item, queue it) */
+        u3_note_pending=0;
+        const uint64_t str=((u3_vcall3_fn)(uintptr_t)u3_note_fn)(u3_note_ds,(uint64_t)(uint32_t)u3_note_value,7);
+        if (str) ((u3_notify_fn)(uintptr_t)(image+0x63c5c0))(u3_note_queue,str,1,0,0xffffffffu,0xffffffffu);
+        if (mouse_debug()) printf("Mouse: U3 scene told: item %d text %#llx\n",(int)u3_note_value,(unsigned long long)str);
+    }
+    u2_model_turn(image,saved_register(12),0x17b4bacu);   /* (r15 is the scene here) */
+}
+static void u2_model_turn(uint64_t image, uint64_t self, uint64_t dt_off) {
     static int coast_on=-1; static float coast_tau=0.5f;
     if (coast_on<0) { const char *e=getenv("BB_U2_MODEL_COAST"); coast_tau=e && atof(e)>=0.0 ? (float)atof(e) : 0.5f; coast_on=coast_tau>0.0f; }
     float dt=0.0f;
-    if (!safe_read(&dt,image+0x111628cu,4) || !(dt>0.0005f) || dt>0.2f) dt=1.0f/30.0f;
+    if (!safe_read(&dt,image+dt_off,4) || !(dt>0.0005f) || dt>0.2f) dt=1.0f/30.0f;
     float vx, vy;
     if (u2_model_drag) {
         const float ax=u2_model_ax, ay=u2_model_ay;
@@ -4003,6 +4034,7 @@ static const RuntimeGuestCallback guest_callbacks[]={
     {"U2 treasure model (mouse, collection)",0x5d7c05,u2_model_code,sizeof(u2_model_code),8,u2_model_hook,NULL},
     {"U2 prompt bar: compare-with-friends prompt (hook, collection)",0x5a54c7,u2_compare_cmp_code,sizeof(u2_compare_cmp_code),5,u2_compare_prompt,NULL},
     {"U2 prompt bar: no compare-with-friends prompt (collection)",0x5a54cc,u2_compare_jz_code,sizeof(u2_compare_jz_code),sizeof(u2_compare_jz_patch),NULL,u2_compare_jz_patch},
+    {"U3 treasure model (mouse, collection)",0x65f6b0,u3_model_code,sizeof(u3_model_code),8,u3_model_hook,NULL},
     {"U2 menu text probe (collection)",0x5b56d0,u2_text_probe_code,sizeof(u2_text_probe_code),8,u2_text_probe,NULL},
     {"U3 menu text probe (collection)",0x63d6f0,u2_text_probe_code,sizeof(u2_text_probe_code),8,u2_text_probe,NULL},
     {"U3 slider draw (collection)",0x5e2190,u2_bind_code,sizeof(u2_bind_code),8,u3_widget_hook,NULL},
@@ -5606,6 +5638,11 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
     U2Row hov={0}, sel={0}, slid={0};
     int have_hov=0, have_sel=0, sel_value=0, have_slid=0;
     float rail_top=1e9f;
+    {   /* Trésors: a left drag to the right of the list turns the 3D model (u3_model_hook; the caller feeds u2_model_ax / ay from the mouse motion) */
+        const int model_on=u3_model_us && now-u3_model_us<200000;
+        if (!left || !model_on) u2_model_drag=0; else if (clicked && ux>=712.0f && uy>=130.0f && uy<=600.0f) u2_model_drag=1;
+        if (u2_model_drag) { u2_hover=0; presses=0; dir=-1; return out; }
+    }
     pthread_mutex_lock(&menu_text_lock);
     for (int i=0;i<8;++i) {   /* the rails of the sliders (u2_sliders, filled by the text hook for U3 too) */
         const U2Row *s=&u2_sliders[i];
@@ -5777,7 +5814,8 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
         if (ls_y0_w!=u3_list.w) { ls_y0_w=u3_list.w; ls_y0=ly; }
         if (have_lsel && !u2_jump_pending && now-ls_last_us>250000 && u3_list.first>=0 && u3_list.cur>=u3_list.first && u3_list.cur<u3_list.first+vis) ls_y0=lsel.y-(float)(u3_list.cur-u3_list.first)*P;
         const int in_rail=ux>=lx-8.0f && ux<=lx+22.0f && uy>=ly && uy<ly+rail_h;
-        const int over_rows=ux>lx+22.0f && ux<=lx+lw && uy>=ls_y0 && uy<ls_y0+rail_h;
+        const int in_model_zone=u3_model_us && now-u3_model_us<200000 && ux>=736.0f && ux<=1046.0f && uy>=102.0f && uy<=490.0f;   /* Trésors: the 3D model's panel (the list's rectangle runs under it): no hover, no click on a row */
+        const int over_rows=ux>lx+22.0f && ux<=lx+lw && uy>=ls_y0 && uy<ls_y0+rail_h && !in_model_zone;
         if (clicked && in_rail) { ls_drag=1; if (mouse_debug()) printf("Mouse: U3 list bar press (rect %.1f %.1f %.1f %.1f, %d values, %d rows seen)\n",lx,ly,lw,u3_list.rc[3],n,vis); }
         if (ls_wlock && !ls_wlock_set) { ls_wx=mx; ls_wy=my; ls_wlock_set=1; }
         if (ls_wlock && hypotf(mx-ls_wx,my-ls_wy)>=24.0f) ls_wlock=0;
