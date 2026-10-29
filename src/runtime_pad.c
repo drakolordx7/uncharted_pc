@@ -2691,6 +2691,19 @@ static int u3_slider_steps(void) {   /* BB_U3_SLIDER_STEPS: how many left / righ
     return steps;
 }
 static float u3_empty_y[8]; static uint64_t u3_empty_us[8];   /* y of the rows with an empty label, seen lately (ghost rows) */
+/* U3: the < > of a row are two texts 16 wide and 33.6 tall, side by side (x 378 and 394 on the audio volume rows); seen lately, kept here (width < 20 is not a row) */
+static U2Row u3_arrows[16];
+static void u3_arrow_note(const float *r) {
+    const uint64_t now=now_us();
+    pthread_mutex_lock(&menu_text_lock);
+    int slot=0;
+    for (int i=0;i<16;++i) {
+        if (fabsf(u3_arrows[i].x-r[0])<0.5f && fabsf(u3_arrows[i].y-r[1])<0.5f) { slot=i; break; }
+        if (u3_arrows[i].us<u3_arrows[slot].us) slot=i;
+    }
+    u3_arrows[slot]=(U2Row){r[0],r[1],r[2],r[3],0.0f,now,0.0f};
+    pthread_mutex_unlock(&menu_text_lock);
+}
 static void u2_row_note(const float *r, float s5, float a) {
     const uint64_t now=now_us();
     pthread_mutex_lock(&menu_text_lock);
@@ -2742,6 +2755,18 @@ static void __attribute__((ms_abi)) u2_text_probe(uint64_t unused0, uint64_t unu
                        sz[0]>=100.0f && sz[1]<=12.0f ? " (U2's rail shape: a slider)" : "");
             }
         }
+        /* BB_U3_ARROWS=1: every distinct small text (an arrow of a < > row?) with its rect, size and style, once per rect */
+        if (runtime_u3_game && getenv("BB_U3_ARROWS") && safe_read(r,saved_register(5),16) && r[3]>0.0f && r[3]<=60.0f && r[2]>0.0f && r[2]<60.0f) {
+            static float seen[64][4]; static int n;
+            int dup=0;
+            for (int i=0;i<n;++i) if (fabsf(seen[i][0]-r[0])<0.5f && fabsf(seen[i][1]-r[1])<0.5f && fabsf(seen[i][2]-r[2])<0.5f && fabsf(seen[i][3]-r[3])<0.5f) { dup=1; break; }
+            if (!dup) {
+                if (n<64) { memcpy(seen[n],r,16); ++n; } else n=0;
+                float szz[2]={0,0}; safe_read(szz,saved_register(3)+0x3c,8);
+                float sty[8]={0}; safe_read(sty,saved_register(4),32);
+                printf("Mouse: U3 small text rect %.1f %.1f %.1f %.1f size %.1f %.1f style5 %.1f style6 %.1f\n",r[0],r[1],r[2],r[3],szz[0],szz[1],sty[5],sty[6]);
+            }
+        }
         /* BB_U3_CALLERS=1: for each distinct row-shaped text rect of a U3 menu, the words of the stack that point into the code (who draws it), once per rect */
         if (runtime_u3_game && getenv("BB_U3_CALLERS") && safe_read(r,saved_register(5),16) && r[3]>=24.0f && r[3]<=42.0f && r[2]>=20.0f) {
             static float seen[96][4]; static int n;
@@ -2767,6 +2792,7 @@ static void __attribute__((ms_abi)) u2_text_probe(uint64_t unused0, uint64_t unu
             u3_empty_y[slot]=r[1]; u3_empty_us[slot]=t;
             pthread_mutex_unlock(&menu_text_lock);
         }
+        if (runtime_u3_game && safe_read(r,saved_register(5),16) && r[2]>=10.0f && r[2]<=20.0f && r[3]>=33.0f && r[3]<=34.2f) u3_arrow_note(r);
         /* U3 marks the selected row with style[6] at 1 (it never touches style[5]): kept as 3 in s5, the value the menu code knows.
          * style[7] is 1 on every U3 row: it is not the "chosen one of Oui / Non" sign of U2 and is left at 0. */
         if (safe_read(r,saved_register(5),16) && safe_read(st,saved_register(4),32) && r[3]>=24.0f && r[3]<=42.0f && r[2]>=20.0f)
@@ -5389,6 +5415,41 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
             if (u3_empty_us[i] && now-u3_empty_us[i]<300000 && fabsf(u3_empty_y[i]-hov.y)<1.0f) { have_hov=0; break; }   /* a ghost row: not a target */
     u3_sel_value=sel_value;
     if (sel_value) u3_hide_select_us=now_us();
+    /* The < > of a row (u3_arrows: two 16 wide texts side by side): a click on the left one presses left, on the right one right, once the row is the selected one
+     * (the row is jumped to first, as for a hover, then the press). */
+    static int ar_dir; static float ar_cy, ar_x, ar_y, ar_h, ar_w; static uint64_t ar_until, ar_seen, ar_press_until;
+    int arrow_click=0;
+    if (clicked) {
+        for (int i=0;i<16 && !arrow_click;++i) {
+            const U2Row *a=&u3_arrows[i];
+            if (!a->us || now-a->us>=150000) continue;
+            for (int j=0;j<16;++j) {
+                const U2Row *b=&u3_arrows[j];
+                if (i==j || !b->us || now-b->us>=150000 || fabsf(a->y-b->y)>=1.0f || b->x<=a->x || b->x>a->x+a->w+8.0f) continue;
+                if (ux>=a->x-4.0f && ux<=b->x+b->w+4.0f && uy>=a->y && uy<a->y+a->h) {
+                    arrow_click=1; ar_dir=ux<b->x ? 2 : 3; ar_cy=a->y+a->h*0.5f; ar_h=a->h;
+                    ar_x=1e9f; ar_w=0.0f; ar_y=a->y;
+                    for (int q=0;q<U2_ROWS;++q) {   /* the row's column: the leftmost row-shaped text on that line */
+                        const U2Row *r=&u2_rows[q];
+                        if (!r->us || now-r->us>=100000 || r->h<24.0f || r->h>42.0f || r->w<60.0f || r->w>750.0f || fabsf(r->y+r->h*0.5f-ar_cy)>=4.0f) continue;
+                        if (r->x<ar_x) { ar_x=r->x; ar_w=r->w; }
+                    }
+                    break;
+                }
+            }
+        }
+        if (arrow_click) { ar_until=now+1500000; ar_seen=0; ar_press_until=0; u3_jf_hit_us=0; if (mouse_debug()) printf("Mouse: U3 arrow click: %s (line %.1f, column x %.0f)\n",ar_dir==2 ? "left" : "right",ar_cy,ar_x); }
+    }
+    if (mouse_debug() && have_sel) {   /* debug: every text on the selected line (where are the < > arrows of U3?), when the line changes */
+        static float last_cy; static uint64_t last_us;
+        const float scy=sel.y+sel.h*0.5f;
+        if (fabsf(scy-last_cy)>1.0f && now-last_us>600000) {
+            last_cy=scy; last_us=now;
+            printf("Mouse: U3 selected line y %.1f:",scy);
+            for (int i=0;i<U2_ROWS;++i) { const U2Row *r=&u2_rows[i]; if (r->us && now-r->us<150000 && fabsf(r->y+r->h*0.5f-scy)<12.0f) printf(" [x%.0f y%.0f w%.0f h%.1f s%.1f]",r->x,r->y,r->w,r->h,r->s5); }
+            printf("\n");
+        }
+    }
     pthread_mutex_unlock(&menu_text_lock);
     {   /* once, when the cursor reaches a rail or leaves it: to check that U3 draws one where U2 does */
         static int last_slid;
@@ -5406,7 +5467,7 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
         sl_top=rail_top; sl_slot=-1;
     }
     if (sl_drag && !left) sl_drag=0;   /* the button is up: the move goes on to its target */
-    if (clicked && have_slid && !sl_drag) {
+    if (clicked && have_slid && !sl_drag && !arrow_click) {
         sl_drag=1; sl_pend=1; sl_x=slid.x; sl_w=slid.w; sl_queue=0; sl_next_step=now; sl_press_until=0; sl_dir=0;
         int slot=-1, free_slot=-1;
         for (int i=0;i<8;++i) {
@@ -5454,6 +5515,15 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
         }
     }
     if (sl_drag || sl_zero>0 || sl_queue) { u2_hover=0; presses=0; dir=-1; return out; }
+    if (now<ar_until) {   /* an arrow was clicked: select its row, then press */
+        u3_jf_x=ar_x; u3_jf_y=ar_y; u3_jf_h=ar_h; u3_jf_w=ar_w; u3_jf_us=now;
+        if (have_sel && fabsf(sel.y+sel.h*0.5f-ar_cy)<8.0f) {
+            if (!ar_seen) ar_seen=now;
+            if (now-ar_seen>=100000) { ar_press_until=now+70000; ar_until=0; ar_seen=0; if (mouse_debug()) printf("Mouse: U3 arrow press: %s\n",ar_dir==2 ? "left" : "right"); }
+        } else ar_seen=0;
+    }
+    if (now<ar_press_until) out|=ar_dir==2 ? BTN_LEFT : BTN_RIGHT;
+    if (now<ar_until || now<ar_press_until) { u2_hover=0; presses=0; dir=-1; return out; }
     if (k && (k[SDL_SCANCODE_W] || k[SDL_SCANCODE_A] || k[SDL_SCANCODE_S] || k[SDL_SCANCODE_D] ||
               k[SDL_SCANCODE_UP] || k[SDL_SCANCODE_DOWN] || k[SDL_SCANCODE_LEFT] || k[SDL_SCANCODE_RIGHT])) {
         u2_hover=0; presses=0; return out;   /* the keys are being used: the cursor does not move the selection */
