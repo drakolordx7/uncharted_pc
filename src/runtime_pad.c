@@ -3864,7 +3864,7 @@ static void __attribute__((ms_abi)) u3_list_hook(uint64_t self, uint64_t frame, 
     if (!safe_read(&f0,vt,8) || !safe_read(&f30,vt+0x38,8) || !safe_read(&f38,vt+0x40,8)) return;
     if (f0<image || f0>=image+0x16488f0 || f30<image || f30>=image+0x16488f0 || f38<image || f38>=image+0x16488f0) return;
     const int cur=(int32_t)((u2_vcall_fn)(uintptr_t)f0)(ds), lo=(int32_t)((u2_vcall_fn)(uintptr_t)f30)(ds), hi=(int32_t)((u2_vcall_fn)(uintptr_t)f38)(ds);
-    if (hi-lo<4) return;
+    if (hi-lo<1) return;   /* (Récompenses > Modes de rendu has 3 rows) */
     if (getenv("BB_U3_LISTDUMP")) {   /* (probe) the widget's bytes each time the selection changes, with the y of the highlighted row: the first row seen is cur - (y - top) / 28.55 */
         static int last_cur=-99; static unsigned n;
         if (cur!=last_cur && n<200) {
@@ -5558,6 +5558,7 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
     uint32_t out=0;
     const int wheel=now<wheel_until_us[0] || now<wheel_until_us[1];
     static int ls_pend, ls_click;   /* the cursor moved / was clicked over the rows of a list and the selection has not followed yet */
+    static int ls_wlock, ls_wlock_set; static float ls_wx, ls_wy;   /* after a wheel notch, a hand tremor of a few pixels is not a hover move (the rows run under the cursor) */
     const int list_on=u3_list.us && now-u3_list.us<150000;   /* a list with a scroll bar (u3_list_hook): the wheel moves its selection by set(value), three rows a notch */
     if (now<wheel_until_us[0] && !list_on) out|=BTN_UP;          /* one row up / down per notch, as U2 */
     if (now<wheel_until_us[1] && !list_on) out|=BTN_DOWN;
@@ -5568,6 +5569,8 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
             seen[i]=wheel_until_us[i];
             if (now>=wheel_until_us[i]) continue;
             ls_pend=ls_click=0;   /* the rows move under a still cursor: no hover jump back */
+            ls_wlock=1; ls_wlock_set=0;
+            if (mouse_debug()) printf("Mouse: U3 list wheel %s (cur %d, first %d, vis %d, range %d..%d)\n",i==0 ? "up" : "down",u3_list.cur,u3_list.first,u3_list.vis,u3_list.lo,u3_list.hi);
             if (u3_list.first>=0 && u3_list.hi-u3_list.lo+1>u3_list.vis) {   /* the view scrolls, the selection stays */
                 int t=(u2_scroll_pending && u2_scroll_w==u3_list.w ? u2_scroll_top : u3_list.first)+(i==0 ? -3 : 3);
                 if (t>u3_list.hi+1-u3_list.vis) t=u3_list.hi+1-u3_list.vis;
@@ -5575,6 +5578,7 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
                 u2_scroll_w=u3_list.w; u2_scroll_top=t; u2_scroll_pending=1;
                 continue;
             }
+            if (u3_list.first>=0 && u3_list.hi-u3_list.lo+1<=u3_list.vis) continue;   /* the whole list is on screen (Modes de rendu): nothing to scroll, the selection stays */
             int base=u2_jump_pending && u2_jump_ds==u3_list.ds ? u2_jump_val : u3_list.cur;
             base+=i==0 ? -3 : 3;
             if (base<u3_list.lo) base=u3_list.lo;
@@ -5615,7 +5619,7 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
     }
     /* A statistics line (28.6 tall) has its value in a second text to its right (the same line, past the right edge of the label): the cross there opens
      * the comparison with friends, which does not work offline (U1 and U2 remove it the same way). Sub menu lines (Facile, Normal...: no value) keep it. */
-    if (have_sel && sel.h>=26.0f && sel.h<=30.0f)
+    if (have_sel && sel.h>=26.0f && sel.h<=30.0f && (sel.x<288.0f || sel.x>350.0f))   /* (the Récompenses categories and their lists, labels at x 292..347, show a count or a mark on the right but can be chosen; the statistics are at x 258) */
         for (int i=0;i<U2_ROWS;++i) {
             const U2Row *r=&u2_rows[i];
             if (!r->us || now-r->us>=100000 || r->w<5.0f) continue;
@@ -5767,8 +5771,10 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
         const int in_rail=ux>=lx-8.0f && ux<=lx+22.0f && uy>=ly && uy<ly+rail_h;
         const int over_rows=ux>lx+22.0f && ux<=lx+lw && uy>=ls_y0 && uy<ls_y0+rail_h;
         if (clicked && in_rail) { ls_drag=1; if (mouse_debug()) printf("Mouse: U3 list bar press (rect %.1f %.1f %.1f %.1f, %d values, %d rows seen)\n",lx,ly,lw,u3_list.rc[3],n,vis); }
-        if (moved) ls_pend=1;
-        if (clicked) ls_click=1;
+        if (ls_wlock && !ls_wlock_set) { ls_wx=mx; ls_wy=my; ls_wlock_set=1; }
+        if (ls_wlock && hypotf(mx-ls_wx,my-ls_wy)>=24.0f) ls_wlock=0;
+        if (moved && !ls_wlock) ls_pend=1;
+        if (clicked) { ls_click=1; ls_wlock=0; }
         if (!over_rows) ls_pend=ls_click=0;
         if (ls_drag && left) {
             float th=rail_h*(float)vis/(float)n; if (th<12.0f) th=12.0f;
@@ -5791,7 +5797,7 @@ static uint32_t u3_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
                 u3_keep_view=!keep_off;
                 u2_jump_ds=u3_list.ds; u2_jump_val=want; u2_jump_keep=0; u2_jump_pending=1; ls_last_us=now; ls_want=want;
                 if (ls_click) { ls_cross_want=want; ls_cross_deadline=now+1500000; ls_landed=0; }
-                if (mouse_debug()) printf("Mouse: U3 list jump %d -> %d (row %d/%d, selected row top %.1f, cursor %.1f)%s\n",u3_list.cur,want,row,vis,lsel.y,uy,ls_click ? " click" : "");
+                if (mouse_debug()) printf("Mouse: U3 list jump %d -> %d (row %d/%d, selected row top %.1f, cursor %.1f, first %d, lock %d)%s\n",u3_list.cur,want,row,vis,lsel.y,uy,u3_list.first,ls_wlock,ls_click ? " click" : "");
                 ls_pend=ls_click=0;
             } else if (want==u3_list.cur) {
                 if (ls_click) cross_until=now+120000;
