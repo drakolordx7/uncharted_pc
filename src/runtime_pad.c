@@ -785,7 +785,7 @@ static void u2_zoom_camera(uint64_t camera) {
         const float h=SDL_sqrtf(d[0]*d[0]+d[2]*d[2]);
         if (h>1e-4f) {
             float e=SDL_atan2f(d[1],h)*57.29578f-step_pitch;
-            e=e>70.0f ? 70.0f : e<-70.0f ? -70.0f : e;
+            e=e>70.0f ? 70.0f : e<-85.0f ? -85.0f : e;
             const float r=e*0.017453293f, k=SDL_cosf(r)/h;
             d[0]*=k; d[2]*=k; d[1]=SDL_sinf(r);
         }
