@@ -84,7 +84,8 @@ Several fixes come from BilalReloaded's
 game allocates it (error 1450), the Uncharted 3 look-at reset and the garbage descriptor fixes.
 Many of the 0.3.10 fixes were found and made by drakolordx7 in the
 [community build](https://github.com/drakolordx7/uncharted_pc), and the FSR 3 frame generation
-memory leak fix is from Mevlock.
+memory leak fix is from Mevlock, the NVIDIA crash fix above 55 FPS (large compute
+workgroups) from Umar-Qayyum-dev.
 
 Also used: [FSR-Vulkan](https://github.com/FireBurn/FSR-Vulkan) and the AMD FidelityFX SDK (FSR),
 FSR 4 assets from [FireBurn/Q2RTX](https://github.com/FireBurn/Q2RTX), the
