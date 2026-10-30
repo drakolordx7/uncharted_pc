@@ -998,6 +998,17 @@ static void patch_job_lock_wait(uint64_t image_size) {
     const char *env=getenv("BB_JOB_LOCK_WAIT_MS");
     if (env) job_lock_wait_ms=(unsigned)strtoul(env,NULL,10);
     if (!job_lock_wait_ms) { printf("Job wait: BB_JOB_LOCK_WAIT_MS=0, workers suspend at once\n"); return; }
+#ifdef _WIN32
+    /* By default only on CPUs with up to 12 hardware threads, where the crash happens (4 and 6
+     * cores). With more, a free worker takes the suspended job at once, and waiting in place cost
+     * U3's Cartagena square 92 -> 50 FPS on a big CPU. BB_JOB_LOCK_WAIT_MS turns it on anywhere. */
+    const DWORD threads=GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+    if (!env && threads>12) {
+        printf("Job wait: workers suspend at once (%lu hardware threads; BB_JOB_LOCK_WAIT_MS=250 to wait)\n",
+               (unsigned long)threads);
+        return;
+    }
+#endif
     /* mov rdi,[rbx+0x20]; mov rsi,r15; mov edx,r14d; call try; test al,al; jne done;
      * test r12b,r12b; je not_a_worker; nop5; (suspend loop:) mov rdi,rbx; mov rsi,r15; mov edx,r14d; call SuspendJob */
     const int64_t at=find_unique_pattern(image_size, "488b7b20 4c89fe 4489f2 e8???????? 84c0 75?? 4584e4 74?? 0f1f440000 "
