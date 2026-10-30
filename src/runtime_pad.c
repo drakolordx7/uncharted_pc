@@ -628,6 +628,22 @@ static const unsigned char u3_focus_reset_102[]={
     0x83,0xf8,0x0f,0x0f,0x84,0xa5,0xfe,0xff,0xff,0xcd,0x41,CC8,CC8,CC8,
 };
 _Static_assert(sizeof(u3_focus_reset_100)==51 && sizeof(u3_focus_reset_102)==53,"patch sizes");
+/* Render command contexts (ndgi), from Mevlock's dev fork: Begin and End keep a per-thread flag,
+ * set while a job worker has a context open (runtime_ndgi_open, cleared too when a fiber leaves
+ * the thread, runtime_fiber.c), used by the job wait patch in probe.c. A context records its
+ * worker at Begin (+0xe810) and asserts the same one at End ("m_workerThreadIndex ==
+ * GetCurrentWorkerThreadIndex()"). One site each in all three games. */
+extern _Thread_local int runtime_ndgi_open; /* runtime_fiber.c */
+static void __attribute__((ms_abi)) ndgi_begin(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                               const RuntimeGuestRegs *regs) {
+    (void)rdi; (void)rsi; (void)image; (void)r14; (void)regs;
+    runtime_ndgi_open=1;
+}
+static void __attribute__((ms_abi)) ndgi_end(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                             const RuntimeGuestRegs *regs) {
+    (void)rdi; (void)rsi; (void)image; (void)r14; (void)regs;
+    runtime_ndgi_open=0;
+}
 /* The camera code, the pad code and the assertion are found by their instructions, so a build of the
  * game that has them works (version 1.00 and 1.02 are known; "build" below). RIP-relative
  * displacements and call targets are wildcards. Entries with one name are variants for the builds. */
@@ -800,6 +816,16 @@ static const RuntimeGuestCallback guest_callbacks[]={
       "8d 35 ?? ?? ?? ?? 48 8d 15 ?? ?? ?? ?? 48 8d 0d ?? ?? ?? ?? "
       "41 b8 4d 04 00 00 45 31 c9 ff d0 cd 41 c5 f8 28 45 d0",
       0x0, 58, NULL, u2_focus_reset_102},
+    /* Render context Begin, build 100: mov [r12+0xe810], rax */
+    {"Job render context begin", "49 89 84 24 10 e8 00 00", 0x0, 8, ndgi_begin, NULL},
+    /* build 102: mov [r15+0xe810], r12 */
+    {"Job render context begin", "4d 89 a7 10 e8 00 00", 0x0, 7, ndgi_begin, NULL},
+    /* Render context End, build 100: mov rbx,[r14+0xe810]; call GetCurrentWorkerThreadIndex;
+     * cmp rbx,rax; je */
+    {"Job render context end", "49 8b 9e 10 e8 00 00 e8 ?? ?? ?? ?? 48 39 c3 74", 0x0, 7, ndgi_end, NULL},
+    /* build 102: cmp byte [r15+0xe7dc],0; je; mov r12,[r15+0xe810] (the index call is inlined) */
+    {"Job render context end", "41 80 bf dc e7 00 00 00 0f 84 ?? ?? ?? ?? 4d 8b a7 10 e8 00 00",
+      14, 7, ndgi_end, NULL},
 
 };
 const RuntimeGuestCallback *runtime_guest_callbacks(size_t *count) {
