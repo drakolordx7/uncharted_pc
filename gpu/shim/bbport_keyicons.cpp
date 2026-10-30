@@ -3351,6 +3351,97 @@ bool XSchemaMask(uint8_t* data, size_t size, uint32_t levels) {
     return true;
 }
 
+/// The background of a hand-drawn Xbox button (flat color seen through the halo mask) becomes `target`: the halo takes the color of
+/// the button (A green, B red, X blue, Y yellow). The flat background is found from the corner; the anti-aliased rim of the metal
+/// (a mix of the background and black) is recolored in proportion; the button itself is left alone.
+static void XRecolorHalo(std::vector<uint8_t>& px, int w, int h, const Color& target) {
+    const float bg[3] = {float(px[(size_t(3) * w + 3) * 4]), float(px[(size_t(3) * w + 3) * 4 + 1]), float(px[(size_t(3) * w + 3) * 4 + 2])};
+    const float tg[3] = {target.r, target.g, target.b};
+    constexpr float Dark = 16.0f;
+    auto is_bg = [&](size_t i) {
+        for (int k = 0; k < 3; ++k) {
+            if (std::abs(float(px[i * 4 + size_t(k)]) - bg[k]) > 24.0f) {
+                return false;
+            }
+        }
+        return true;
+    };
+    std::vector<uint8_t> region(size_t(w) * size_t(h), 0);
+    std::vector<size_t> stack;
+    for (const size_t s : {size_t(3) * w + 3, size_t(3) * w + size_t(w - 4), size_t(h - 4) * w + 3, size_t(h - 4) * w + size_t(w - 4)}) {
+        if (is_bg(s) && !region[s]) {
+            region[s] = 1;
+            stack.push_back(s);
+        }
+    }
+    while (!stack.empty()) {
+        const size_t i = stack.back();
+        stack.pop_back();
+        const int x = int(i % size_t(w)), y = int(i / size_t(w));
+        const int nx[4] = {x - 1, x + 1, x, x}, ny[4] = {y, y, y - 1, y + 1};
+        for (int d = 0; d < 4; ++d) {
+            if (nx[d] < 0 || ny[d] < 0 || nx[d] >= w || ny[d] >= h) {
+                continue;
+            }
+            const size_t j = size_t(ny[d]) * size_t(w) + size_t(nx[d]);
+            if (!region[j] && is_bg(j)) {
+                region[j] = 1;
+                stack.push_back(j);
+            }
+        }
+    }
+    // the rim: three pixels around the background, a mix of the background and the dark metal
+    float span2 = 0.0f;
+    for (int k = 0; k < 3; ++k) {
+        span2 += (bg[k] - Dark) * (bg[k] - Dark);
+    }
+    std::vector<uint8_t> rim(region.size(), 0);
+    for (int pass = 0; pass < 3; ++pass) {
+        std::vector<uint8_t> next = rim;
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                const size_t i = size_t(y) * size_t(w) + size_t(x);
+                if (region[i] || rim[i]) {
+                    continue;
+                }
+                bool near = false;
+                for (int dy = -1; dy <= 1 && !near; ++dy) {
+                    for (int dx = -1; dx <= 1 && !near; ++dx) {
+                        const int X = x + dx, Y = y + dy;
+                        near = X >= 0 && Y >= 0 && X < w && Y < h && (region[size_t(Y) * w + size_t(X)] || rim[size_t(Y) * w + size_t(X)]);
+                    }
+                }
+                if (!near || span2 <= 0.0f) {
+                    continue;
+                }
+                float a = 0.0f;
+                for (int k = 0; k < 3; ++k) {
+                    a += (float(px[i * 4 + size_t(k)]) - Dark) * (bg[k] - Dark);
+                }
+                a = std::clamp(a / span2, 0.0f, 1.0f);
+                float res = 0.0f;
+                for (int k = 0; k < 3; ++k) {
+                    res = std::max(res, std::abs(float(px[i * 4 + size_t(k)]) - (Dark + a * (bg[k] - Dark))));
+                }
+                if (a > 0.02f && res < 30.0f) {
+                    next[i] = 1;
+                    for (int k = 0; k < 3; ++k) {
+                        px[i * 4 + size_t(k)] = uint8_t(std::clamp(float(px[i * 4 + size_t(k)]) + a * (tg[k] - bg[k]), 0.0f, 255.0f));
+                    }
+                }
+            }
+        }
+        rim = std::move(next);
+    }
+    for (size_t i = 0; i < region.size(); ++i) {
+        if (region[i]) {
+            for (int k = 0; k < 3; ++k) {
+                px[i * 4 + size_t(k)] = uint8_t(tg[k]);
+            }
+        }
+    }
+}
+
 /// Xbox: the "interact" button (its three frames) and the journal's touchpad button keep the game's pictures; only the glyph changes
 /// (the triangle becomes a Y in the color it had, the hand becomes View). The masks (the shape and the halo) are not touched.
 bool PatchXboxHud(const KeyTarget& t, Role role, uint8_t* data, size_t size, uint32_t levels) {
@@ -3399,6 +3490,15 @@ bool PatchXboxHud(const KeyTarget& t, Role role, uint8_t* data, size_t size, uin
         for (size_t i = 0, n = size_t(t.width) * size_t(t.height); i < n; ++i) {
             std::memcpy(&level[i * 4], &asset.data[i * 3], 3);
             level[i * 4 + 3] = 255;
+        }
+        // the halo in the color of the Xbox button (B's picture is already red)
+        static const Color HaloA{64.0f, 208.0f, 80.0f}, HaloX{44.0f, 124.0f, 236.0f}, HaloY{248.0f, 204.0f, 44.0f};
+        if (asset_id == 1 || asset_id == 2 || asset_id == 3) {
+            XRecolorHalo(level, t.width, t.height, HaloY);
+        } else if (asset_id == 30) {
+            XRecolorHalo(level, t.width, t.height, HaloA);
+        } else if (asset_id == 36 || asset_id == 37) {
+            XRecolorHalo(level, t.width, t.height, HaloX);
         }
         ReencodeChain(std::move(level), t.width, t.height, Codec::Bc1, layout, data, 0.0f, 0.0f, float(t.width), float(t.height));
         std::printf("KeyIcons: HUD button %s: the Xbox picture (%dx%d)\n", t.action, t.width, t.height);
