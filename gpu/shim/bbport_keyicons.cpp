@@ -1260,8 +1260,8 @@ void DecodeBc1(const uint8_t* data, int width, int height, uint8_t* rgba) {
 }
 
 /// Encodes the 4x4 pixels at (bx*4, by*4) of an RGBA8 level (edges clamped) as one BC1 block:
-/// the two most distant colors are the end points.
-void EncodeBc1Block(const uint8_t* rgba, int width, int height, int bx, int by, uint8_t out[8]) {
+/// the two most distant colors are the end points. (EncodeBc1Block below tries better end points too.)
+void EncodeBc1BlockBasic(const uint8_t* rgba, int width, int height, int bx, int by, uint8_t out[8]) {
     Rgb px[16];
     for (int i = 0; i < 16; ++i) {
         const int x = std::min(bx * 4 + (i & 3), width - 1), y = std::min(by * 4 + (i >> 2), height - 1);
@@ -1310,6 +1310,162 @@ void EncodeBc1Block(const uint8_t* rgba, int width, int height, int bx, int by, 
     out[5] = uint8_t(bits >> 8);
     out[6] = uint8_t(bits >> 16);
     out[7] = uint8_t(bits >> 24);
+}
+
+/// The squared error of a BC1 block against the 16 pixels it was made from.
+long Bc1BlockError(const Rgb px[16], const uint8_t block[8]) {
+    Rgb palette[4];
+    Bc1Palette(block, palette);
+    const uint32_t bits = uint32_t(block[4]) | (uint32_t(block[5]) << 8) | (uint32_t(block[6]) << 16) | (uint32_t(block[7]) << 24);
+    long error = 0;
+    for (int i = 0; i < 16; ++i) {
+        const Rgb& c = palette[(bits >> (2 * i)) & 3];
+        const long dr = px[i].r - c.r, dg = px[i].g - c.g, db = px[i].b - c.b;
+        error += dr * dr + dg * dg + db * db;
+    }
+    return error;
+}
+
+/// A block from two end points (rounded to 565, the larger first), each pixel on its nearest of the four colors.
+void Bc1BlockFrom(const Rgb px[16], const float e0[3], const float e1[3], uint8_t out[8]) {
+    const auto pack = [](const float c[3]) {
+        const int r = std::clamp(int(c[0] * 31.0f / 255.0f + 0.5f), 0, 31), g = std::clamp(int(c[1] * 63.0f / 255.0f + 0.5f), 0, 63),
+                  b = std::clamp(int(c[2] * 31.0f / 255.0f + 0.5f), 0, 31);
+        return uint16_t((r << 11) | (g << 5) | b);
+    };
+    uint16_t c0 = pack(e0), c1 = pack(e1);
+    if (c0 < c1) {
+        std::swap(c0, c1);
+    }
+    out[0] = uint8_t(c0 & 255);
+    out[1] = uint8_t(c0 >> 8);
+    out[2] = uint8_t(c1 & 255);
+    out[3] = uint8_t(c1 >> 8);
+    uint32_t bits = 0;
+    if (c0 != c1) {
+        Rgb palette[4];
+        Bc1Palette(out, palette);
+        for (int i = 0; i < 16; ++i) {
+            int pick = 0;
+            long nearest = 1L << 40;
+            for (int k = 0; k < 4; ++k) {
+                const long dr = px[i].r - palette[k].r, dg = px[i].g - palette[k].g, db = px[i].b - palette[k].b;
+                const long d = dr * dr + dg * dg + db * db;
+                if (d < nearest) {
+                    nearest = d;
+                    pick = k;
+                }
+            }
+            bits |= uint32_t(pick) << (2 * i);
+        }
+    }
+    out[4] = uint8_t(bits);
+    out[5] = uint8_t(bits >> 8);
+    out[6] = uint8_t(bits >> 16);
+    out[7] = uint8_t(bits >> 24);
+}
+
+/// The block with the lowest error of: the two most distant colors, the ends of the principal axis of the colors, and the
+/// end points refined by least squares from the picks of each. Edges of the keys keep their shape better at 2x or more.
+void EncodeBc1Block(const uint8_t* rgba, int width, int height, int bx, int by, uint8_t out[8]) {
+    uint8_t best[8];
+    EncodeBc1BlockBasic(rgba, width, height, bx, by, best);
+    Rgb px[16];
+    for (int i = 0; i < 16; ++i) {
+        const int x = std::min(bx * 4 + (i & 3), width - 1), y = std::min(by * 4 + (i >> 2), height - 1);
+        const uint8_t* p = rgba + (size_t(y) * size_t(width) + size_t(x)) * 4;
+        px[i] = {p[0], p[1], p[2]};
+    }
+    long best_error = Bc1BlockError(px, best);
+    if (best_error == 0) {
+        std::memcpy(out, best, 8);
+        return;
+    }
+    // principal axis of the colors (power iteration on their covariance)
+    float mean[3] = {0, 0, 0};
+    for (const Rgb& c : px) {
+        mean[0] += float(c.r) / 16.0f;
+        mean[1] += float(c.g) / 16.0f;
+        mean[2] += float(c.b) / 16.0f;
+    }
+    float cov[3][3] = {};
+    for (const Rgb& c : px) {
+        const float d[3] = {float(c.r) - mean[0], float(c.g) - mean[1], float(c.b) - mean[2]};
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) {
+                cov[i][j] += d[i] * d[j];
+            }
+        }
+    }
+    float axis[3] = {1.0f, 1.0f, 1.0f};
+    for (int it = 0; it < 8; ++it) {
+        const float v[3] = {cov[0][0] * axis[0] + cov[0][1] * axis[1] + cov[0][2] * axis[2],
+                            cov[1][0] * axis[0] + cov[1][1] * axis[1] + cov[1][2] * axis[2],
+                            cov[2][0] * axis[0] + cov[2][1] * axis[1] + cov[2][2] * axis[2]};
+        const float n = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+        if (n < 1e-6f) {
+            break;
+        }
+        axis[0] = v[0] / n;
+        axis[1] = v[1] / n;
+        axis[2] = v[2] / n;
+    }
+    float lo = 1e9f, hi = -1e9f;
+    for (const Rgb& c : px) {
+        const float t = (float(c.r) - mean[0]) * axis[0] + (float(c.g) - mean[1]) * axis[1] + (float(c.b) - mean[2]) * axis[2];
+        lo = std::min(lo, t);
+        hi = std::max(hi, t);
+    }
+    float e0[3], e1[3];
+    for (int k = 0; k < 3; ++k) {
+        e0[k] = std::clamp(mean[k] + axis[k] * hi, 0.0f, 255.0f);
+        e1[k] = std::clamp(mean[k] + axis[k] * lo, 0.0f, 255.0f);
+    }
+    uint8_t trial[8];
+    Bc1BlockFrom(px, e0, e1, trial);
+    for (int pass = 0; pass < 3; ++pass) {
+        const long error = Bc1BlockError(px, trial);
+        if (error < best_error) {
+            best_error = error;
+            std::memcpy(best, trial, 8);
+        }
+        if (best_error == 0) {
+            break;
+        }
+        // least squares on the picks of `trial`: pixel ~ w0 * end0 + w1 * end1
+        const uint32_t bits = uint32_t(trial[4]) | (uint32_t(trial[5]) << 8) | (uint32_t(trial[6]) << 16) | (uint32_t(trial[7]) << 24);
+        const bool four = uint16_t(trial[0] | (trial[1] << 8)) > uint16_t(trial[2] | (trial[3] << 8));
+        if (!four) {
+            break;
+        }
+        static const float W0[4] = {1.0f, 0.0f, 2.0f / 3.0f, 1.0f / 3.0f};
+        float a00 = 0, a01 = 0, a11 = 0, b0[3] = {0, 0, 0}, b1[3] = {0, 0, 0};
+        for (int i = 0; i < 16; ++i) {
+            const float w0 = W0[(bits >> (2 * i)) & 3], w1 = 1.0f - w0;
+            a00 += w0 * w0;
+            a01 += w0 * w1;
+            a11 += w1 * w1;
+            const float p[3] = {float(px[i].r), float(px[i].g), float(px[i].b)};
+            for (int k = 0; k < 3; ++k) {
+                b0[k] += w0 * p[k];
+                b1[k] += w1 * p[k];
+            }
+        }
+        const float det = a00 * a11 - a01 * a01;
+        if (std::fabs(det) < 1e-4f) {
+            break;
+        }
+        for (int k = 0; k < 3; ++k) {
+            e0[k] = std::clamp((b0[k] * a11 - b1[k] * a01) / det, 0.0f, 255.0f);
+            e1[k] = std::clamp((b1[k] * a00 - b0[k] * a01) / det, 0.0f, 255.0f);
+        }
+        Bc1BlockFrom(px, e0, e1, trial);
+    }
+    const long error = Bc1BlockError(px, trial);
+    if (error < best_error) {
+        std::memcpy(best, trial, 8);
+    }
+    std::memcpy(out, best, 8);
 }
 
 } // namespace
@@ -2776,12 +2932,6 @@ constexpr KeyTarget KeyTargets[] = {
     {0xca555bf12dd7402bull, 0x6e70a93320e446a4ull, 0, 512, 512, 256.5f, 250.0f, 98.5f, 59.0f, "triangle", -16.0f, 170.0f, 150.0f, false, 0, 0, 0, 0, 0x35f9e8ad273591c5ull, 0, FrameKeyScale, false, false, true, 0, 0, 256},
     {0x2e8f1a37800214a7ull, 0xe56cc1b653d4967bull, 0, 512, 512, 256.5f, 250.0f, 98.5f, 59.0f, "square", 36.0f, 170.0f, 150.0f, false, 0, 0, 0, 0, 0xae75f527bc070bf0ull, 0, FrameKeyScale, false, false, true, 0, 0, 256},
     {0xcdde88dd024eeabeull, 0x6e70a93320e446a4ull, 0, 512, 512, 256.5f, 250.0f, 98.5f, 59.0f, "square", -16.0f, 170.0f, 150.0f, false, 0, 0, 0, 0, 0x35f9e8ad273591c5ull, 0, FrameKeyScale, false, false, true, 0, 0, 256},
-    // "Push the left stick forward": three frames of the stick (256x128, tan background, stored upside down), each with a
-    // mask of its own. The stick goes, the key of "stick up" takes its place (centered on the mask of the frame). The
-    // controller keeps the stick: it is the same picture for PlayStation and Xbox.
-    {0xd5517ab261f4e90cull, 0x25d2534cfad65b5dull, 0, 256, 128, 129.5f, 71.5f, 38.0f, 38.0f, "ls_up", 0.0f, 170.0f, 150.0f, false, 0, 0, 0, 0, 0, 0, 1.0f, false, false, true},
-    {0xf3dfe70ef1fde14bull, 0x412777c1c2c78246ull, 0, 256, 128, 129.5f, 58.0f, 38.0f, 38.0f, "ls_up", 0.0f, 170.0f, 150.0f, false, 0, 0, 0, 0, 0, 0, 1.0f, false, false, true},
-    {0x2f20dd1ea3c43f82ull, 0x08a9ae4743d4fb58ull, 0, 256, 128, 129.5f, 76.0f, 38.0f, 38.0f, "ls_up", 0.0f, 170.0f, 150.0f, false, 0, 0, 0, 0, 0, 0, 1.0f, false, false, true},
     // The d-pad of the HUD, up arm lit (stored upside down): soft mask with the glow, hard mask of the pad.
     {0x75acc5a4dbcdc36full, 0x90a2254d1a6d063cull, 0xe7ee4ecd41676109ull, 256, 256, 128.0f, 126.0f, 80.0f, 80.0f, "up", 0.0f, 170.0f, 150.0f, false, 0, 0, 0, 0, 0, 0, DpadKeyScale, true, false, true},
     // The journal (512x256, the button where it is in U1 and U2; its mask is left as it is).
@@ -3357,10 +3507,80 @@ bool PatchStickFrame(const StickFrame& f, bool is_mask, uint8_t* data, size_t si
     return true;
 }
 
+// ---- U3: "push the left stick" (the "L" cap): the keys forward and back, one lit per frame -------------------------------------
+// Three frames of 256x128 (a color texture and a BC1 mask each, stored upside down): the cap tilted away, seen from the front
+// with its "L", and pushed down. The stick goes; the key of "stick up" is above the key of "stick down", the one of the frame lit.
+// A controller keeps the stick: it is the same picture for PlayStation and Xbox.
+struct StickPush {
+    uint64_t color_hash, mask_hash;
+    int lit; // 0 the key forward, 1 the key back, -1 none
+};
+
+constexpr StickPush StickPushes[] = {
+    {0x2f20dd1ea3c43f82ull, 0x08a9ae4743d4fb58ull, 0},  // the cap tilted away
+    {0xd5517ab261f4e90cull, 0x25d2534cfad65b5dull, -1}, // seen from the front, the "L" showing
+    {0xf3dfe70ef1fde14bull, 0x412777c1c2c78246ull, 1},  // pushed down
+};
+constexpr int PushWidth = 256, PushHeight = 128;
+constexpr float PushCenterY = 60.0f; // from the top of the picture, upright
+constexpr float PushKey = 46.0f;     // size of one key
+constexpr float PushGap = 0.1f;      // gap between the keys, in keys
+
+const StickPush* FindStickPush(uint64_t hash, bool* is_mask) {
+    for (const StickPush& f : StickPushes) {
+        if (f.color_hash == hash || f.mask_hash == hash) {
+            *is_mask = f.mask_hash == hash;
+            return &f;
+        }
+    }
+    return nullptr;
+}
+
+bool PatchStickPush(const StickPush& f, bool is_mask, uint8_t* data, size_t size, uint32_t levels) {
+    const Levels layout = LayoutLevels(PushWidth, PushHeight, levels);
+    const Font& font = GetFont();
+    if (size < layout.total || !font.ok) {
+        return false;
+    }
+    const Bindings b = LoadBindings();
+    const std::string labels[2] = {ArrowLabel(font, BindingLabel(b, "ls_up")), ArrowLabel(font, BindingLabel(b, "ls_down"))};
+    if (labels[0].empty() || labels[1].empty()) {
+        return false;
+    }
+    std::vector<uint8_t> level(size_t(PushWidth) * size_t(PushHeight) * 4);
+    DecodeBc1(data, PushWidth, PushHeight, level.data());
+    // The keys, upright, on a 512x512 sheet (the draw functions want a square).
+    std::vector<uint8_t> sheet(512 * 512 * 4, 0);
+    const float gap = PushKey * PushGap, half = PushKey * 0.5f;
+    const float rows[2] = {PushCenterY - (PushKey + gap) * 0.5f, PushCenterY + (PushKey + gap) * 0.5f};
+    for (int i = 0; i < 2; ++i) {
+        DrawKeyCap(sheet.data(), 512, 128.0f, rows[i], half, half, labels[i], font, Orange, false, 1.0f, 0.0f, i == f.lit);
+    }
+    for (int y = 0; y < PushHeight; ++y) {
+        const int y_up = PushHeight - 1 - y;
+        for (int x = 0; x < PushWidth; ++x) {
+            const uint8_t* s = &sheet[(size_t(y_up) * 512 + size_t(x)) * 4];
+            uint8_t* p = &level[(size_t(y) * PushWidth + size_t(x)) * 4];
+            if (is_mask) { // the keys and their halo
+                p[0] = p[1] = p[2] = s[3];
+            } else { // their colors; the halo's orange elsewhere
+                p[0] = s[3] ? s[0] : uint8_t(Orange.r);
+                p[1] = s[3] ? s[1] : uint8_t(Orange.g);
+                p[2] = s[3] ? s[2] : uint8_t(Orange.b);
+            }
+        }
+    }
+    ReencodeChain(std::move(level), PushWidth, PushHeight, Codec::Bc1, layout, data, 0.0f, 0.0f, float(PushWidth),
+                  float(PushHeight));
+    std::printf("KeyIcons: stick push frame redrawn (%s, %s / %s, %u mip levels)\n", is_mask ? "mask" : "color",
+                labels[0].c_str(), labels[1].c_str(), layout.count);
+    return true;
+}
+
 } // namespace
 
 bool IsTextureCandidate(uint32_t width, uint32_t height) {
-    return (width == 128 && height == 128) || (width == 256 && height == 256) ||
+    return (width == 128 && height == 128) || (width == 256 && height == 256) || (width == 256 && height == 128) ||
            (width == 512 && height == 512) || (width == 256 && height == 512) || (width == 512 && height == 256) || (width == 1024 && height == 512) ||
            (width == 2048 && height == 1024);
 }
@@ -3423,7 +3643,7 @@ void NoteUnknownTexture(uint64_t hash, uint32_t width, uint32_t height, const ui
 bool IsTextureTarget(uint64_t hash) {
     bool is_mask;
     Role role;
-    return FindKeyTarget(hash, &role) != nullptr || FindStickFrame(hash, &is_mask) != nullptr || hash == JournalMaskHash || hash == JournalMaskHashU2 || hash == JournalMaskHashU3 || hash == SchemaHash || hash == SchemaMaskHash || hash == SchemaMaskHashU2 || hash == SchemaMaskHashU3;
+    return FindKeyTarget(hash, &role) != nullptr || FindStickFrame(hash, &is_mask) != nullptr || FindStickPush(hash, &is_mask) != nullptr || hash == JournalMaskHash || hash == JournalMaskHashU2 || hash == JournalMaskHashU3 || hash == SchemaHash || hash == SchemaMaskHash || hash == SchemaMaskHashU2 || hash == SchemaMaskHashU3;
 }
 
 bool IsPulseMask(uint64_t hash) {
@@ -3441,6 +3661,9 @@ int PromptKind(uint64_t hash) {
     if (FindStickFrame(hash, &is_mask)) {
         return 1;
     }
+    if (FindStickPush(hash, &is_mask)) {
+        return 7; // U3's "push the stick" keys: zoomed so that the bottom key is the size and place of the other prompts
+    }
     const KeyTarget* t = FindKeyTarget(hash, &role);
     if (!t) {
         return 0;
@@ -3451,6 +3674,27 @@ int PromptKind(uint64_t hash) {
 
 void PromptTransform(int kind, float* zoom, float* anchor_x, float* anchor_y, float* down, float* right) {
     *right = 0.0f;
+    if (kind == 7) {
+        // The picture of the stick prompt is drawn 0.83 screen pixels per texture pixel, centered (250, 918) on a 2000x1125
+        // capture: its bottom key (46 pixels, center (128, 85.3) from the top of the 256x128 picture) is about 38 pixels
+        // wide at (248.8, 942.7). The other prompts' key (the "Ctrl" of the quick-time, measured) is 94 pixels wide centered
+        // (200, 976). Zoom 2.46 about c = (T - zoom * A) / (1 - zoom) does both.
+        struct Values {
+            float zoom, x, y;
+        };
+        static const Values values = [] {
+            Values v{2.46f, 0.1411f, 0.8177f};
+            if (const char* env = std::getenv("BB_U3_STICK_ZOOM")) {
+                std::sscanf(env, "%f,%f,%f", &v.zoom, &v.x, &v.y);
+            }
+            return v;
+        }();
+        *zoom = values.zoom;
+        *anchor_x = values.x;
+        *anchor_y = values.y;
+        *down = 0.0f;
+        return;
+    }
     if (kind == 6 && g_input_mode != 0) {
         // The game's own d-pad of U3 (measured on 2000x1125 captures): about 99x107 pixels centered (311.5, 891); the "V" is
         // 85 pixels wide centered (307.5, 977.5). Zoom 0.85 about c = (T - zoom * A) / (1 - zoom) does both.
@@ -3570,6 +3814,9 @@ bool PatchU1Texture(uint64_t hash, uint8_t* data, size_t size, uint32_t levels) 
         return (masks || role == Role::Color) && PatchKeyTarget(*t, role, hash, data, size, levels);
     }
     bool is_mask = false;
+    if (const StickPush* p = FindStickPush(hash, &is_mask)) {
+        return (masks || !is_mask) && PatchStickPush(*p, is_mask, data, size, levels);
+    }
     const StickFrame* f = FindStickFrame(hash, &is_mask);
     return f && (masks || !is_mask) && PatchStickFrame(*f, is_mask, data, size, levels);
 }
