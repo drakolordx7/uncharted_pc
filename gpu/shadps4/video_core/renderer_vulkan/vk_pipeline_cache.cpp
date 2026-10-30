@@ -35,6 +35,7 @@
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
+#include "bbport_focus_fix.h"
 
 namespace Vulkan {
 
@@ -1205,7 +1206,9 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
         module = CompileSPV(spv, instance.GetDevice());
     }
 
-    if (!Shader::Backend::SPIRV::IsForcedShader(info.pgm_hash)) {
+    // bbport: the autofocus fix is translated each run (BB_FOCUS_FIX=0 turns it off).
+    if (!Shader::Backend::SPIRV::IsForcedShader(info.pgm_hash) &&
+        !BbFocusFix::FocusCentreShader(info.pgm_hash)) {
         RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
     }
 

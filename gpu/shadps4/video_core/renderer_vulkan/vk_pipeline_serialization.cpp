@@ -22,6 +22,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
+#include "bbport_focus_fix.h"
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
@@ -407,7 +408,8 @@ void PipelineCache::WarmUpThread() {
         stage.spec.info = &stage.program->info;
         std::optional<Shader::Gcn::FetchShaderData> unused;
         if (!LoadShaderMeta(meta_ar, stage.program->info, unused, stage.spec, stage.perm_idx) ||
-            Shader::Backend::SPIRV::IsForcedShader(stage.program->info.pgm_hash)) {
+            Shader::Backend::SPIRV::IsForcedShader(stage.program->info.pgm_hash) ||
+            BbFocusFix::FocusCentreShader(stage.program->info.pgm_hash)) {
             stage.program.reset();
             return;
         }
