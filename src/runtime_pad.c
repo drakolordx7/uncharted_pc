@@ -4269,7 +4269,7 @@ static void __attribute__((ms_abi)) u3_layer_blend(uint64_t rdi, uint64_t rsi, u
         if (now-last_us>1000000) start_us=now;
         last_us=now;
         { float f2[3]; quat_rotate(q,look,f2);
-            printf("Mouse: U3 layer T=%.4f t=%.4f dt=%.1fms mouse=%.0f,%.0f final=%.2f -> %.2f want=%.2f turn=%.2f%s\n",now*1e-6,(double)t,(now-start_us)*1e-3,(double)u3_dbg_dx,(double)u3_dbg_dy,(double)hf,(double)(SDL_atan2f(f2[0],f2[2])*57.29578f),(double)hd,(double)u3_aim_total_yaw,held ? "" : " FADE"); }
+            printf("Mouse: U3 layer T=%.4f t=%.4f dt=%.1fms mouse=%.0f,%.0f final=%.2f -> %.2f want=%.2f turn=%.2f%s off_local=%.3f,%.3f,%.3f dist=%.3f\n",now*1e-6,(double)t,(now-start_us)*1e-3,(double)u3_dbg_dx,(double)u3_dbg_dy,(double)hf,(double)(SDL_atan2f(f2[0],f2[2])*57.29578f),(double)hd,(double)u3_aim_total_yaw,held ? "" : " FADE",(double)local[0],(double)local[1],(double)local[2],(double)SDL_sqrtf(off[0]*off[0]+off[1]*off[1]+off[2]*off[2])); }
     }
     for (int i=0;i<3;++i) { p[i]=u3_aim_pivot[i]+turned[i]; p[4+i]=q[i]; }
     p[7]=q[3];
