@@ -4108,16 +4108,35 @@ static const unsigned char u1_menu_event_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0
  * keep the mouse on the emulated stick: they are noted here so that the walking camera, which runs under them, leaves the mouse alone.
  * Two walking cameras run in one frame while one blends under another: the shown one writes to the output block whose low bits are 0x1f0.
  * BB_U3_NATIVE=0 turns it off. */
-static volatile uint64_t u3_aim_seen_us, u3_cover_seen_us;
+static volatile uint64_t u3_aim_seen_us, u3_cover_seen_us, u3_cover_cam;
+static float u3_cover_show_h, u3_cover_show_e; static uint64_t u3_cover_show_us;   /* the heading / elevation the cover picture showed on the last frame of the cover camera (an aim from cover starts from it) */
+static float u3_cover_yaw, u3_cover_pitch;   /* degrees turned by the mouse since the cover began (see u3_cover_layer) */
 static volatile uint64_t u3_probe_aim_cam;   /* the aiming camera object, compared (never written) at the end of the layer blend */
 static float u3_dbg_dx, u3_dbg_dy;   /* the raw mouse pixels taken by the last update of the aiming camera (BB_MOUSE_DEBUG trace) */
 static void __attribute__((ms_abi)) u3_aim_camera_seen(uint64_t out, uint64_t camera, uint64_t image, uint64_t r14) { (void)out; (void)camera; (void)image; (void)r14; u3_aim_seen_us=now_us(); u3_probe_aim_cam=camera; }
-static void __attribute__((ms_abi)) u3_cover_camera_seen(uint64_t out, uint64_t camera, uint64_t image, uint64_t r14) { (void)out; (void)camera; (void)image; (void)r14; u3_cover_seen_us=now_us(); }
+static void __attribute__((ms_abi)) u3_cover_camera_seen(uint64_t out, uint64_t camera, uint64_t image, uint64_t r14) {
+    (void)image; (void)r14;
+    u3_cover_seen_us=now_us(); u3_cover_cam=camera;
+    /* BB_U3_COVERPROBE=<file>: the cover camera object's first 0x8000 bytes at every call (time, camera, out, bytes), to map its fields */
+    static FILE *probe_f; static int probe_init; static unsigned probe_n;
+    if (!probe_init) { probe_init=1; const char *p=getenv("BB_U3_COVERPROBE"); if (p && *p) probe_f=fopen(p,"wb"); }
+    if (probe_f && probe_n<900 && camera>0x10000) {
+        static unsigned char buf[0x8000];
+        if (safe_read(buf,camera,sizeof(buf))) {
+            const double pt=u3_cover_seen_us*1e-6; const uint64_t pc=camera, po=out;
+            fwrite(&pt,8,1,probe_f); fwrite(&pc,8,1,probe_f); fwrite(&po,8,1,probe_f); fwrite(buf,1,sizeof(buf),probe_f);
+            if ((++probe_n&31)==0) fflush(probe_f);
+        }
+    }
+}
 /* U3 aiming camera, end of the update (0x515128, just before it returns). The output block (guest rbx) holds, as measured 2026-10-31: the position
  * (x y z, then a distance), then the orientation as a quaternion (x y z w) whose local +z is the look direction, +x cross(up, look), +y up.
  * The position is pivot + R(q) * (-0.4, 0.475, -1.0) exactly (fit residual 1e-6): the shoulder rig, behind and beside the player's pivot. The game
  * works the output out again from its own state every frame, so the mouse's whole turn since the aim began is put on top of it each frame:
  * the quaternion turned about the world's up (yaw) and its own x (pitch), the position turned with it about the same pivot. BB_U3_NATIVE=0 turns it off. */
+static float u3_aim_h0, u3_aim_e0;   /* the heading / elevation the picture had at the start of the aim (set by u3_layer_blend, which is no longer called once the aim has faded in) */
+static float u3_aim_base_yaw, u3_aim_base_pitch;   /* the turn the aim started with from cover (the cover camera's), the mouse's own turn comes on top */
+static int u3_aim_from_cover, u3_aim_h0_ok;   /* the aim began in cover: its base heading is not the picture's, so the turn is kept absolute (h0 - total) after the fade-in too */
 static float u3_aim_total_yaw, u3_aim_total_pitch;   /* degrees turned by the mouse since the aim began (yaw positive = to the right, pitch positive = down) */
 static uint64_t u3_aim_frame_us, u3_aim_active_us, u3_aim_keep_us;
 static float u3_aim_last_elev;      /* the same for the elevation of the look direction (degrees, up positive) */
@@ -4152,7 +4171,13 @@ static void __attribute__((ms_abi)) u3_aim_out(uint64_t rdi,uint64_t rsi, uint64
     const float len2=o[4]*o[4]+o[5]*o[5]+o[6]*o[6]+o[7]*o[7];
     if (!(len2>0.98f && len2<1.02f && o[0]>-100000.0f && o[0]<100000.0f && o[1]>-100000.0f && o[1]<100000.0f && o[2]>-100000.0f && o[2]<100000.0f)) return;
     if (!blending_out) {
-        if (was_out || !u3_aim_active_us || now-u3_aim_active_us>300000) u3_aim_total_yaw=u3_aim_total_pitch=0.0f;   /* (every new aim starts from the picture it finds, see u3_layer_blend: the total is not carried over a release) */
+        if (was_out || !u3_aim_active_us || now-u3_aim_active_us>300000) {   /* (every new aim starts from the picture it finds, see u3_layer_blend: the total is not carried over a release) */
+            u3_aim_total_yaw=u3_aim_total_pitch=0.0f;
+            u3_aim_from_cover=0; u3_aim_h0_ok=0; u3_aim_base_yaw=u3_aim_base_pitch=0.0f;
+            /* From cover: the aim starts from the cover camera's raw picture (u3_cover_layer stops turning it at the press), the mouse's turn since the
+             * cover began is the aim's first turn, or the aim lands where the game's own cover direction points. */
+            if (u3_cover_seen_us && now-u3_cover_seen_us<300000) { u3_aim_total_yaw=u3_cover_yaw; u3_aim_total_pitch=u3_cover_pitch; u3_aim_base_yaw=u3_cover_yaw; u3_aim_base_pitch=u3_cover_pitch; u3_aim_from_cover=1; }
+        }
         if (was_out) { float ix, iy; camera_take(2,&ix,&iy); }   /* a new aim (also one soon after a release, the camera still fading): what the mouse did since (free view, L2 pressed) turned the walking camera, which this camera starts from; the aim queue holds it too (measured: 40 degrees in the first frame) */
         u3_aim_keep_us=0;
         u3_aim_active_us=now;
@@ -4183,8 +4208,14 @@ static void __attribute__((ms_abi)) u3_aim_out(uint64_t rdi,uint64_t rsi, uint64
     static float base_at_release;
     (void)base_at_release;
     float yaw_use=*total_yaw;
-    if (blending_out) yaw_use=wrap_degrees(base_heading-u3_aim_last_heading);   /* the picture keeps the heading it had at the release, whatever the base has followed */
     float pitch_use=*total_pitch;
+    if (!blending_out && u3_aim_from_cover && u3_aim_h0_ok) {   /* absolute, as u3_layer_blend did during the fade-in: heading = h0 - total */
+        if (u3_aim_e0-*total_pitch>80.0f) *total_pitch=u3_aim_e0-80.0f;
+        if (u3_aim_e0-*total_pitch<-80.0f) *total_pitch=u3_aim_e0+80.0f;
+        yaw_use=wrap_degrees(base_heading-(u3_aim_h0-*total_yaw));
+        pitch_use=elevation-(u3_aim_e0-*total_pitch);
+    }
+    if (blending_out) yaw_use=wrap_degrees(base_heading-u3_aim_last_heading);   /* the picture keeps the heading it had at the release, whatever the base has followed */
     if (blending_out) pitch_use=elevation-u3_aim_last_elev;   /* (the same for the height: the elevation it had at the release) */
     const float ya=-yaw_use*0.017453293f*0.5f, pa=pitch_use*0.017453293f*0.5f;
     const float qyaw[4]={0.0f,SDL_sinf(ya),0.0f,SDL_cosf(ya)}, qpitch[4]={SDL_sinf(pa),0.0f,0.0f,SDL_cosf(pa)};
@@ -4209,13 +4240,140 @@ static void __attribute__((ms_abi)) u3_aim_out(uint64_t rdi,uint64_t rsi, uint64
  * frozen (the game no longer updates it): our turn on the aiming output alone reaches the picture as w * turn, so the mouse moves the view slowly,
  * then fast (a smoothstep), which is the stutter. Here the missing part (1 - w) * turn is added on the blended pose (quaternion turned as in
  * u3_aim_out, position turned about the player's pivot in the camera's own frame), so the picture follows the mouse 1:1 from the first frame. */
+/* Cover camera (measured 2026-10-31 with BB_U3_COVERPROBE): its own pose (position camera+0x120, quaternion +0x130) is an orbit, position = pivot + R(q) * (0, 0, -3)
+ * with a fixed pivot (fit residual 3 mm). Mouse = the game's stick before, i.e. a turning speed. Here the mouse's whole turn since the cover began is put on
+ * the blended pose (as u3_aim_out: quaternion turned about the world's up and its own x, position turned about the pivot in the camera's frame). */
+static float u3_cover_pivot[3]; static int u3_cover_pivot_ok;
+/* Turn a pose (position [0..2], quaternion [4..7]) by yaw (degrees, positive = to the right) about the world's up and pitch (positive = down) about its own x,
+ * the position turned about the pivot in the camera's frame. */
+static int u3_turn_pose(float *p, const float *pivot, float yaw, float pitch) {
+    const float ya=-yaw*0.017453293f*0.5f, pa=pitch*0.017453293f*0.5f;
+    const float qyaw[4]={0.0f,SDL_sinf(ya),0.0f,SDL_cosf(ya)}, qpitch[4]={SDL_sinf(pa),0.0f,0.0f,SDL_cosf(pa)};
+    float tq[4], q[4];
+    quat_mul(qyaw,p+4,tq);
+    quat_mul(tq,qpitch,q);
+    const float n=SDL_sqrtf(q[0]*q[0]+q[1]*q[1]+q[2]*q[2]+q[3]*q[3]);
+    if (!(n>0.5f)) return 0;
+    for (int i=0;i<4;++i) q[i]/=n;
+    const float conj[4]={-p[4],-p[5],-p[6],p[7]};
+    float off[3]={p[0]-pivot[0],p[1]-pivot[1],p[2]-pivot[2]}, local[3], turned[3];
+    quat_rotate(conj,off,local);
+    quat_rotate(q,local,turned);
+    for (int i=0;i<3;++i) { p[i]=pivot[i]+turned[i]; p[4+i]=q[i]; }
+    p[7]=q[3];
+    return 1;
+}
+static void u3_cover_layer(uint64_t r14) {
+    static int disabled=-1;
+    if (disabled<0) { const char *e=getenv("BB_U3_NATIVE"); disabled=e && atoi(e)==0; }
+    const uint64_t now=now_us();
+    if (disabled || pad_only_mode || !(u3_cover_seen_us && now-u3_cover_seen_us<100000)) return;
+    static uint64_t last_us, frame_us;
+    static uint64_t handoff_for;
+    /* After an aim in this cover the picture is kept ABSOLUTE (abs_h/abs_e, degrees): the game goes on turning Drake, and with him the cover camera's own
+     * pose, for a while after the release (measured: 5 degrees in the 0.2 s before the next press), which a turn relative to that pose carried along
+     * as extra rotation (the picture went about twice as far as the mouse). Before any aim the pose is still, relative and absolute are the same. */
+    static float abs_h, abs_e; static int abs_mode;
+    const int aim_window=u3_aim_active_us && now-u3_aim_active_us<1500000;   /* an aim was let go less than 1.5 s ago (its camera fades out under, and this one comes back over it) */
+    if (aim_held) {   /* the aim from cover is driven by the aim hooks */
+        u2_native_us=now; last_us=now;
+        return;
+    }
+    const float w=*(const float *)(uintptr_t)(r14+0x108);
+    if (!(w>0.0005f && w<=1.0001f)) return;
+    float cp[3], cq[4];
+    if (!safe_read(cp,r14+0x120,12) || !safe_read(cq,r14+0x130,16)) return;
+    const float cl=cq[0]*cq[0]+cq[1]*cq[1]+cq[2]*cq[2]+cq[3]*cq[3];
+    if (!(cl>0.98f && cl<1.02f && cp[0]>-100000.0f && cp[0]<100000.0f && cp[1]>-100000.0f && cp[1]<100000.0f && cp[2]>-100000.0f && cp[2]<100000.0f)) return;
+    if (now-last_us>300000 && !aim_window) {   /* a new cover: the turn starts again, what the mouse did meanwhile (it turned the walking camera) is dropped */
+        float ix, iy;
+        camera_take(0,&ix,&iy);   /* (queue 2 is only fed during an aim; 0 is fed while u2_native_us is recent, which is set below) */
+        u3_cover_yaw=u3_cover_pitch=0.0f;
+        abs_mode=0;
+    }
+    if (aim_window && handoff_for!=u3_aim_active_us) {   /* the aim from cover was let go: the cover camera, which stood under it, is put on the picture the aim ended at (its own look direction is cq's) */
+        handoff_for=u3_aim_active_us;
+        abs_mode=1; abs_h=u3_aim_last_heading; abs_e=u3_aim_last_elev;
+        float ix, iy;
+        camera_take(0,&ix,&iy);   /* queue 0 was fed all through the aim (the aim takes queue 2) and nobody emptied it: it would turn the picture a second time by the whole aim's mouse */
+        float cf[3]; const float fwd[3]={0.0f,0.0f,1.0f};
+        quat_rotate(cq,fwd,cf);
+        u3_cover_yaw=wrap_degrees(SDL_atan2f(cf[0],cf[2])*57.29578f-u3_aim_last_heading);
+        u3_cover_pitch=SDL_asinf(cf[1]>1.0f ? 1.0f : cf[1]<-1.0f ? -1.0f : cf[1])*57.29578f-u3_aim_last_elev;
+    }
+    last_us=now;
+    u2_native_us=now;   /* the mouse is not sent to the emulated stick meanwhile */
+    if (!(frame_us && now-frame_us<1500)) {
+        float dx, dy;
+        camera_take(0,&dx,&dy);
+        const float dyaw=dx*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity, dpitch=(input.mouse_invert_y ? -dy : dy)*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity;
+        u3_cover_yaw+=dyaw; u3_cover_pitch+=dpitch;
+        abs_h=wrap_degrees(abs_h-dyaw); abs_e-=dpitch;
+        frame_us=now;
+    }
+    const RuntimeGuestRegs *g=(const RuntimeGuestRegs *)(uintptr_t)(guest_callback_rsp-0x60);
+    float *p=(float *)(uintptr_t)g->rax;
+    if ((uintptr_t)p<0x10000) return;
+    const float len2=p[4]*p[4]+p[5]*p[5]+p[6]*p[6]+p[7]*p[7];
+    if (!(len2>0.98f && len2<1.02f && p[0]>-100000.0f && p[0]<100000.0f && p[1]>-100000.0f && p[1]<100000.0f && p[2]>-100000.0f && p[2]<100000.0f)) return;
+    const float look[3]={0.0f,0.0f,1.0f}, back[3]={0.0f,0.0f,-3.0f};
+    float f[3], arm[3], pivot[3];
+    quat_rotate(cq,back,arm);
+    for (int i=0;i<3;++i) pivot[i]=cp[i]-arm[i];
+    quat_rotate(p+4,look,f);
+    const float ef=SDL_asinf(f[1]>1.0f ? 1.0f : f[1]<-1.0f ? -1.0f : f[1])*57.29578f;
+    for (int i=0;i<3;++i) u3_cover_pivot[i]=pivot[i];
+    u3_cover_pivot_ok=1;
+    if (mouse_debug()) printf("Mouse: U3 cover w=%.2f yaw=%.2f pitch=%.2f elev=%.2f pivot=%.2f,%.2f,%.2f abs=%d absh=%.2f abse=%.2f\n",(double)w,(double)u3_cover_yaw,(double)u3_cover_pitch,(double)ef,(double)pivot[0],(double)pivot[1],(double)pivot[2],abs_mode,(double)abs_h,(double)abs_e);
+    float cf[3]; const float fwd[3]={0.0f,0.0f,1.0f};
+    quat_rotate(cq,fwd,cf);
+    const float hcq=SDL_atan2f(cf[0],cf[2])*57.29578f, ecq=SDL_asinf(cf[1]>1.0f ? 1.0f : cf[1]<-1.0f ? -1.0f : cf[1])*57.29578f;
+    if (abs_mode) {
+        /* p is the final picture (also while this camera comes back over the fading aim, its weight w rising 0 -> 1): it is put on the absolute heading. */
+        const float hp=SDL_atan2f(f[0],f[2])*57.29578f;
+        if (abs_e>80.0f) abs_e=80.0f;
+        if (abs_e<-80.0f) abs_e=-80.0f;
+        u3_cover_yaw=wrap_degrees(hcq-abs_h); u3_cover_pitch=ecq-abs_e;
+        u3_cover_show_h=abs_h; u3_cover_show_e=abs_e; u3_cover_show_us=now;
+        u3_turn_pose(p,pivot,wrap_degrees(hp-abs_h),ef-abs_e);
+        return;
+    }
+    if (ef-u3_cover_pitch>80.0f) u3_cover_pitch=ef-80.0f;
+    if (ef-u3_cover_pitch<-80.0f) u3_cover_pitch=ef+80.0f;
+    u3_cover_show_h=wrap_degrees(hcq-u3_cover_yaw); u3_cover_show_e=ecq-u3_cover_pitch; u3_cover_show_us=now;
+    u3_turn_pose(p,pivot,u3_cover_yaw,u3_cover_pitch);
+}
 static void __attribute__((ms_abi)) u3_layer_blend(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14) {
     (void)rdi; (void)rsi; (void)image;
+    if (r14 && r14==u3_cover_cam) { u3_cover_layer(r14); return; }
     if (!r14 || r14!=u3_probe_aim_cam) return;
     static int disabled=-1;
     if (disabled<0) { const char *e=getenv("BB_U3_NATIVE"); disabled=e && atoi(e)==0; }
     const uint64_t now=now_us();
     const int held=aim_held;
+    /* The aim let go in cover: the cover camera is back under the fading aim and turns by itself with the mouse (u3_cover_layer, from the heading the
+     * aim ended at): holding the aim's absolute heading over it for the rest of the fade froze the picture for a second. */
+    if (!held && u3_cover_seen_us && now-u3_cover_seen_us<100000) return;
+    if (0) {
+        /* (unused: the cover camera, which comes back over the fading aim, sets the final picture, see u3_cover_layer) */
+        float cq[4], cf[3], pf[3];
+        const float fwd[3]={0.0f,0.0f,1.0f};
+        const RuntimeGuestRegs *g=(const RuntimeGuestRegs *)(uintptr_t)(guest_callback_rsp-0x60);
+        float *p=(float *)(uintptr_t)g->rax;
+        if (disabled || pad_only_mode || !u3_cover_pivot_ok || (uintptr_t)p<0x10000 || !safe_read(cq,u3_cover_cam+0x130,16)) return;
+        const float cl=cq[0]*cq[0]+cq[1]*cq[1]+cq[2]*cq[2]+cq[3]*cq[3], pl=p[4]*p[4]+p[5]*p[5]+p[6]*p[6]+p[7]*p[7];
+        if (!(cl>0.98f && cl<1.02f && pl>0.98f && pl<1.02f)) return;
+        quat_rotate(cq,fwd,cf);
+        quat_rotate(p+4,fwd,pf);
+        const float hcq=SDL_atan2f(cf[0],cf[2])*57.29578f, ecq=SDL_asinf(cf[1]>1.0f ? 1.0f : cf[1]<-1.0f ? -1.0f : cf[1])*57.29578f;
+        const float hp=SDL_atan2f(pf[0],pf[2])*57.29578f, ep=SDL_asinf(pf[1]>1.0f ? 1.0f : pf[1]<-1.0f ? -1.0f : pf[1])*57.29578f;
+        if (ecq-u3_cover_pitch>80.0f) u3_cover_pitch=ecq-80.0f;
+        if (ecq-u3_cover_pitch<-80.0f) u3_cover_pitch=ecq+80.0f;
+        const float hd=hcq-u3_cover_yaw, ed=ecq-u3_cover_pitch;
+        u3_turn_pose(p,u3_cover_pivot,wrap_degrees(hp-hd),ep-ed);
+        u3_aim_last_heading=hd; u3_aim_last_elev=ed;
+        return;
+    }
     /* After the release the aiming camera fades out for a while and the walking camera only runs again ~0.1 s later (measured 2026-10-31: the
      * mouse waited unused meanwhile, the picture stood still, then went on): the same absolute turn goes on through the fade, with the walking
      * camera's sensitivity, and the walking camera is put on it each frame (u3_walk_camera) so the end of the fade shows no jump. */
@@ -4243,14 +4401,31 @@ static void __attribute__((ms_abi)) u3_layer_blend(uint64_t rdi, uint64_t rsi, u
     quat_rotate(p+4,look,f);
     const float hf=SDL_atan2f(f[0],f[2])*57.29578f, ef=SDL_asinf(f[1]>1.0f ? 1.0f : f[1]<-1.0f ? -1.0f : f[1])*57.29578f;
     static int prev_held;
-    if (now-last_us>50000 || (held && !prev_held)) { h0=hf; e0=ef; }   /* a new aim (L2 pressed again, also during the previous one's fade, whose frames are continuous; the turn total starts again from 0 with it): the picture it starts from (the walking camera's, w is ~0) */
+    if (now-last_us>50000 || (held && !prev_held)) {
+        h0=hf; e0=ef;
+        if (u3_aim_from_cover) {
+            /* From cover the aim starts exactly on the picture the cover camera showed (u3_cover_show_*), whatever the blended picture h0 holds (it may still
+             * hold the previous aim fading out, and the cover camera's own pose goes on turning with Drake: measured, the next press started up to 170 degrees
+             * from where the last one ended). The total is made so that h0 - total is that picture. A recapture in the middle of an aim keeps the picture. */
+            static uint64_t entry_show_us;   /* (the cover picture is only updated between aims: a new value is a new press) */
+            const int entry=u3_cover_show_us && u3_cover_show_us!=entry_show_us && now-u3_cover_show_us<1000000;
+            if (entry) entry_show_us=u3_cover_show_us;
+            const float th=entry ? u3_cover_show_h : u3_aim_last_heading, te=entry ? u3_cover_show_e : u3_aim_last_elev;
+            u3_aim_total_yaw=wrap_degrees(h0-th); u3_aim_total_pitch=e0-te;
+            u3_aim_base_yaw=u3_aim_total_yaw; u3_aim_base_pitch=u3_aim_total_pitch;
+        }
+    }   /* a new aim (L2 pressed again, also during the previous one's fade, whose frames are continuous; the turn total starts again from 0 with it): the picture it starts from (the walking camera's, w is ~0) */
     prev_held=held;
     last_us=now;
+    u3_aim_h0=h0; u3_aim_e0=e0; u3_aim_h0_ok=1;
     /* ABSOLUTE: the picture is what it was at the start of the aim turned by the mouse, whatever the aiming camera's base does (it glides after Drake,
      * who turns with the output: measured, 34 degrees of picture for 21 of mouse). */
     if (e0-u3_aim_total_pitch>80.0f) u3_aim_total_pitch=e0-80.0f;
     if (e0-u3_aim_total_pitch<-80.0f) u3_aim_total_pitch=e0+80.0f;
-    const float hd=wrap_degrees(h0-u3_aim_total_yaw), ed=e0-u3_aim_total_pitch;
+    /* From cover the mouse's turn made since the press is brought in with the fade-in (weight w): the camera moves from 3.4 m to 1.2 m from the
+     * player meanwhile, and the whole turn from the first frame looked like too much rotation. */
+    const float ramp=(held && u3_aim_from_cover) ? w : 1.0f;
+    const float hd=wrap_degrees(h0-(u3_aim_base_yaw+(u3_aim_total_yaw-u3_aim_base_yaw)*ramp)), ed=e0-(u3_aim_base_pitch+(u3_aim_total_pitch-u3_aim_base_pitch)*ramp);
     u3_aim_last_heading=hd; u3_aim_last_elev=ed;   /* what the release hands to the walking camera */
     const float ya=-wrap_degrees(hf-hd)*0.017453293f*0.5f, pa=(ef-ed)*0.017453293f*0.5f;
     const float qyaw[4]={0.0f,SDL_sinf(ya),0.0f,SDL_cosf(ya)}, qpitch[4]={SDL_sinf(pa),0.0f,0.0f,SDL_cosf(pa)};
@@ -4269,7 +4444,7 @@ static void __attribute__((ms_abi)) u3_layer_blend(uint64_t rdi, uint64_t rsi, u
         if (now-last_us>1000000) start_us=now;
         last_us=now;
         { float f2[3]; quat_rotate(q,look,f2);
-            printf("Mouse: U3 layer T=%.4f t=%.4f dt=%.1fms mouse=%.0f,%.0f final=%.2f -> %.2f want=%.2f turn=%.2f%s off_local=%.3f,%.3f,%.3f dist=%.3f\n",now*1e-6,(double)t,(now-start_us)*1e-3,(double)u3_dbg_dx,(double)u3_dbg_dy,(double)hf,(double)(SDL_atan2f(f2[0],f2[2])*57.29578f),(double)hd,(double)u3_aim_total_yaw,held ? "" : " FADE",(double)local[0],(double)local[1],(double)local[2],(double)SDL_sqrtf(off[0]*off[0]+off[1]*off[1]+off[2]*off[2])); }
+            printf("Mouse: U3 layer T=%.4f t=%.4f dt=%.1fms mouse=%.0f,%.0f final=%.2f -> %.2f want=%.2f turn=%.2f%s off_local=%.3f,%.3f,%.3f dist=%.3f elev %.2f -> %.2f want=%.2f e0=%.2f pturn=%.2f\n",now*1e-6,(double)t,(now-start_us)*1e-3,(double)u3_dbg_dx,(double)u3_dbg_dy,(double)hf,(double)(SDL_atan2f(f2[0],f2[2])*57.29578f),(double)hd,(double)u3_aim_total_yaw,held ? "" : " FADE",(double)local[0],(double)local[1],(double)local[2],(double)SDL_sqrtf(off[0]*off[0]+off[1]*off[1]+off[2]*off[2]),(double)ef,(double)(SDL_asinf(f2[1]>1.0f ? 1.0f : f2[1]<-1.0f ? -1.0f : f2[1])*57.29578f),(double)ed,(double)e0,(double)u3_aim_total_pitch); }
     }
     for (int i=0;i<3;++i) { p[i]=u3_aim_pivot[i]+turned[i]; p[4+i]=q[i]; }
     p[7]=q[3];
