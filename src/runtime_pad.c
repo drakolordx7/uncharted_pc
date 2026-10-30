@@ -362,6 +362,8 @@ static float follow_kept=1.0f;            /* average fraction of a turn still th
 static float follow_before, follow_after; /* heading before and after the last turn */
 static int follow_pending;
 static volatile uint64_t aim_blend_until_us; /* the aim is blended out for about a second after L2 is released: the zoom camera keeps the mouse until then */
+static uint64_t u3_aim_active_us;   /* (U3: the last aim frame; defined again with the other U3 aim state) */
+static int u3_aim_fade_window(uint64_t now) { return u3_aim_active_us && now-u3_aim_active_us<1500000; }   /* U3: the layer hook (u3_layer_blend) goes on taking queue 2 for 1.5 s after the aim, longer than aim_blend_until_us (1.3 s): measured, in the last 0.2 s it had no mouse and held the picture still */
 static volatile int aim_native;   /* aim_held and the zoom (aiming) camera runs: L2 held during a roll aims nothing yet, and the mouse must keep turning the free view then */
 static volatile int aim_held;             /* L2 is held: the aiming camera (also while it blends in) */
 static volatile uint64_t look_blend_until_us; /* the look-around camera (V) is blended out for about a second after the key is released: it keeps the mouse until then */
@@ -2384,7 +2386,7 @@ static void __attribute__((ms_abi)) u1_joypad_sticks(uint64_t unused0, uint64_t 
     if (camera_stopped(image,u1_camera_dt_offset)) return; /* paused */
     if (aim_test<0.0f) { const char *t=getenv("BB_MOUSE_AIM_TEST"); aim_test=t ? (float)atof(t) : 0.0f; }
     float *pad=(float *)(uintptr_t)joypad_state;
-    if (!aim_held && !look_held && now_us()>=aim_blend_until_us && now_us()>=look_blend_until_us) { float ix, iy; camera_take(2,&ix,&iy); }   /* (the zoom camera keeps the queue while the aim is blended out) */
+    if (!aim_held && !look_held && now_us()>=aim_blend_until_us && now_us()>=look_blend_until_us && !u3_aim_fade_window(now_us())) { float ix, iy; camera_take(2,&ix,&iy); }   /* (the zoom camera keeps the queue while the aim is blended out) */
     const int cover_native=cover_native_us && now-cover_native_us<COVER_RECENT_US;
     if (!cover_native) { float ix, iy; camera_take(3,&ix,&iy); } /* the cover camera's queue fills outside of the cover too */ /* the aiming camera's queue fills in free look too */
     if (mouse_debug() && getenv("BB_BUTTON_WATCH")) { /* TEMPORARY: who reads the persistent pad's button words (pressed +0x94, held +0x9c) */
@@ -4500,6 +4502,20 @@ static void __attribute__((ms_abi)) u3_layer_blend(uint64_t rdi, uint64_t rsi, u
         { float f2[3]; quat_rotate(q,look,f2);
             printf("Mouse: U3 layer T=%.4f t=%.4f dt=%.1fms mouse=%.0f,%.0f final=%.2f -> %.2f want=%.2f turn=%.2f%s off_local=%.3f,%.3f,%.3f dist=%.3f elev %.2f -> %.2f want=%.2f e0=%.2f pturn=%.2f\n",now*1e-6,(double)t,(now-start_us)*1e-3,(double)u3_dbg_dx,(double)u3_dbg_dy,(double)hf,(double)(SDL_atan2f(f2[0],f2[2])*57.29578f),(double)hd,(double)u3_aim_total_yaw,held ? "" : " FADE",(double)local[0],(double)local[1],(double)local[2],(double)SDL_sqrtf(off[0]*off[0]+off[1]*off[1]+off[2]*off[2]),(double)ef,(double)(SDL_asinf(f2[1]>1.0f ? 1.0f : f2[1]<-1.0f ? -1.0f : f2[1])*57.29578f),(double)ed,(double)e0,(double)u3_aim_total_pitch); }
     }
+    /* The end of the 1.5 s window: the picture the hook holds is let go of over the last 0.3 s (measured: cutting it at once showed a jump of 1.5 degrees
+     * of heading and 2 of tilt, the game's own picture having settled elsewhere). */
+    float k=1.0f;
+    if (!held) { const uint64_t age=now-u3_aim_active_us; if (age>1200000) k=(float)(1500000-age)/300000.0f; if (k<0.0f) k=0.0f; }
+    if (k<1.0f) {
+        float dot=p[4]*q[0]+p[5]*q[1]+p[6]*q[2]+p[7]*q[3];
+        const float sg=dot<0.0f ? -1.0f : 1.0f;
+        float m[4]={p[4]+(sg*q[0]-p[4])*k, p[5]+(sg*q[1]-p[5])*k, p[6]+(sg*q[2]-p[6])*k, p[7]+(sg*q[3]-p[7])*k};
+        const float mn=SDL_sqrtf(m[0]*m[0]+m[1]*m[1]+m[2]*m[2]+m[3]*m[3]);
+        if (!(mn>0.5f)) return;
+        for (int i=0;i<3;++i) { const float np=u3_aim_pivot[i]+turned[i]; p[i]+=(np-p[i])*k; p[4+i]=m[i]/mn; }
+        p[7]=m[3]/mn;
+        return;
+    }
     for (int i=0;i<3;++i) { p[i]=u3_aim_pivot[i]+turned[i]; p[4+i]=q[i]; }
     p[7]=q[3];
 }
@@ -4559,6 +4575,7 @@ static void __attribute__((ms_abi)) u3_walk_camera(uint64_t out, uint64_t camera
     if (now-slot[sl].seen_us>1000000 && !(u3_aim_active_us>slot[sl].seen_us) && !(u3_cover_seen_us>slot[sl].seen_us)) slot[sl].frames=0;   /* (nor is the same camera back after a cover: its 8 frames of waiting froze the picture while the cover faded out) */   /* (the same camera away under an aim is not a new one: its 8 frames of waiting froze the picture at the release) */
     slot[sl].seen_us=now;
     if (slot[sl].frames<8) ++slot[sl].frames;   /* a camera that has just been made holds numbers that are not set yet (the U2 museum crash) */
+    if (!aim_held && u3_aim_active_us && now-u3_aim_active_us<1500000) slot[sl].frames=8;   /* (after an aim the game hands the picture over through 3-4 walking cameras in 0.5 s: measured, each one's 8 frames of waiting stopped the mouse for ~100 ms; the plausibility checks below still hold) */
     float dir[3], arc;
     if (slot[sl].frames<8 || !safe_read(dir,camera+0x78c0,12) || !safe_read(&arc,camera+0x7874,4)) return;
     const float len2=dir[0]*dir[0]+dir[2]*dir[2];
@@ -7364,7 +7381,7 @@ static void sample_host(PadData *d) {
     }
     for (int q=0;q<CAMERA_QUEUES;++q) {
         /* queue 2 is the zoom camera's (U1 aiming): nothing else reads it, so it stays empty outside the aim */
-        if (captured && (following || joypad || native || base_gap) && (q!=2 || aim_held || look_held || now_us()<aim_blend_until_us || now_us()<look_blend_until_us || (u2_chase_us && now_us()-u2_chase_us<200000))) { camera_dx[q]+=mdx; camera_dy[q]+=mdy; }
+        if (captured && (following || joypad || native || base_gap) && (q!=2 || aim_held || look_held || now_us()<aim_blend_until_us || u3_aim_fade_window(now_us()) ||now_us()<look_blend_until_us || (u2_chase_us && now_us()-u2_chase_us<200000))) { camera_dx[q]+=mdx; camera_dy[q]+=mdy; }
         else { camera_dx[q]=camera_dy[q]=0; }
     }
     /* gyro aiming: kept while aiming (at low frame rates the aim controller runs only every 100-200 ms) */
