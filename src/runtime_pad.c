@@ -597,6 +597,13 @@ _Static_assert(sizeof(u2_focus_reset_100)==56 && sizeof(u2_focus_reset_102)==58,
 #define CC8 0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc
 static const unsigned char u2_leg_ik_zero_100[]={U2_LEG_IK_ZERO(0x2d),CC8,CC8,CC8,CC8,CC8};
 static const unsigned char u2_leg_ik_zero_102[]={U2_LEG_IK_ZERO(0x2f),CC8,CC8,CC8,CC8,CC8,0xcc,0xcc};
+/* U1 and U2 "pAction != NULL" (moveactioncontroller.cpp:40), from Mevlock's dev fork: the
+ * player's move actions come from a pool of 64 slots. Two move states swapping every frame
+ * (landing into a fight, often right after a jump) keep one action each swap; at 144 FPS bursts
+ * took 16-30 slots, and a longer one filled the pool and stopped the game. The slot count passed
+ * where the character is set up becomes 256 (+144 KB from the character's heap). One site in U1
+ * and one in U2, in every build; U3 has no such pool. */
+static const unsigned char move_pool_256[]={0xb9,0x00,0x01,0x00,0x00}; /* mov ecx, 256 */
 _Static_assert(sizeof(u2_leg_ik_zero_100)==51 && sizeof(u2_leg_ik_zero_102)==53,"patch sizes");
 /* U3 Player::UpdateFocus (player.cpp:1897, assertion m_lookAt.X() == m_lookAt.X(): the crash
  * climbing the fort in chapter 8). The point Nate looks at ([player+0xef0], velocity +0xf00)
@@ -763,6 +770,10 @@ static const RuntimeGuestCallback guest_callbacks[]={
       "8d 35 ?? ?? ?? ?? 48 8d 15 ?? ?? ?? ?? 48 8d 0d ?? ?? ?? ?? "
       "41 b8 87 01 00 00 45 31 c9 ff d0 cd 41 c4 c1 78 28 07 c4 e3 79 04 c0 01",
       0x0, 53, NULL, u2_leg_ik_zero_102},
+    /* U1 and U2 move action pool: mov edx,6; mov ecx,64 (slots); mov r8d,32 */
+    {"U1/U2 move action pool 256 slots",
+      "ba 06 00 00 00 b9 40 00 00 00 41 b8 20 00 00 00",
+      0x5, 5, NULL, move_pool_256},
     /* U3 player focus NaN reset, build 100 */
     {"U3 player focus NaN reset",
       "c4 e3 79 04 cb 00 c5 f0 c2 c9 00 c5 f8 50 c1 83 f8 0f 74 38 "
