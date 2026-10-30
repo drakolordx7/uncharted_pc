@@ -4111,6 +4111,7 @@ static const unsigned char u1_menu_event_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0
 static volatile uint64_t u3_aim_seen_us, u3_cover_seen_us, u3_cover_cam;
 static float u3_cover_show_h, u3_cover_show_e; static uint64_t u3_cover_show_us;   /* the heading / elevation the cover picture showed on the last frame of the cover camera (an aim from cover starts from it) */
 static float u3_cover_yaw, u3_cover_pitch;   /* degrees turned by the mouse since the cover began (see u3_cover_layer) */
+static float u3_tk_h, u3_tk_e; static uint64_t u3_tk_key, u3_tk_start_us;   /* the cover has been left (key: its last frame): the heading / elevation the picture goes on from, turned by the mouse, while the walking camera's own pose settles (u3_cover_exit_layer) */
 static volatile uint64_t u3_probe_aim_cam;   /* the aiming camera object, compared (never written) at the end of the layer blend */
 static float u3_dbg_dx, u3_dbg_dy;   /* the raw mouse pixels taken by the last update of the aiming camera (BB_MOUSE_DEBUG trace) */
 static void __attribute__((ms_abi)) u3_aim_camera_seen(uint64_t out, uint64_t camera, uint64_t image, uint64_t r14) { (void)out; (void)camera; (void)image; (void)r14; u3_aim_seen_us=now_us(); u3_probe_aim_cam=camera; }
@@ -4303,10 +4304,11 @@ static void u3_cover_layer(uint64_t r14) {
     }
     last_us=now;
     u2_native_us=now;   /* the mouse is not sent to the emulated stick meanwhile */
+    float dyaw=0.0f, dpitch=0.0f;   /* the mouse's turn this frame */
     if (!(frame_us && now-frame_us<1500)) {
         float dx, dy;
         camera_take(0,&dx,&dy);
-        const float dyaw=dx*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity, dpitch=(input.mouse_invert_y ? -dy : dy)*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity;
+        dyaw=dx*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity; dpitch=(input.mouse_invert_y ? -dy : dy)*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity;
         u3_cover_yaw+=dyaw; u3_cover_pitch+=dpitch;
         abs_h=wrap_degrees(abs_h-dyaw); abs_e-=dpitch;
         frame_us=now;
@@ -4338,14 +4340,66 @@ static void u3_cover_layer(uint64_t r14) {
         u3_turn_pose(p,pivot,wrap_degrees(hp-abs_h),ef-abs_e);
         return;
     }
+    if (u3_cover_show_us && now-u3_cover_show_us<100000) {
+        /* Leaving the cover, the game copies the last picture shown (our turned one) into the cover camera: its heading is then the picture's, not the
+         * raw one, and taking the whole turn off it again each frame spun the picture by that turn every frame (measured: 17 to 35 degrees a frame for
+         * the last frames before the takeover). Seen by the camera's heading standing at the picture's, not a turn away: the turn goes on from the
+         * picture shown, by what the mouse does. */
+        if (SDL_fabsf(u3_cover_yaw)>3.0f && SDL_fabsf(wrap_degrees(hcq-u3_cover_show_h))<0.5f*SDL_fabsf(u3_cover_yaw)) u3_cover_yaw=wrap_degrees(hcq-u3_cover_show_h)+dyaw;
+        if (SDL_fabsf(u3_cover_pitch)>3.0f && SDL_fabsf(ecq-u3_cover_show_e)<0.5f*SDL_fabsf(u3_cover_pitch)) u3_cover_pitch=(ecq-u3_cover_show_e)+dpitch;
+    }
     if (ef-u3_cover_pitch>80.0f) u3_cover_pitch=ef-80.0f;
     if (ef-u3_cover_pitch<-80.0f) u3_cover_pitch=ef+80.0f;
     u3_cover_show_h=wrap_degrees(hcq-u3_cover_yaw); u3_cover_show_e=ecq-u3_cover_pitch; u3_cover_show_us=now;
     u3_turn_pose(p,pivot,u3_cover_yaw,u3_cover_pitch);
 }
+/* After the walking camera has taken over from the cover its position shown goes on by its own speed (measured: 18 degrees past the heading, then
+ * back) and the picture jumped. For 0.35 s the picture goes on from the heading the cover showed, turned by the mouse (u3_tk_h, kept by
+ * u3_walk_camera), and is handed over to the walking camera's own pose by a smooth step. */
+static void u3_cover_exit_layer(uint64_t r14) {
+    const uint64_t now=now_us();
+    const float t=(now-u3_tk_start_us)*(1.0f/350000.0f);
+    if (!(t>=0.0f && t<1.0f)) return;
+    const float w=t*t*(3.0f-2.0f*t);
+    const RuntimeGuestRegs *g=(const RuntimeGuestRegs *)(uintptr_t)(guest_callback_rsp-0x60);
+    float *p=(float *)(uintptr_t)g->rax, pivot[3];
+    if ((uintptr_t)p<0x10000 || !safe_read(pivot,r14+0x78a0,12)) return;
+    const float len2=p[4]*p[4]+p[5]*p[5]+p[6]*p[6]+p[7]*p[7];
+    if (!(len2>0.98f && len2<1.02f && p[0]>-100000.0f && p[0]<100000.0f && p[1]>-100000.0f && p[1]<100000.0f && p[2]>-100000.0f && p[2]<100000.0f)) return;
+    if (!(pivot[0]>-100000.0f && pivot[0]<100000.0f && pivot[2]>-100000.0f && pivot[2]<100000.0f)) return;
+    const float fwd[3]={0.0f,0.0f,1.0f};
+    float f[3];
+    quat_rotate(p+4,fwd,f);
+    const float hp=SDL_atan2f(f[0],f[2])*57.29578f, ef=SDL_asinf(f[1]>1.0f ? 1.0f : f[1]<-1.0f ? -1.0f : f[1])*57.29578f;
+    const float th=hp+wrap_degrees(u3_tk_h-hp)*(1.0f-w), te=ef+(u3_tk_e-ef)*(1.0f-w);
+    if (mouse_debug()) printf("Mouse: U3 cover exit blend w=%.2f walk=%.2f ours=%.2f -> %.2f\n",(double)w,(double)hp,(double)u3_tk_h,(double)th);
+    u3_turn_pose(p,pivot,wrap_degrees(hp-th),ef-te);
+}
 static void __attribute__((ms_abi)) u3_layer_blend(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14) {
     (void)rdi; (void)rsi; (void)image;
-    if (r14 && r14==u3_cover_cam) { u3_cover_layer(r14); return; }
+    if (mouse_debug() && r14 && !aim_held && u3_aim_active_us && now_us()-u3_aim_active_us<1500000) printf("Mouse: U3 AIMFADE layer cam=%llx aimcam=%llx covercam=%llx tk_key=%d cover_age_ms=%.0f\n",(unsigned long long)r14,(unsigned long long)u3_probe_aim_cam,(unsigned long long)u3_cover_cam,(int)(u3_tk_key!=0),(double)((now_us()-u3_cover_seen_us)*1e-3));
+    if (mouse_debug() && r14 && !aim_held && u3_cover_seen_us && now_us()-u3_cover_seen_us<1500000) {   /* (trace: every layer of the stack after the cover, with its weight and the heading of the blend so far) */
+        const RuntimeGuestRegs *g=(const RuntimeGuestRegs *)(uintptr_t)(guest_callback_rsp-0x60);
+        const float *p=(const float *)(uintptr_t)g->rax; float w=0.0f, pf[3]; const float fwd[3]={0.0f,0.0f,1.0f};
+        if ((uintptr_t)p>0x10000 && safe_read(&w,r14+0x108,4)) {
+            quat_rotate(p+4,fwd,pf);
+            printf("Mouse: U3 LAYER age=%.0fms cam=%llx%s w=%.3f blend_h=%.2f blend_e=%.2f\n",(double)((now_us()-u3_cover_seen_us)*1e-3),(unsigned long long)r14,r14==u3_cover_cam ? "(cover)" : "",(double)w,(double)(SDL_atan2f(pf[0],pf[2])*57.29578f),(double)(SDL_asinf(pf[1]>1.0f ? 1.0f : pf[1]<-1.0f ? -1.0f : pf[1])*57.29578f));
+        }
+    }
+    /* (the game reuses addresses: the aiming camera can sit where a cover camera was: it is the cover's layer only while the cover is recent) */
+    if (r14 && r14==u3_cover_cam && (r14!=u3_probe_aim_cam || (u3_cover_seen_us && now_us()-u3_cover_seen_us<400000))) {
+        if (mouse_debug() && !aim_held && u3_cover_seen_us && now_us()-u3_cover_seen_us>=100000 && now_us()-u3_cover_seen_us<2000000) {   /* (trace: the cover camera's layer after its update stopped, i.e. during the fade out) */
+            const RuntimeGuestRegs *g=(const RuntimeGuestRegs *)(uintptr_t)(guest_callback_rsp-0x60);
+            const float *p=(const float *)(uintptr_t)g->rax, w=*(const float *)(uintptr_t)(r14+0x108);
+            float cq[4], cf[3], pf[3]; const float fwd[3]={0.0f,0.0f,1.0f};
+            if ((uintptr_t)p>0x10000 && safe_read(cq,r14+0x130,16)) {
+                quat_rotate(cq,fwd,cf); quat_rotate(p+4,fwd,pf);
+                printf("Mouse: U3 cover FADE age=%.0fms w=%.3f cover_h=%.2f final_h=%.2f final_e=%.2f\n",(double)((now_us()-u3_cover_seen_us)*1e-3),(double)w,(double)(SDL_atan2f(cf[0],cf[2])*57.29578f),(double)(SDL_atan2f(pf[0],pf[2])*57.29578f),(double)(SDL_asinf(pf[1]>1.0f ? 1.0f : pf[1]<-1.0f ? -1.0f : pf[1])*57.29578f));
+            }
+        }
+        if (u3_tk_key && u3_tk_key==u3_cover_seen_us && !aim_held && now_us()-u3_cover_seen_us>=60000) { u3_cover_exit_layer(r14); return; }
+        u3_cover_layer(r14); return;
+    }
     if (!r14 || r14!=u3_probe_aim_cam) return;
     static int disabled=-1;
     if (disabled<0) { const char *e=getenv("BB_U3_NATIVE"); disabled=e && atoi(e)==0; }
@@ -4450,18 +4504,59 @@ static void __attribute__((ms_abi)) u3_layer_blend(uint64_t rdi, uint64_t rsi, u
     p[7]=q[3];
 }
 static const unsigned char u3_layer_probe_code[]={0x48,0x81,0xc4,0x48,0x02,0x00,0x00,0x5b,0x41,0x5c,0x41,0x5d,0x41,0x5e,0x41,0x5f};
+static uint64_t u3_exit_stick_us(void) { return 60000u; }
+/* Leaving the cover, the game blends a transition camera in for ~1 s (measured 2026-10-31: its weight rises 0 -> 1 between the press of the exit button
+ * and the walking camera taking over) whose pose is pulled from the picture we turned toward the walking camera's own pose: the walking camera, which
+ * nobody turned meanwhile, drew the picture back and the mouse's movement died away to nothing (video: image motion down to 0 at the end of that
+ * second, then back at once). So while the cover camera runs, the walking camera is put every frame on the heading and elevation the cover shows,
+ * exactly as the release of an aim does it, and the transition has nothing to pull toward. */
+static void u3_walk_follow_cover(uint64_t camera, uint64_t now) {
+    if (!(u3_cover_show_us && now-u3_cover_show_us<100000) || (u3_aim_active_us && u3_aim_active_us>u3_cover_show_us)) return;
+    float dir[3], arc;
+    if (!safe_read(dir,camera+0x78c0,12) || !safe_read(&arc,camera+0x7874,4)) return;
+    const float len2=dir[0]*dir[0]+dir[2]*dir[2];
+    if (!(len2>0.8f && len2<1.2f && dir[1]>-0.1f && dir[1]<0.1f && arc>-3.0f && arc<3.0f)) return;
+    const float a=wrap_degrees(heading_of((const float *)(uintptr_t)(camera+0x78c0))-u3_cover_show_h)*0.017453293f, c=SDL_cosf(a), s=SDL_sinf(a);
+    float *pos=(float *)(uintptr_t)(camera+0x7680), *d=(float *)(uintptr_t)(camera+0x78c0), *arcp=(float *)(uintptr_t)(camera+0x7874);
+    const float *pivot=(const float *)(uintptr_t)(camera+0x78a0);
+    const float px=pos[0]-pivot[0], pz=pos[2]-pivot[2];
+    const float nx=pivot[0]+px*c-pz*s, nz=pivot[2]+px*s+pz*c;
+    if (nx>-100000.0f && nx<100000.0f && nz>-100000.0f && nz<100000.0f) { pos[0]=nx; pos[2]=nz; }
+    const float x=d[0], z=d[2];
+    d[0]=x*c-z*s; d[2]=x*s+z*c;
+    float fwd[3];
+    if (safe_read(fwd,camera+0x200,12)) {
+        const float fl=SDL_sqrtf(fwd[0]*fwd[0]+fwd[1]*fwd[1]+fwd[2]*fwd[2]);
+        if (fl>0.9f && fl<1.1f) {
+            const float v=*arcp+0.5f*(SDL_asinf(fwd[1]/fl)*57.29578f-u3_cover_show_e)/105.0f;
+            if (v==v) *arcp=v<0.0f ? 0.0f : v>0.76f ? 0.76f : v;
+        }
+    }
+    if (mouse_debug()) printf("Mouse: U3 walk camera under the cover cam=%llx dir=%.2f show=%.2f turn=%.2f arc=%.3f\n",(unsigned long long)camera,(double)heading_of(d),(double)u3_cover_show_h,(double)(a*57.29578f),(double)*arcp);
+}
 static void __attribute__((ms_abi)) u3_walk_camera(uint64_t out, uint64_t camera, uint64_t image, uint64_t r14) {
     (void)image; (void)r14;
     static int disabled=-1;
     if (disabled<0) { const char *e=getenv("BB_U3_NATIVE"); disabled=e && atoi(e)==0; }
     if (disabled || pad_only_mode || camera<0x10000 || (out&0xfffu)!=0x1f0u) return;
     const uint64_t now=now_us();
-    if ((aim_held && u3_aim_seen_us && now-u3_aim_seen_us<150000) || (u3_cover_seen_us && now-u3_cover_seen_us<150000)) return;
+    {   /* BB_U3_WALKPROBE=<file>: 0x300 bytes of the walking camera at +0x7600 on every update (time, camera, under-cover flag, bytes), to find the spring's speed field */
+        static FILE *wf; static int winit; static unsigned wn;
+        if (!winit) { winit=1; const char *p=getenv("BB_U3_WALKPROBE"); if (p && *p) wf=fopen(p,"wb"); }
+        static unsigned char wbuf[0x300];
+        if (wf && wn<6000 && safe_read(wbuf,camera+0x7600,sizeof(wbuf))) {
+            const double pt=now*1e-6; const uint64_t pc=camera; const uint32_t cov=(u3_cover_seen_us && now-u3_cover_seen_us<u3_exit_stick_us()) ? 1u : 0u, pad=0;
+            fwrite(&pt,8,1,wf); fwrite(&pc,8,1,wf); fwrite(&cov,4,1,wf); fwrite(&pad,4,1,wf); fwrite(wbuf,1,sizeof(wbuf),wf);
+            if ((++wn&63)==0) fflush(wf);
+        }
+    }
+    if (aim_held && u3_aim_seen_us && now-u3_aim_seen_us<150000) return;
+    if (u3_cover_seen_us && now-u3_cover_seen_us<u3_exit_stick_us()) { u3_walk_follow_cover(camera,now); return; }
     static struct { uint64_t camera, seen_us; unsigned frames; } slot[4];
     int sl=-1;
     for (int i=0;i<4;++i) if (slot[i].camera==camera) sl=i;
     if (sl<0) { sl=0; for (int i=1;i<4;++i) if (slot[i].seen_us<slot[sl].seen_us) sl=i; slot[sl].camera=camera; slot[sl].frames=0; slot[sl].seen_us=now; }
-    if (now-slot[sl].seen_us>1000000 && !(u3_aim_active_us>slot[sl].seen_us)) slot[sl].frames=0;   /* (the same camera away under an aim is not a new one: its 8 frames of waiting froze the picture at the release) */
+    if (now-slot[sl].seen_us>1000000 && !(u3_aim_active_us>slot[sl].seen_us) && !(u3_cover_seen_us>slot[sl].seen_us)) slot[sl].frames=0;   /* (nor is the same camera back after a cover: its 8 frames of waiting froze the picture while the cover faded out) */   /* (the same camera away under an aim is not a new one: its 8 frames of waiting froze the picture at the release) */
     slot[sl].seen_us=now;
     if (slot[sl].frames<8) ++slot[sl].frames;   /* a camera that has just been made holds numbers that are not set yet (the U2 museum crash) */
     float dir[3], arc;
@@ -4508,9 +4603,33 @@ static void __attribute__((ms_abi)) u3_walk_camera(uint64_t out, uint64_t camera
             }
         }
     }
+    if (u3_cover_seen_us && u3_tk_key!=u3_cover_seen_us && now-u3_cover_seen_us<400000 && u3_cover_show_us && now-u3_cover_show_us<400000 && !aim_held && !(u3_aim_active_us>u3_cover_show_us)) {
+        u3_tk_key=u3_cover_seen_us; u3_tk_h=u3_cover_show_h; u3_tk_e=u3_cover_show_e; u3_tk_start_us=now;   /* the cover has just been left */
+        /* The game sets the walking camera's direction itself at the takeover (measured: 7 to 55 degrees off the picture the cover showed, even with the
+         * mouse still): it is put on that picture, the position shown turned about the pivot with it, as after an aim. */
+        const float a=wrap_degrees(heading_of((const float *)(uintptr_t)(camera+0x78c0))-u3_tk_h)*0.017453293f, c=SDL_cosf(a), s=SDL_sinf(a);
+        float *pos=(float *)(uintptr_t)(camera+0x7680), *d=(float *)(uintptr_t)(camera+0x78c0), *arcp=(float *)(uintptr_t)(camera+0x7874);
+        const float *pivot=(const float *)(uintptr_t)(camera+0x78a0);
+        const float px=pos[0]-pivot[0], pz=pos[2]-pivot[2];
+        const float nx=pivot[0]+px*c-pz*s, nz=pivot[2]+px*s+pz*c;
+        if (nx>-100000.0f && nx<100000.0f && nz>-100000.0f && nz<100000.0f) { pos[0]=nx; pos[2]=nz; }
+        const float x=d[0], z=d[2];
+        d[0]=x*c-z*s; d[2]=x*s+z*c;
+        float fwd[3];
+        if (safe_read(fwd,camera+0x200,12)) {
+            const float fl=SDL_sqrtf(fwd[0]*fwd[0]+fwd[1]*fwd[1]+fwd[2]*fwd[2]);
+            if (fl>0.9f && fl<1.1f) {
+                const float v=*arcp+0.5f*(SDL_asinf(fwd[1]/fl)*57.29578f-u3_tk_e)/105.0f;
+                if (v==v) *arcp=v<0.0f ? 0.0f : v>0.76f ? 0.76f : v;
+            }
+        }
+        if (mouse_debug()) printf("Mouse: U3 cover left: walking camera put on heading %.2f (was %.2f)\n",(double)u3_tk_h,(double)(u3_tk_h+a*57.29578f));
+    }
+    const float dir_h0=heading_of((const float *)(uintptr_t)(camera+0x78c0));
     follow_arc_max=0.76f;
     follow_camera(camera,0x78c0,0x7874,105.0f,0,0);
     follow_arc_max=1.0f;
+    if (u3_tk_key && u3_tk_key==u3_cover_seen_us) u3_tk_h+=wrap_degrees(heading_of((const float *)(uintptr_t)(camera+0x78c0))-dir_h0);   /* what the mouse turned this frame */
     /* The elevation the target (+0x7650) made in the game's last update: its own history, for the field before it (+0x78b0) is not the previous
      * target against a wall (measured 2026-10-30: a constant -0.11 rad, which tilted the position down at every call and the wall pushed it back up). */
     static uint64_t hist_camera, hist_us; static float hist_elev;
