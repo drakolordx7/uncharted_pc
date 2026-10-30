@@ -1169,8 +1169,11 @@ void TextureCache::PatchKeyIcons(Image& image) {
         return;
     }
     // BC1 (the colors) and BC4 (the alpha masks): 8 bytes a block.
+    // (U3 stores its HUD button colors as BC1 sRGB)
     const bool is_block = info.pixel_format == vk::Format::eBc1RgbUnormBlock ||
                           info.pixel_format == vk::Format::eBc1RgbaUnormBlock ||
+                          info.pixel_format == vk::Format::eBc1RgbSrgbBlock ||
+                          info.pixel_format == vk::Format::eBc1RgbaSrgbBlock ||
                           info.pixel_format == vk::Format::eBc4UnormBlock;
     const bool is_atlas = info.size.width == 512 && info.size.height == 512 &&
                           info.pixel_format == vk::Format::eR8G8B8A8Unorm;
@@ -1258,7 +1261,9 @@ void TextureCache::PatchKeyIcons(Image& image) {
     download.Invalidate();
 
     std::vector<u8> data(download.mapped, download.mapped + data_size);
-    const bool changed = is_atlas ? BbKeyIcons::PatchU1Atlas(data.data(), info.size.width, info.size.height)
+    const bool u3_atlas = is_atlas && (hash == BbKeyIcons::U3AtlasHash || hash == BbKeyIcons::U3AtlasShapesHash);
+    const bool changed = u3_atlas ? BbKeyIcons::PatchU3Atlas(hash, data.data(), info.size.width, info.size.height)
+                         : is_atlas ? BbKeyIcons::PatchU1Atlas(data.data(), info.size.width, info.size.height)
                                   : BbKeyIcons::PatchU1Texture(hash, data.data(), data.size(), levels);
     if (!changed) {
         return;

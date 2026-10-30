@@ -14,8 +14,12 @@ bool Enabled();
 constexpr uint64_t U1AtlasHash = 0xad5ada34fd34c76bull;
 /// U2: the same atlas (same layout, other bytes).
 constexpr uint64_t U2AtlasHash = 0x97779d0906f16551ull;
+/// U3: the same atlas again (same layout, found by the texture dump of U3).
+constexpr uint64_t U3AtlasHash = 0x8d03f2ff457f032dull;
+/// U3 also has the shapes of the icons in a second 512x512 RGBA8 picture (coverage in the red channel).
+constexpr uint64_t U3AtlasShapesHash = 0xae0c06306763d424ull;
 constexpr bool IsAtlasHash(uint64_t hash) {
-    return hash == U1AtlasHash || hash == U2AtlasHash;
+    return hash == U1AtlasHash || hash == U2AtlasHash || hash == U3AtlasHash || hash == U3AtlasShapesHash;
 }
 
 /// The device the player used last (the window calls this): 0 keyboard and mouse (the key and mouse pastilles, the reworded
@@ -44,7 +48,9 @@ void TickMenuPhase();
 /// button of the U1 atlas (512x512 RGBA8, tightly packed), and labels the lit arms of its d-pad
 /// frames, with the keys from input.ini (BB_INPUT_CONFIG, else the port's default keys) as key
 /// caps and mouse pictures. Returns false when no icon was changed.
-bool PatchU1Atlas(uint8_t* rgba, uint32_t width, uint32_t height);
+bool PatchU1Atlas(uint8_t* rgba, uint32_t width, uint32_t height, int slot = 0);
+/// U3: the atlas or its shapes picture (by hash), painted for the keyboard and mouse on a copy with a coverage alpha.
+bool PatchU3Atlas(uint64_t hash, uint8_t* rgba, uint32_t width, uint32_t height);
 
 /// U1 (English): a few tutorial hints are reworded in memory so that the text and the key icon agree
 /// (the click of the stick uses the L3 icon, the stick hints use |LA| / |RA|...: see bbport_hints.cpp).

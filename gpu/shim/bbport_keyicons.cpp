@@ -2346,7 +2346,7 @@ std::atomic<uint32_t> g_base_generation{1};
 std::atomic<uint32_t> g_phase_epoch{0};
 std::atomic<int> g_fade_step{0}; // 0 the keys ... FadeSteps the mouse
 
-bool PatchU1Atlas(uint8_t* rgba, uint32_t width, uint32_t height) {
+bool PatchU1Atlas(uint8_t* rgba, uint32_t width, uint32_t height, int slot) {
     if (width != 512 || height != 512 || !GetFont().ok) {
         return false;
     }
@@ -2360,28 +2360,63 @@ bool PatchU1Atlas(uint8_t* rgba, uint32_t width, uint32_t height) {
         return PaintAtlas(rgba, 0);
     }
     static std::mutex mutex;
-    static uint32_t cached = 0;
-    static std::vector<uint8_t> keys, mouse;
+    static uint32_t cached[2] = {0, 0};
+    static std::vector<uint8_t> keys[2], mouse[2];
     std::lock_guard<std::mutex> lock{mutex};
     constexpr size_t Bytes = size_t(512) * 512 * 4;
-    if (cached != g_base_generation || keys.size() != Bytes) {
-        keys.assign(rgba, rgba + Bytes);
-        mouse.assign(rgba, rgba + Bytes);
-        const bool a = PaintAtlas(keys.data(), 0), b = PaintAtlas(mouse.data(), 1);
+    if (cached[slot] != g_base_generation || keys[slot].size() != Bytes) {
+        keys[slot].assign(rgba, rgba + Bytes);
+        mouse[slot].assign(rgba, rgba + Bytes);
+        const bool a = PaintAtlas(keys[slot].data(), 0), b = PaintAtlas(mouse[slot].data(), 1);
         if (!a && !b) {
             return false;
         }
-        cached = g_base_generation;
+        cached[slot] = g_base_generation;
     }
+    const std::vector<uint8_t>& keys_pic = keys[slot];
+    const std::vector<uint8_t>& mouse_pic = mouse[slot];
     const int step = std::clamp(g_fade_step.load(), 0, FadeSteps);
     const float w = float(step) / float(FadeSteps);
     for (size_t i = 0; i < Bytes; i += 4) {
-        const float a0 = float(keys[i + 3]) / 255.0f, a1 = float(mouse[i + 3]) / 255.0f;
+        const float a0 = float(keys_pic[i + 3]) / 255.0f, a1 = float(mouse_pic[i + 3]) / 255.0f;
         const float a = a0 * (1.0f - w) + a1 * w;
         rgba[i + 3] = uint8_t(a * 255.0f + 0.5f);
         for (int c = 0; c < 3; ++c) { // premultiplied blend, straight result
-            const float p = float(keys[i + size_t(c)]) * a0 * (1.0f - w) + float(mouse[i + size_t(c)]) * a1 * w;
-            rgba[i + size_t(c)] = a > 0.0f ? uint8_t(std::clamp(p / a, 0.0f, 255.0f) + 0.5f) : keys[i + size_t(c)];
+            const float p = float(keys_pic[i + size_t(c)]) * a0 * (1.0f - w) + float(mouse_pic[i + size_t(c)]) * a1 * w;
+            rgba[i + size_t(c)] = a > 0.0f ? uint8_t(std::clamp(p / a, 0.0f, 255.0f) + 0.5f) : keys_pic[i + size_t(c)];
+        }
+    }
+    return true;
+}
+
+// U3 keeps the shapes of the icons in a second 512x512 picture (their coverage in its red channel) and leaves the alpha of
+// the atlas at 0: the icons are found, drawn and covered there. The keyboard and mouse pictures are painted on a copy with a
+// coverage alpha (the atlas: any lit pixel; the shapes: their red), then the colors go back to the atlas and the new
+// coverage to the shapes. Same for the Xbox glyphs (the round Menu button must cut its own shape, not the old pill's);
+// a PlayStation controller keeps the game's pictures.
+bool PatchU3Atlas(uint64_t hash, uint8_t* rgba, uint32_t width, uint32_t height) {
+    const bool is_shapes = hash == U3AtlasShapesHash;
+    if (g_input_mode == 1 || width != 512 || height != 512) { // a PlayStation controller: the game's own icons
+        return false;
+    }
+    constexpr size_t Bytes = size_t(512) * 512 * 4;
+    std::vector<uint8_t> work(rgba, rgba + Bytes);
+    for (size_t i = 0; i < Bytes; i += 4) {
+        const uint8_t lit = is_shapes ? work[i] : std::max({work[i], work[i + 1], work[i + 2]});
+        work[i + 3] = (is_shapes ? lit : (lit > 24 ? 255 : 0));
+    }
+    if (!PatchU1Atlas(work.data(), width, height, is_shapes ? 1 : 0)) {
+        return false;
+    }
+    for (size_t i = 0; i < Bytes; i += 4) {
+        if (is_shapes) {
+            rgba[i] = rgba[i + 1] = rgba[i + 2] = work[i + 3];
+            continue;
+        }
+        const bool changed = rgba[i] != work[i] || rgba[i + 1] != work[i + 1] || rgba[i + 2] != work[i + 2];
+        std::memcpy(&rgba[i], &work[i], 3);
+        if (changed) {
+            rgba[i + 3] = work[i + 3];
         }
     }
     return true;
@@ -2687,7 +2722,13 @@ struct KeyTarget {
                             // halo mask (the "V", the pressed "E"), so the key would have no glow
     bool pulse = false;     // and its halo blinks, as the one of the flat "E" does (the game draws it still):
                             // the mask is repainted with the phase of the blink, see PulseFactor
+    bool bc1_masks = false; // U3: the masks are BC1 pictures (grey), not BC4
+    int mask_w = 0, mask_h = 0; // U3: the masks are smaller than the color (0: the same size)
+    int halo2_w = 0;            // U3: the size of the second halo mask (square; 0: that of the first)
 };
+
+int MaskWidth(const KeyTarget& t) { return t.mask_w ? t.mask_w : t.width; }
+int MaskHeight(const KeyTarget& t) { return t.mask_h ? t.mask_h : t.height; }
 
 // On-screen size of the prompts, measured in game: the small "E" of the atlas (hold) is 77 pixels
 // wide, the big flat/animated "E" 100, the "V" of the d-pad texture 110 (1920 wide screen). All are
@@ -2720,6 +2761,31 @@ constexpr KeyTarget KeyTargets[] = {
     {0x2e528a3cffaf0059ull, 0x54c5ae40a5cb6d4eull, 0xbe699cb5e4c57461ull, 256, 256, 128.0f, 126.0f, 80.0f, 80.0f, "up", 0.0f, 170.0f, 150.0f, false, 0, 0, 0, 0, 0, 0, DpadKeyScale, true},
     // ... and the journal (512x256, button in the same place as in U1; its soft halo is a5557ee8c3c38870): the book is grey here.
     {0x10ee44c6ce616ee4ull, 0, 0, 512, 256, 216.0f, 142.0f, 70.5f, 70.5f, "touchpad", 0.0f, 169.0f, 105.0f, true, 135, 93, 298, 192},
+    // Uncharted 3: the same pictures again (found by the texture dump of U3). The colors are sRGB and the masks BC1 here.
+    // The big button, flat (the interact "triangle"): same geometry as U1/U2, a soft halo mask and a hard disc mask.
+    {0x7e16e7522ff5748full, 0x6119b944b20126d7ull, 0xbe8319885328ef21ull, 256, 256, 128.5f, 126.5f, 70.5f, 70.5f, "triangle", 0.0f, 170.0f, 150.0f, false, 0, 0, 0, 0, 0, 0, BigKeyScale, false, false, true},
+    // The same buttons flat, for the other face buttons (the masks are the triangle's: same shape).
+    {0x7d3273d9fcd75b58ull, 0x6119b944b20126d7ull, 0xbe8319885328ef21ull, 256, 256, 128.5f, 126.5f, 70.5f, 70.5f, "cross", 0.0f, 170.0f, 150.0f, false, 0, 0, 0, 0, 0, 0, BigKeyScale, false, false, true},
+    {0x0f2aa3306cf47da1ull, 0x6119b944b20126d7ull, 0xbe8319885328ef21ull, 256, 256, 128.5f, 126.5f, 70.5f, 70.5f, "circle", 0.0f, 170.0f, 150.0f, false, 0, 0, 0, 0, 0, 0, BigKeyScale, false, false, true},
+    // The quick-time events: the press frames (the first shows the side of the button, the second is pressed), 512x512, the
+    // same for the four face buttons but for the color and the symbol. Their masks (the shape and its glow) are shared by
+    // the buttons, by shape: the thick one and the flat one, each at 512x512 and at half the size (the game draws either).
+    {0xbda57268c785fa75ull, 0xe56cc1b653d4967bull, 0, 512, 512, 256.5f, 250.0f, 98.5f, 59.0f, "circle", 36.0f, 170.0f, 150.0f, false, 0, 0, 0, 0, 0xae75f527bc070bf0ull, 0, FrameKeyScale, false, false, true, 0, 0, 256},
+    {0xd281f68d0ca6b604ull, 0x6e70a93320e446a4ull, 0, 512, 512, 256.5f, 250.0f, 98.5f, 59.0f, "circle", -16.0f, 170.0f, 150.0f, false, 0, 0, 0, 0, 0x35f9e8ad273591c5ull, 0, FrameKeyScale, false, false, true, 0, 0, 256},
+    {0xde6288d2b457da2aull, 0xe56cc1b653d4967bull, 0, 512, 512, 256.5f, 250.0f, 98.5f, 59.0f, "triangle", 36.0f, 170.0f, 150.0f, false, 0, 0, 0, 0, 0xae75f527bc070bf0ull, 0, FrameKeyScale, false, false, true, 0, 0, 256},
+    {0xca555bf12dd7402bull, 0x6e70a93320e446a4ull, 0, 512, 512, 256.5f, 250.0f, 98.5f, 59.0f, "triangle", -16.0f, 170.0f, 150.0f, false, 0, 0, 0, 0, 0x35f9e8ad273591c5ull, 0, FrameKeyScale, false, false, true, 0, 0, 256},
+    {0x2e8f1a37800214a7ull, 0xe56cc1b653d4967bull, 0, 512, 512, 256.5f, 250.0f, 98.5f, 59.0f, "square", 36.0f, 170.0f, 150.0f, false, 0, 0, 0, 0, 0xae75f527bc070bf0ull, 0, FrameKeyScale, false, false, true, 0, 0, 256},
+    {0xcdde88dd024eeabeull, 0x6e70a93320e446a4ull, 0, 512, 512, 256.5f, 250.0f, 98.5f, 59.0f, "square", -16.0f, 170.0f, 150.0f, false, 0, 0, 0, 0, 0x35f9e8ad273591c5ull, 0, FrameKeyScale, false, false, true, 0, 0, 256},
+    // "Push the left stick forward": three frames of the stick (256x128, tan background, stored upside down), each with a
+    // mask of its own. The stick goes, the key of "stick up" takes its place (centered on the mask of the frame). The
+    // controller keeps the stick: it is the same picture for PlayStation and Xbox.
+    {0xd5517ab261f4e90cull, 0x25d2534cfad65b5dull, 0, 256, 128, 129.5f, 71.5f, 38.0f, 38.0f, "ls_up", 0.0f, 170.0f, 150.0f, false, 0, 0, 0, 0, 0, 0, 1.0f, false, false, true},
+    {0xf3dfe70ef1fde14bull, 0x412777c1c2c78246ull, 0, 256, 128, 129.5f, 58.0f, 38.0f, 38.0f, "ls_up", 0.0f, 170.0f, 150.0f, false, 0, 0, 0, 0, 0, 0, 1.0f, false, false, true},
+    {0x2f20dd1ea3c43f82ull, 0x08a9ae4743d4fb58ull, 0, 256, 128, 129.5f, 76.0f, 38.0f, 38.0f, "ls_up", 0.0f, 170.0f, 150.0f, false, 0, 0, 0, 0, 0, 0, 1.0f, false, false, true},
+    // The d-pad of the HUD, up arm lit (stored upside down): soft mask with the glow, hard mask of the pad.
+    {0x75acc5a4dbcdc36full, 0x90a2254d1a6d063cull, 0xe7ee4ecd41676109ull, 256, 256, 128.0f, 126.0f, 80.0f, 80.0f, "up", 0.0f, 170.0f, 150.0f, false, 0, 0, 0, 0, 0, 0, DpadKeyScale, true, false, true},
+    // The journal (512x256, the button where it is in U1 and U2; its mask is left as it is).
+    {0x47dc0f9c27f1919bull, 0, 0, 512, 256, 216.0f, 142.0f, 70.5f, 70.5f, "touchpad", 0.0f, 169.0f, 105.0f, true, 135, 93, 298, 192, 0, 0, 1.0f, false, false, true},
 };
 
 enum class Role { Color, Halo, Disc };
@@ -2795,7 +2861,11 @@ void KeyAt(const KeyTarget& t, const std::vector<uint8_t>& sheet, int x, int y, 
 
 bool PatchKeyTarget(const KeyTarget& t, Role role, uint64_t hash, uint8_t* data, size_t size, uint32_t levels) {
     const bool is_mask = role != Role::Color;
-    const Levels layout = LayoutLevels(t.width, t.height, levels);
+    const bool second_mask = is_mask && t.halo2_hash && t.halo2_w && hash == t.halo2_hash;
+    const int W = second_mask ? t.halo2_w : is_mask ? MaskWidth(t) : t.width; // of the texture patched
+    const int H = second_mask ? t.halo2_w : is_mask ? MaskHeight(t) : t.height;
+    const int scale = std::max(t.width / W, 1); // texture pixels per pixel of the mask
+    const Levels layout = LayoutLevels(W, H, levels);
     const Font& font = GetFont();
     if (size < layout.total || !font.ok) {
         return false;
@@ -2810,9 +2880,13 @@ bool PatchKeyTarget(const KeyTarget& t, Role role, uint64_t hash, uint8_t* data,
     const auto in_box = [&](int x, int y, int margin) {
         return !t.overlay || (x >= t.bx0 - margin && x < t.bx1 + margin && y >= t.by0 - margin && y < t.by1 + margin);
     };
-    std::vector<uint8_t> level(size_t(t.width) * size_t(t.height) * 4);
+    std::vector<uint8_t> level(size_t(W) * size_t(H) * 4);
     if (is_mask) {
-        DecodeBc4(data, t.width, t.height, level.data());
+        if (t.bc1_masks) {
+            DecodeBc1(data, W, H, level.data());
+        } else {
+            DecodeBc4(data, W, H, level.data());
+        }
         // The key and its halo; frames that share the mask all show: their shapes are added up.
         std::vector<std::pair<const KeyTarget*, std::vector<uint8_t>>> sheets;
         for (const KeyTarget& other : KeyTargets) {
@@ -2823,15 +2897,23 @@ bool PatchKeyTarget(const KeyTarget& t, Role role, uint64_t hash, uint8_t* data,
                 }
             }
         }
-        for (int y = 0; y < t.height; ++y) {
-            for (int x = 0; x < t.width; ++x) {
-                if (!in_box(x, y, 14)) {
+        for (int y = 0; y < H; ++y) {
+            for (int x = 0; x < W; ++x) {
+                if (!in_box(x * scale, y * scale, 14)) {
                     continue;
                 }
                 float alpha = 0.0f;
                 for (const auto& [other, sheet] : sheets) {
-                    float s[4];
-                    KeyAt(*other, sheet, x, y, s);
+                    float s[4] = {0, 0, 0, 0};
+                    for (int j = 0; j < scale; ++j) { // a smaller mask: the mean of the texture pixels it covers
+                        for (int i = 0; i < scale; ++i) {
+                            float one[4];
+                            KeyAt(*other, sheet, x * scale + i, y * scale + j, one);
+                            for (int c = 0; c < 4; ++c) {
+                                s[c] += one[c] / float(scale * scale);
+                            }
+                        }
+                    }
                     // The halo mask: the key and its halo. The disc mask: the key alone.
                     float a = role == Role::Halo || other->soft_disc
                                         ? s[3]
@@ -2841,7 +2923,7 @@ bool PatchKeyTarget(const KeyTarget& t, Role role, uint64_t hash, uint8_t* data,
                     }
                     alpha = std::max(alpha, a);
                 }
-                uint8_t* p = &level[(size_t(y) * size_t(t.width) + size_t(x)) * 4];
+                uint8_t* p = &level[(size_t(y) * size_t(W) + size_t(x)) * 4];
                 p[0] = p[1] = p[2] = uint8_t(std::clamp(alpha, 0.0f, 1.0f) * 255.0f + 0.5f);
             }
         }
@@ -2884,11 +2966,11 @@ bool PatchKeyTarget(const KeyTarget& t, Role role, uint64_t hash, uint8_t* data,
             }
         }
     }
-    ReencodeChain(std::move(level), t.width, t.height, is_mask ? Codec::Bc4 : Codec::Bc1, layout, data, 0.0f, 0.0f,
-                  float(t.width), float(t.height));
+    ReencodeChain(std::move(level), W, H, is_mask && !t.bc1_masks ? Codec::Bc4 : Codec::Bc1, layout, data, 0.0f, 0.0f,
+                  float(W), float(H));
     std::printf("KeyIcons: key %s redrawn (%s=%s, %dx%d, %u mip levels)\n",
                 role == Role::Color ? "color" : role == Role::Halo ? "halo mask" : "disc mask", t.action,
-                label.c_str(), t.width, t.height, layout.count);
+                label.c_str(), W, H, layout.count);
     return true;
 }
 
@@ -2898,6 +2980,7 @@ bool PatchKeyTarget(const KeyTarget& t, Role role, uint64_t hash, uint8_t* data,
 // its place, and the mask follows the new shape. All the coordinates are the textures' own (stored upside down).
 constexpr uint64_t JournalMaskHash = 0x098d0fef76921395ull;
 constexpr uint64_t JournalMaskHashU2 = 0xa5557ee8c3c38870ull; // the same soft mask in U2 (the drawn book has U1's outline: same mask picture)
+constexpr uint64_t JournalMaskHashU3 = 0xddc72d271d3f1b61ull; // U3: the same mask as a BC1 picture (the Xbox one drawn by hand goes in)
 constexpr int JournalHullCount = 17;
 constexpr float JournalHull[JournalHullCount][2] = {{20, 100}, {30, 89},  {57, 77},   {86, 66},   {116, 55}, {142, 46}, {156, 44}, {167, 54}, {177, 74},
                                                     {232, 197}, {229, 213}, {203, 220}, {139, 232}, {116, 234}, {103, 217}, {40, 131}, {24, 109}};
@@ -3006,7 +3089,7 @@ bool XJournalColor(const XPic& pic, const Font& font) {
 }
 
 /// The soft mask of the journal: the book and the round button, instead of the book and the wide one.
-bool XJournalMask(uint8_t* data, size_t size, uint32_t levels) {
+bool XJournalMask(uint8_t* data, size_t size, uint32_t levels, bool bc1 = false) {
     constexpr int W = 512, H = 256;
     const Levels layout = LayoutLevels(W, H, levels);
     if (size < layout.total) {
@@ -3019,9 +3102,12 @@ bool XJournalMask(uint8_t* data, size_t size, uint32_t levels) {
             level[i * 4] = level[i * 4 + 1] = level[i * 4 + 2] = asset.data[i];
             level[i * 4 + 3] = 255;
         }
-        ReencodeChain(std::move(level), W, H, Codec::Bc4, layout, data, 0.0f, 0.0f, float(W), float(H));
+        ReencodeChain(std::move(level), W, H, bc1 ? Codec::Bc1 : Codec::Bc4, layout, data, 0.0f, 0.0f, float(W), float(H));
         std::printf("KeyIcons: journal mask: the Xbox picture (%u mip levels)\n", layout.count);
         return true;
+    }
+    if (bc1) {
+        return false; // U3: only the picture drawn by hand
     }
     DecodeBc4(data, W, H, level.data());
     constexpr int zx0 = 90, zy0 = 50, zx1 = 346, zy1 = 236, zw = zx1 - zx0, zh = zy1 - zy0;
@@ -3120,7 +3206,9 @@ bool XSchemaMask(uint8_t* data, size_t size, uint32_t levels) {
 bool PatchXboxHud(const KeyTarget& t, Role role, uint8_t* data, size_t size, uint32_t levels) {
     static const Color YellowY{248.0f, 204.0f, 44.0f};
     const bool triangle = !std::strcmp(t.action, "triangle"), journal = !std::strcmp(t.action, "touchpad");
-    if (role != Role::Color || (!triangle && !journal)) {
+    // U3's other face buttons (A, B, X): only the pictures drawn by hand
+    const bool circle = !std::strcmp(t.action, "circle") || !std::strcmp(t.action, "cross") || !std::strcmp(t.action, "square");
+    if (role != Role::Color || (!triangle && !journal && !circle)) {
         return false;
     }
     const Levels layout = LayoutLevels(t.width, t.height, levels);
@@ -3134,8 +3222,22 @@ bool PatchXboxHud(const KeyTarget& t, Role role, uint8_t* data, size_t size, uin
     // the pictures drawn by hand, when they are there and of the right size
     uint32_t asset_id = 0;
     if (journal) {
-        asset_id = t.hash == 0x8b9946c0528a3d88ull ? 4 : 8; // U2's has its own (a grey book, drawn by hand); both go with the same mask (5)
-    } else if (t.hash == 0xac68a6ce1c1540adull || t.hash == 0xc6e03b00d234a7cdull) {
+        asset_id = t.hash == 0x8b9946c0528a3d88ull ? 4 : 8; // U2's has its own (a grey book, drawn by hand), U3 takes it too; both go with the same mask (5)
+    } else if (t.hash == 0xde6288d2b457da2aull) {
+        asset_id = 2; // U3's quick-time Y: the thick frame ...
+    } else if (t.hash == 0xca555bf12dd7402bull) {
+        asset_id = 3; // ... and the pressed one, the pictures of the other games
+    } else if (circle) {
+        switch (t.hash) { // B (thick, pressed, flat), A (flat), X (thick, pressed)
+        case 0xbda57268c785fa75ull: asset_id = 20; break;
+        case 0xd281f68d0ca6b604ull: asset_id = 21; break;
+        case 0x0f2aa3306cf47da1ull: asset_id = 33; break;
+        case 0x7d3273d9fcd75b58ull: asset_id = 30; break;
+        case 0x2e8f1a37800214a7ull: asset_id = 36; break;
+        case 0xcdde88dd024eeabeull: asset_id = 37; break;
+        default: break;
+        }
+    } else if (t.hash == 0xac68a6ce1c1540adull || t.hash == 0xc6e03b00d234a7cdull || t.hash == 0x7e16e7522ff5748full) {
         asset_id = 1;
     } else if (t.hash == 0x4ae942741bdae0d1ull || t.hash == 0x07fabd1a89bf9ddbull) {
         asset_id = 2;
@@ -3151,6 +3253,9 @@ bool PatchXboxHud(const KeyTarget& t, Role role, uint8_t* data, size_t size, uin
         ReencodeChain(std::move(level), t.width, t.height, Codec::Bc1, layout, data, 0.0f, 0.0f, float(t.width), float(t.height));
         std::printf("KeyIcons: HUD button %s: the Xbox picture (%dx%d)\n", t.action, t.width, t.height);
         return true;
+    }
+    if (circle) {
+        return false; // no picture of the right size: the game's button stays
     }
     // (the textures are stored upside down: the glyph is turned over)
     const bool done = triangle ? XReplaceSymbol(pic, font, t.cx, t.cy, t.rx * 1.05f, t.ry * 1.5f, 16, t.rx > 80.0f ? 3 : 7, "Y", t.rx * 1.0f, t.ry / t.rx, true, 4, true, &YellowY, t.rx > 80.0f ? 2 : 6)
@@ -3318,7 +3423,7 @@ void NoteUnknownTexture(uint64_t hash, uint32_t width, uint32_t height, const ui
 bool IsTextureTarget(uint64_t hash) {
     bool is_mask;
     Role role;
-    return FindKeyTarget(hash, &role) != nullptr || FindStickFrame(hash, &is_mask) != nullptr || hash == JournalMaskHash || hash == JournalMaskHashU2 || hash == SchemaHash || hash == SchemaMaskHash || hash == SchemaMaskHashU2 || hash == SchemaMaskHashU3;
+    return FindKeyTarget(hash, &role) != nullptr || FindStickFrame(hash, &is_mask) != nullptr || hash == JournalMaskHash || hash == JournalMaskHashU2 || hash == JournalMaskHashU3 || hash == SchemaHash || hash == SchemaMaskHash || hash == SchemaMaskHashU2 || hash == SchemaMaskHashU3;
 }
 
 bool IsPulseMask(uint64_t hash) {
@@ -3340,12 +3445,32 @@ int PromptKind(uint64_t hash) {
     if (!t) {
         return 0;
     }
-    return !std::strcmp(t->action, "up") ? (t->width == 256 ? 5 : 2) : !std::strcmp(t->action, "touchpad") ? 3 : (t->width == 512 && !std::strcmp(t->action, "triangle")) ? 4 : 0;
+    // (6: the d-pad of U3, also moved with a controller, so that its place and size are those of the "V")
+    return !std::strcmp(t->action, "up") ? (t->hash == 0x75acc5a4dbcdc36full ? 6 : t->width == 256 ? 5 : 2) : !std::strcmp(t->action, "touchpad") ? 3 : (t->width == 512 && !std::strcmp(t->action, "triangle") && t->hash != 0xde6288d2b457da2aull && t->hash != 0xca555bf12dd7402bull) ? 4 : 0; // (U3's quick-time frames are not moved)
 }
 
 void PromptTransform(int kind, float* zoom, float* anchor_x, float* anchor_y, float* down, float* right) {
     *right = 0.0f;
-    if (kind == 5) {
+    if (kind == 6 && g_input_mode != 0) {
+        // The game's own d-pad of U3 (measured on 2000x1125 captures): about 99x107 pixels centered (311.5, 891); the "V" is
+        // 85 pixels wide centered (307.5, 977.5). Zoom 0.85 about c = (T - zoom * A) / (1 - zoom) does both.
+        struct Values {
+            float zoom, x, y;
+        };
+        static const Values values = [] {
+            Values v{0.85f, 0.1424f, 1.3046f};
+            if (const char* env = std::getenv("BB_U3_DPAD_PAD")) {
+                std::sscanf(env, "%f,%f,%f", &v.zoom, &v.x, &v.y);
+            }
+            return v;
+        }();
+        *zoom = values.zoom;
+        *anchor_x = values.x;
+        *anchor_y = values.y;
+        *down = 0.0f;
+        return;
+    }
+    if (kind == 5 || kind == 6) {
         // The "V" of U2 (measured in game on 2000x1125 captures): drawn 61 pixels wide, centered 312 from the left edge and 940
         // from the top; it must be as big as the flat "E" (91 pixels, centered 306 from the right edge and 976 from the top).
         // A zoom about the fixed point c of x' = c + zoom * (x - c) does both: c = (T - zoom * A) / (1 - zoom).
@@ -3420,6 +3545,9 @@ bool PatchU1Texture(uint64_t hash, uint8_t* data, size_t size, uint32_t levels) 
     if (g_input_mode == 2) { // Xbox: the "interact" button and the journal's get the Xbox button; the rest (d-pad, stick) stays
         if (hash == JournalMaskHash || hash == JournalMaskHashU2) {
             return XJournalMask(data, size, levels);
+        }
+        if (hash == JournalMaskHashU3) {
+            return XJournalMask(data, size, levels, true);
         }
         if (hash == SchemaHash) {
             return XSchemaColor(data, size);

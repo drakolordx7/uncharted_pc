@@ -5218,7 +5218,7 @@ void Rasterizer::UpdateViewportScissorState() const {
     bool pad_journal = false;
     if (pad) {
         for (const auto id : bound_images) {
-            pad_journal = pad_journal || texture_cache.PromptKind(id) == 3;
+            pad_journal = pad_journal || texture_cache.PromptKind(id) == 3 || texture_cache.PromptKind(id) == 6;
         }
     }
     if (pad && !pad_journal) {
@@ -5226,7 +5226,7 @@ void Rasterizer::UpdateViewportScissorState() const {
     } else if (BbKeyIcons::Enabled() && !viewports.empty() && !regs.IsClipDisabled()) {
         int kind = 0;
         for (const auto id : bound_images) {
-            if ((kind = texture_cache.PromptKind(id)) != 0 && (!pad || kind == 3)) {
+            if ((kind = texture_cache.PromptKind(id)) != 0 && (!pad || kind == 3 || kind == 6)) {
                 break;
             }
             kind = 0;
