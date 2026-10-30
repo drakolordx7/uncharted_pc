@@ -186,7 +186,7 @@ FIXES = {
         {'on': {'BB_JOB_SLEEP': '1'}, 'off': {'BB_JOB_SLEEP': '0'}}),
     'fix_thread_prio': (
         'PS4 thread priorities',
-        'Game threads get the priorities they have on PS4. Automatic: on.',
+        'Game threads get the priorities they have on PS4. Automatic: off (the 4-core crash they were for is fixed by the job wait).',
         {'on': {'BB_THREAD_PRIO': '1'}, 'off': {'BB_THREAD_PRIO': '0'}}),
 }
 FIX_CHOICES = [('auto', 'Automatic'), ('on', 'On'), ('off', 'Off')]
