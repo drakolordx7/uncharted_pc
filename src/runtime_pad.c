@@ -4152,6 +4152,7 @@ static float u3_aim_last_elev;      /* the same for the elevation of the look di
 static uint64_t u3_pitch_fix_until_us;   /* after the release the walking camera's arc is brought to that elevation until then */
 static float u3_aim_last_heading;   /* the heading the picture had on the last frame of the aim (what the walking camera is put on at the release) */
 static float u3_aim_pivot[3];   /* the player's pivot, as worked out from the aiming output (used by u3_layer_blend) */
+static float u3_dbg_walk_pivot[3]; static uint64_t u3_dbg_walk_us;   /* (diagnostic) the walking camera's pivot at its last update, read in u3_walk_camera */
 static float u3_aim_keep_yaw, u3_aim_keep_pitch;   /* the turn at the release, kept on the aiming camera while it fades out */
 static void quat_rotate(const float *q, const float *v, float *r) {   /* q v q^-1 */
     const float cx=q[1]*v[2]-q[2]*v[1], cy=q[2]*v[0]-q[0]*v[2], cz=q[0]*v[1]-q[1]*v[0];
@@ -4272,6 +4273,17 @@ static void __attribute__((ms_abi)) u3_aim_out(uint64_t rdi,uint64_t rsi, uint64
     quat_rotate(o+4,shoulder,off);
     for (int i=0;i<3;++i) pivot[i]=o[i]-off[i];
     if (!blending_out) for (int i=0;i<3;++i) u3_aim_pivot[i]=pivot[i];
+    if (mouse_debug() && !blending_out) {   /* (diagnostic) is the pivot on the player? the walking camera's pivot is, at its last update before the aim */
+        static uint64_t dbg_us;
+        if (now-dbg_us>500000 || was_out) {
+            const float sl_[3]={-0.4f,0.475f,-1.0f}, sr_[3]={0.3f,0.5f,-1.0f};
+            float ol[3], orr[3];
+            quat_rotate(o+4,sl_,ol); quat_rotate(o+4,sr_,orr);
+            const float *w=u3_dbg_walk_pivot;
+            printf("Mouse: U3 PIVOTCHK cam=%llx s_used=%.2f,%.2f,%.2f used=%.3f,%.3f,%.3f walk=%.3f,%.3f,%.3f (age %.1fs) left=%.3f,%.3f,%.3f right=%.3f,%.3f,%.3f\n",(unsigned long long)r14,(double)shoulder[0],(double)shoulder[1],(double)shoulder[2],(double)pivot[0],(double)pivot[1],(double)pivot[2],(double)w[0],(double)w[1],(double)w[2],u3_dbg_walk_us ? (double)(now-u3_dbg_walk_us)*1e-6 : -1.0,(double)(o[0]-ol[0]),(double)(o[1]-ol[1]),(double)(o[2]-ol[2]),(double)(o[0]-orr[0]),(double)(o[1]-orr[1]),(double)(o[2]-orr[2]));
+            dbg_us=now;
+        }
+    }
     /* While the aim fades out the game turns the aiming camera's own base after Drake, who has turned with our output (measured 2026-10-31: the
      * heading went from pre-aim - turn to pre-aim - 2 x turn): what the base has followed since the release is taken off what we add. */
     const float base_heading=SDL_atan2f(f[0],f[2])*57.29578f;
@@ -4763,6 +4775,7 @@ static void __attribute__((ms_abi)) u3_walk_camera(uint64_t out, uint64_t camera
             if ((++wn&63)==0) fflush(wf);
         }
     }
+    if (mouse_debug() && !(aim_held && u3_aim_seen_us && now-u3_aim_seen_us<150000)) { float wp[3]; if (safe_read(wp,camera+0x78a0,12)) { for (int i=0;i<3;++i) u3_dbg_walk_pivot[i]=wp[i]; u3_dbg_walk_us=now; } }
     if (aim_held && u3_aim_seen_us && now-u3_aim_seen_us<150000) return;
     if (u3_cover_seen_us && now-u3_cover_seen_us<u3_exit_stick_us()) { u3_walk_follow_cover(camera,now); return; }
     static struct { uint64_t camera, seen_us; unsigned frames; } slot[4];
@@ -4884,18 +4897,16 @@ static void __attribute__((ms_abi)) u3_walk_camera(uint64_t out, uint64_t camera
     }
     /* The elevation the target (+0x7650) made in the game's last update: its own history, for the field before it (+0x78b0) is not the previous
      * target against a wall (measured 2026-10-30: a constant -0.11 rad, which tilted the position down at every call and the wall pushed it back up). */
-    static uint64_t hist_camera, hist_us; static float hist_elev;
-    float tilt_step=0.0f;
+    float target_elev=0.0f; int target_elev_ok=0;
     {
         const float *p=(const float *)(uintptr_t)(camera+0x78a0), *t=(const float *)(uintptr_t)(camera+0x7650);
         const float r=SDL_sqrtf((t[0]-p[0])*(t[0]-p[0])+(t[2]-p[2])*(t[2]-p[2]));
         if (r>0.3f && r<50.0f) {
             const float e=SDL_atan2f(t[1]-p[1],r);
-            if (hist_camera==camera && now-hist_us<100000) tilt_step=e-hist_elev;
-            hist_camera=camera; hist_us=now; hist_elev=e;
+            target_elev=e; target_elev_ok=1;
         }
     }
-    const int tilting=follow_tilt_us && now-follow_tilt_us<150000;   /* the mouse moved vertically in the last 0.15 s (the wall's own pushes are left to the game) */
+    const int tilting=follow_tilt_us && (now<follow_tilt_us || now-follow_tilt_us<150000);   /* (follow_tilt_us is read after now: on the frames the mouse moves it is the later one) the mouse moved vertically in the last 0.15 s (the wall's own pushes are left to the game) */
     if ((follow_applied!=0.0f || tilting) && !input.free_view_smoothing) {
         /* As in U2 (U2B_UPDATE_FOLLOW): the target (+0x7650) follows the direction at once on a circle about the pivot
          * (+0x78a0), but the position shown (+0x7680, measured 2026-10-30: a spring) trails it, and on a fast turn it cuts through the chord, past the
@@ -4905,12 +4916,13 @@ static void __attribute__((ms_abi)) u3_walk_camera(uint64_t out, uint64_t camera
         const float *pivot=(const float *)(uintptr_t)(camera+0x78a0);
         const float a=follow_applied*0.017453293f, c=SDL_cosf(a), s=SDL_sinf(a);
         float px=pos[0]-pivot[0], pz=pos[2]-pivot[2], py=pos[1]-pivot[1];
-        if (tilting && tilt_step!=0.0f) {
+        if (tilting && target_elev_ok) {
             const float h=SDL_sqrtf(px*px+pz*pz);
             if (h>0.1f && follow_gap_us<U2_FOLLOW_RESYNC_US) {
-                const float d=tilt_step>0.35f ? 0.35f : tilt_step<-0.35f ? -0.35f : tilt_step;
-                const float e=SDL_atan2f(py,h), len=SDL_sqrtf(h*h+py*py), e2=e+d, k=len*SDL_cosf(e2)/h;
-                px*=k; pz*=k; py=len*SDL_sinf(e2);
+                /* The position's elevation is put on the target's (no vertical smoothing): the spring's lag behind the mouse's tilt is not left to show. Along the arc
+                 * about the pivot, at the distance the game gave it, and only while the mouse tilts (a wall's pushes are left to the game). */
+                const float e=SDL_atan2f(py,h), want=target_elev-e, d=want>0.35f ? 0.35f : want<-0.35f ? -0.35f : want;
+                const float len=SDL_sqrtf(h*h+py*py), e2=e+d, k=len*SDL_cosf(e2)/h;                px*=k; pz*=k; py=len*SDL_sinf(e2);
             }
         }
         if (follow_applied!=0.0f) {
