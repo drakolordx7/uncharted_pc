@@ -363,6 +363,7 @@ static float follow_before, follow_after; /* heading before and after the last t
 static int follow_pending;
 static volatile uint64_t aim_blend_until_us; /* the aim is blended out for about a second after L2 is released: the zoom camera keeps the mouse until then */
 static uint64_t u3_aim_active_us;   /* (U3: the last aim frame; defined again with the other U3 aim state) */
+static float u3_walk_shown[3]; static uint64_t u3_walk_shown_us;   /* U3: the position the walking camera shows (+0x7680), as of its last update */
 static int u3_aim_fade_window(uint64_t now) { return u3_aim_active_us && now-u3_aim_active_us<1500000; }   /* U3: the layer hook (u3_layer_blend) goes on taking queue 2 for 1.5 s after the aim, longer than aim_blend_until_us (1.3 s): measured, in the last 0.2 s it had no mouse and held the picture still */
 static volatile int aim_native;   /* aim_held and the zoom (aiming) camera runs: L2 held during a roll aims nothing yet, and the mouse must keep turning the free view then */
 static volatile int aim_held;             /* L2 is held: the aiming camera (also while it blends in) */
@@ -4434,6 +4435,7 @@ static void __attribute__((ms_abi)) u3_layer_blend(uint64_t rdi, uint64_t rsi, u
      * mouse waited unused meanwhile, the picture stood still, then went on): the same absolute turn goes on through the fade, with the walking
      * camera's sensitivity, and the walking camera is put on it each frame (u3_walk_camera) so the end of the fade shows no jump. */
     if (disabled || pad_only_mode || !u3_aim_active_us || now-u3_aim_active_us>(held ? 100000 : 1500000)) return;
+    { static int nofade=-1; if (nofade<0) { const char *e=getenv("BB_U3_NOFADE"); nofade=e && atoi(e)!=0; } if (nofade && !held) { const RuntimeGuestRegs *g0=(const RuntimeGuestRegs *)(uintptr_t)(guest_callback_rsp-0x60); const float *p0=(const float *)(uintptr_t)g0->rax; if (mouse_debug() && (uintptr_t)p0>=0x10000) printf("Mouse: U3 pose T=%.4f FADE in=%.3f,%.3f,%.3f out=0,0,0 piv=0,0,0\n",now*1e-6,(double)p0[0],(double)p0[1],(double)p0[2]); return; } }   /* (test switch: no hold of the aim picture in the fade) */
     const float w=*(const float *)(uintptr_t)(r14+0x108), t=1.0f-w;
     if (!(t>=0.0f && t<=1.0f)) return;
     if (!held) {
@@ -4472,6 +4474,14 @@ static void __attribute__((ms_abi)) u3_layer_blend(uint64_t rdi, uint64_t rsi, u
         }
     }   /* a new aim (L2 pressed again, also during the previous one's fade, whose frames are continuous; the turn total starts again from 0 with it): the picture it starts from (the walking camera's, w is ~0) */
     prev_held=held;
+    /* The game's own cut (aiming camera -> walking camera, ~0.5 s after the release) moves the position 3 m and turns the picture with it (measured:
+     * the framing stays); the held picture goes through the same change in heading and tilt, mouse turn included, so that nothing shows. */
+    { static float prev_ef, prev_in[3]; static uint64_t prev_in_us;
+      if (!held && prev_in_us && now-prev_in_us<100000) {
+          const float cx=p[0]-prev_in[0], cy=p[1]-prev_in[1], cz=p[2]-prev_in[2];
+          if (cx*cx+cy*cy+cz*cz>0.64f) { e0+=ef-prev_ef; }   /* (not the heading: the walking camera is already put on ours, shifting it would count the mouse turn twice: the picture span) */
+      }
+      prev_ef=ef; prev_in[0]=p[0]; prev_in[1]=p[1]; prev_in[2]=p[2]; prev_in_us=now; }
     last_us=now;
     u3_aim_h0=h0; u3_aim_e0=e0; u3_aim_h0_ok=1;
     /* ABSOLUTE: the picture is what it was at the start of the aim turned by the mouse, whatever the aiming camera's base does (it glides after Drake,
@@ -4502,22 +4512,50 @@ static void __attribute__((ms_abi)) u3_layer_blend(uint64_t rdi, uint64_t rsi, u
         { float f2[3]; quat_rotate(q,look,f2);
             printf("Mouse: U3 layer T=%.4f t=%.4f dt=%.1fms mouse=%.0f,%.0f final=%.2f -> %.2f want=%.2f turn=%.2f%s off_local=%.3f,%.3f,%.3f dist=%.3f elev %.2f -> %.2f want=%.2f e0=%.2f pturn=%.2f\n",now*1e-6,(double)t,(now-start_us)*1e-3,(double)u3_dbg_dx,(double)u3_dbg_dy,(double)hf,(double)(SDL_atan2f(f2[0],f2[2])*57.29578f),(double)hd,(double)u3_aim_total_yaw,held ? "" : " FADE",(double)local[0],(double)local[1],(double)local[2],(double)SDL_sqrtf(off[0]*off[0]+off[1]*off[1]+off[2]*off[2]),(double)ef,(double)(SDL_asinf(f2[1]>1.0f ? 1.0f : f2[1]<-1.0f ? -1.0f : f2[1])*57.29578f),(double)ed,(double)e0,(double)u3_aim_total_pitch); }
     }
+    if (mouse_debug()) printf("Mouse: U3 pose T=%.4f%s in=%.3f,%.3f,%.3f out=%.3f,%.3f,%.3f piv=%.3f,%.3f,%.3f\n",now*1e-6,held ? "" : " FADE",(double)p[0],(double)p[1],(double)p[2],(double)(u3_aim_pivot[0]+turned[0]),(double)(u3_aim_pivot[1]+turned[1]),(double)(u3_aim_pivot[2]+turned[2]),(double)u3_aim_pivot[0],(double)u3_aim_pivot[1],(double)u3_aim_pivot[2]);
     /* The end of the 1.5 s window: the picture the hook holds is let go of over the last 0.3 s (measured: cutting it at once showed a jump of 1.5 degrees
      * of heading and 2 of tilt, the game's own picture having settled elsewhere). */
+    /* The game cuts from the aiming camera (1.2 m from the player) to the walking camera (2.7 m back, 0.5 m lower) in one frame ~0.5 s after the release
+     * (measured: the picture jumps up): the position is kept where the last frame had it and let go of over 0.4 s. */
+    float np[3]={u3_aim_pivot[0]+turned[0],u3_aim_pivot[1]+turned[1],u3_aim_pivot[2]+turned[2]};
+    static float last_in[3], last_out[3], cut_off[3]; static uint64_t last_in_us, cut_us;
+    if (0 && !held && !cut_us && u3_walk_shown_us && now-u3_walk_shown_us<200000 && now-u3_aim_active_us<520000) {
+        /* Until the cut the camera glides to where the walking camera is (one pull-back instead of two: near, cut, then back again). */
+        const float u=(float)(now-u3_aim_active_us)/520000.0f, s=u*u*(3.0f-2.0f*u);
+        for (int i=0;i<3;++i) np[i]+=(u3_walk_shown[i]-np[i])*s;
+    }
+    if (0 && !held && last_in_us && now-last_in_us<100000) {
+        const float cx=p[0]-last_in[0], cy=p[1]-last_in[1], cz=p[2]-last_in[2];
+        if (cx*cx+cy*cy+cz*cz>0.64f) { for (int i=0;i<3;++i) cut_off[i]=last_out[i]-np[i]; cut_us=now; }
+    }
+    if (held) cut_us=0;
+    if (cut_us && now-cut_us<400000) {
+        const float u=(float)(now-cut_us)/400000.0f, s=1.0f-u*u*(3.0f-2.0f*u);
+        for (int i=0;i<3;++i) np[i]+=cut_off[i]*s;
+    }
+    for (int i=0;i<3;++i) { last_in[i]=p[i]; last_out[i]=np[i]; }
+    last_in_us=now;
+    { static int fm=-1; if (fm<0) { const char *e=getenv("BB_U3_FADEMODE"); fm=e ? atoi(e) : 0; }   /* test switch: 1 = only the turn is held (position left to the game), 2 = only the position */
+      if (!held && fm==1) { for (int i=0;i<3;++i) np[i]=p[i]; }
+      if (!held && fm==2) { q[0]=p[4]; q[1]=p[5]; q[2]=p[6]; q[3]=p[7]; } }
     float k=1.0f;
-    if (!held) { const uint64_t age=now-u3_aim_active_us; if (age>1200000) k=(float)(1500000-age)/300000.0f; if (k<0.0f) k=0.0f; }
+    if (!held) { const uint64_t age=now-u3_aim_active_us; if (age>700000) k=(float)(1500000-age)/800000.0f; if (k<0.0f) k=0.0f; k=k*k*(3.0f-2.0f*k); }   /* (smoothstep over 0.8 s: aimed up to 29 degrees, the walking camera cannot look higher than ~16, so the picture has to come down by ~13) */
     if (k<1.0f) {
         float dot=p[4]*q[0]+p[5]*q[1]+p[6]*q[2]+p[7]*q[3];
         const float sg=dot<0.0f ? -1.0f : 1.0f;
         float m[4]={p[4]+(sg*q[0]-p[4])*k, p[5]+(sg*q[1]-p[5])*k, p[6]+(sg*q[2]-p[6])*k, p[7]+(sg*q[3]-p[7])*k};
         const float mn=SDL_sqrtf(m[0]*m[0]+m[1]*m[1]+m[2]*m[2]+m[3]*m[3]);
         if (!(mn>0.5f)) return;
-        for (int i=0;i<3;++i) { const float np=u3_aim_pivot[i]+turned[i]; p[i]+=(np-p[i])*k; p[4+i]=m[i]/mn; }
+        for (int i=0;i<3;++i) { p[i]+=(np[i]-p[i])*k; p[4+i]=m[i]/mn; }
         p[7]=m[3]/mn;
-        return;
+    } else {
+        for (int i=0;i<3;++i) { p[i]=np[i]; p[4+i]=q[i]; }
+        p[7]=q[3];
     }
-    for (int i=0;i<3;++i) { p[i]=u3_aim_pivot[i]+turned[i]; p[4+i]=q[i]; }
-    p[7]=q[3];
+    if (mouse_debug()) {   /* what is finally shown: position, heading and elevation of the pose written */
+        const float fx=2.0f*(p[4]*p[6]+p[7]*p[5]), fy=2.0f*(p[5]*p[6]-p[7]*p[4]), fz=1.0f-2.0f*(p[4]*p[4]+p[5]*p[5]);
+        printf("Mouse: U3 wrote T=%.4f%s k=%.2f pos=%.3f,%.3f,%.3f h=%.2f e=%.2f cut=%d\n",now*1e-6,held ? "" : " FADE",(double)k,(double)p[0],(double)p[1],(double)p[2],(double)(SDL_atan2f(fx,fz)*57.29578f),(double)(SDL_asinf(fy>1.0f ? 1.0f : fy<-1.0f ? -1.0f : fy)*57.29578f),(int)(cut_us!=0));
+    }
 }
 static const unsigned char u3_layer_probe_code[]={0x48,0x81,0xc4,0x48,0x02,0x00,0x00,0x5b,0x41,0x5c,0x41,0x5d,0x41,0x5e,0x41,0x5f};
 static uint64_t u3_exit_stick_us(void) { return 60000u; }
@@ -4585,6 +4623,7 @@ static void __attribute__((ms_abi)) u3_walk_camera(uint64_t out, uint64_t camera
         follow_applied=0.0f; follow_arc_moved=0;
         return;
     }
+    { float ws[3]; if (safe_read(ws,camera+0x7680,12) && ws[0]>-100000.0f && ws[0]<100000.0f && ws[1]>-100000.0f && ws[1]<100000.0f && ws[2]>-100000.0f && ws[2]<100000.0f) { u3_walk_shown[0]=ws[0]; u3_walk_shown[1]=ws[1]; u3_walk_shown[2]=ws[2]; u3_walk_shown_us=now; } }
     if (!aim_held && u3_aim_active_us && now-u3_aim_active_us<1500000 && (u3_aim_total_yaw!=0.0f || u3_aim_total_pitch!=0.0f)) {   /* (every frame of the fade: u3_layer_blend goes on turning the picture, this keeps the walking camera on it) */
         /* The aim was let go: the walking camera, which stood still under the aiming one, is given the turn the mouse made meanwhile (direction, the
          * position shown turned about the pivot with it, and the arc), or the picture went back to where the aim began. */
@@ -4605,7 +4644,7 @@ static void __attribute__((ms_abi)) u3_walk_camera(uint64_t out, uint64_t camera
         last_handoff_us=now;
         u3_aim_keep_yaw=u3_aim_total_yaw; u3_aim_keep_pitch=u3_aim_total_pitch; u3_aim_keep_us=now;
     }
-    if (now<u3_pitch_fix_until_us && !aim_held && !(follow_tilt_us && now-follow_tilt_us<100000)) {
+    if ((now<u3_pitch_fix_until_us || u3_aim_fade_window(now)) && !aim_held &&!(follow_tilt_us && now-follow_tilt_us<100000)) {
         /* The walking camera's tilt is its arc: 0 level, 0.76 about 80 degrees down (105 degrees to the unit, the mouse's own scale for it). It is put
          * on the elevation the aim ended at (it cannot look up) and held there while the game's own return would move it (measured: it went on
          * past it). */
@@ -4617,6 +4656,22 @@ static void __attribute__((ms_abi)) u3_walk_camera(uint64_t out, uint64_t camera
                 const float walk_elev=SDL_asinf(fwd[1]/fl)*57.29578f;
                 const float v=*arcp+0.5f*(walk_elev-u3_aim_last_elev)/105.0f;
                 if (v==v) *arcp=v<0.0f ? 0.0f : v>0.76f ? 0.76f : v;
+                if (u3_aim_fade_window(now)) {
+                    /* The game's spring takes ~1 s to bring the picture's tilt to the arc: at the cut from the aiming camera (~0.5 s after the release) the
+                     * picture jumped by the difference (measured on screen: ~8 degrees, 18% of the height). The position shown is tilted about the pivot
+                     * by half of what is left each frame, as the mouse's own tilt does below, so that the tilt is already the aim's when the cut comes. */
+                    float *pos=(float *)(uintptr_t)(camera+0x7680);
+                    const float *pivot=(const float *)(uintptr_t)(camera+0x78a0);
+                    float px=pos[0]-pivot[0], pz=pos[2]-pivot[2], py=pos[1]-pivot[1];
+                    const float h=SDL_sqrtf(px*px+pz*pz);
+                    float d=0.5f*(walk_elev-u3_aim_last_elev)*0.017453293f;
+                    d=d>0.35f ? 0.35f : d<-0.35f ? -0.35f : d;
+                    if (h>0.1f && d==d) {
+                        const float e=SDL_atan2f(py,h), len=SDL_sqrtf(h*h+py*py), e2=e+d, kk=len*SDL_cosf(e2)/h;
+                        px*=kk; pz*=kk; py=len*SDL_sinf(e2);
+                        if (px>-400.0f && px<400.0f && py>-400.0f && py<400.0f && pz>-400.0f && pz<400.0f) { pos[0]=pivot[0]+px; pos[1]=pivot[1]+py; pos[2]=pivot[2]+pz; }
+                    }
+                }
             }
         }
     }
