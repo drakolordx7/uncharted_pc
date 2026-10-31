@@ -4143,6 +4143,8 @@ static float u3_aim_base_yaw, u3_aim_base_pitch;   /* the turn the aim started w
 static int u3_aim_from_cover, u3_aim_h0_ok;   /* the aim began in cover: its base heading is not the picture's, so the turn is kept absolute (h0 - total) after the fade-in too */
 static float u3_aim_total_yaw, u3_aim_total_pitch;   /* degrees turned by the mouse since the aim began (yaw positive = to the right, pitch positive = down) */
 static uint64_t u3_aim_frame_us, u3_aim_active_us, u3_aim_keep_us;
+static uint64_t u3_roll_press_us;   /* last press of the roll button while aiming: the game drops the aiming layer from the picture ~0.3 s before its camera stops (measured: the displayed heading stayed at the walking camera's while ours swung 20 degrees), so the other layers are turned too from the press on */
+static uint64_t u3_roll_us;   /* last frame of a roll with the aim held that the layer hook carried (the aiming camera does not run in a roll): the aim coming back after it is the same aim, its turn is kept (measured 2026-10-31: it was started again from zero, 240 degrees of mouse turn lost) */
 static float u3_aim_last_elev;      /* the same for the elevation of the look direction (degrees, up positive) */
 static uint64_t u3_pitch_fix_until_us;   /* after the release the walking camera's arc is brought to that elevation until then */
 static float u3_aim_last_heading;   /* the heading the picture had on the last frame of the aim (what the walking camera is put on at the release) */
@@ -4175,7 +4177,8 @@ static void __attribute__((ms_abi)) u3_aim_out(uint64_t rdi,uint64_t rsi, uint64
     const float len2=o[4]*o[4]+o[5]*o[5]+o[6]*o[6]+o[7]*o[7];
     if (!(len2>0.98f && len2<1.02f && o[0]>-100000.0f && o[0]<100000.0f && o[1]>-100000.0f && o[1]<100000.0f && o[2]>-100000.0f && o[2]<100000.0f)) return;
     if (!blending_out) {
-        if (was_out || !u3_aim_active_us || now-u3_aim_active_us>300000) {   /* (every new aim starts from the picture it finds, see u3_layer_blend: the total is not carried over a release) */
+        const int roll_cont=!was_out && u3_roll_us && now-u3_roll_us<300000;
+        if (was_out || !u3_aim_active_us || (now-u3_aim_active_us>300000 && !roll_cont)) {   /* (every new aim starts from the picture it finds, see u3_layer_blend: the total is not carried over a release) */
             u3_aim_total_yaw=u3_aim_total_pitch=0.0f;
             u3_aim_from_cover=0; u3_aim_h0_ok=0; u3_aim_base_yaw=u3_aim_base_pitch=0.0f;
             /* From cover: the aim starts from the cover camera's raw picture (u3_cover_layer stops turning it at the press), the mouse's turn since the
@@ -4398,6 +4401,31 @@ static void u3_cover_exit_layer(uint64_t r14) {
     if (mouse_debug()) printf("Mouse: U3 cover exit blend T=%.4f w=%.2f walk=%.2f ours=%.2f -> %.2f elev walk=%.2f ours=%.2f pos=%.3f,%.3f,%.3f\n",now*1e-6,(double)w,(double)hp,(double)u3_tk_h,(double)th,(double)ef,(double)u3_tk_e,(double)p[0],(double)p[1],(double)p[2]);
     u3_turn_pose(p,pivot,wrap_degrees(hp-th),ef-te);
 }
+/* In a roll the player moves away from the pivot the aiming camera left, and the camera that followed him (the walking camera's layer) is what the picture
+ * is built on: its pose keeps the same place relative to him. The pivot is taken as that place (its offset in the camera's frame, measured on the walking
+ * layer at the first frame after the press, while the aiming camera still runs) and found again from each frame's pose, so the camera turns about the player. */
+static float u3_roll_loc[3];
+static uint64_t u3_roll_loc_key;
+static int u3_roll_pivot(const float *p, int capture, float out[3]) {
+    const uint64_t now=now_us();
+    if (!u3_roll_press_us || now-u3_roll_press_us>=2000000) return 0;
+    if (capture && u3_aim_frame_us && now-u3_aim_frame_us<30000) {   /* (while the aiming camera still runs its pivot is the player's: the last such place of the walking layer is kept; the aiming camera's own instance, 1.2 m away, is not it) */
+        const float conj[4]={-p[4],-p[5],-p[6],p[7]}, off[3]={p[0]-u3_aim_pivot[0],p[1]-u3_aim_pivot[1],p[2]-u3_aim_pivot[2]};
+        float loc[3];
+        quat_rotate(conj,off,loc);
+        const float d2=loc[0]*loc[0]+loc[1]*loc[1]+loc[2]*loc[2];
+        if (d2>4.0f && d2<64.0f) {
+            for (int i=0;i<3;++i) u3_roll_loc[i]=loc[i];
+            if (u3_roll_loc_key!=u3_roll_press_us && mouse_debug()) printf("Mouse: U3 ROLLPIVOT loc=%.3f,%.3f,%.3f\n",(double)loc[0],(double)loc[1],(double)loc[2]);
+            u3_roll_loc_key=u3_roll_press_us;
+        }
+    }
+    if (u3_roll_loc_key!=u3_roll_press_us) return 0;
+    float r[3];
+    quat_rotate(p+4,u3_roll_loc,r);
+    for (int i=0;i<3;++i) out[i]=p[i]-r[i];
+    return 1;
+}
 static void __attribute__((ms_abi)) u3_layer_blend(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14) {
     (void)rdi; (void)rsi; (void)image;
     if (mouse_debug() && r14 && !aim_held && u3_aim_active_us && now_us()-u3_aim_active_us<1500000) printf("Mouse: U3 AIMFADE layer cam=%llx aimcam=%llx covercam=%llx tk_key=%d cover_age_ms=%.0f\n",(unsigned long long)r14,(unsigned long long)u3_probe_aim_cam,(unsigned long long)u3_cover_cam,(int)(u3_tk_key!=0),(double)((now_us()-u3_cover_seen_us)*1e-3));
@@ -4423,6 +4451,24 @@ static void __attribute__((ms_abi)) u3_layer_blend(uint64_t rdi, uint64_t rsi, u
         if (u3_tk_key && u3_tk_key==u3_cover_seen_us && !aim_held && now_us()-u3_cover_seen_us>=60000) { u3_cover_exit_layer(r14); return; }
         if (!aim_held && u3_tk_key!=u3_cover_seen_us && (u3_exit_test()&2) && !(u3_exit_test()&1) && !(u3_aim_active_us && u3_aim_active_us>u3_cover_show_us) && now_us()-u3_cover_seen_us>=100000 && now_us()-u3_cover_seen_us<400000) { u3_cover_hold(r14); return; }
         u3_cover_layer(r14); return;
+    }
+    if (r14 && r14!=u3_probe_aim_cam && aim_held && u3_aim_active_us && u3_aim_h0_ok && ((now_us()-u3_aim_active_us>30000 && now_us()-u3_aim_active_us<2000000) || (u3_roll_press_us && now_us()-u3_roll_press_us<1200000))) {
+        u3_roll_us=now_us();
+        /* A roll with the aim held: the roll's own camera layer is in the stack too (measured 2026-10-31, cam of the roll with w=1): it gets the same absolute picture */
+        const RuntimeGuestRegs *g=(const RuntimeGuestRegs *)(uintptr_t)(guest_callback_rsp-0x60);
+        float *p=(float *)(uintptr_t)g->rax;
+        if ((uintptr_t)p>0x10000) {
+            const float len2=p[4]*p[4]+p[5]*p[5]+p[6]*p[6]+p[7]*p[7];
+            if (len2>0.98f && len2<1.02f && p[0]>-100000.0f && p[0]<100000.0f && p[1]>-100000.0f && p[1]<100000.0f && p[2]>-100000.0f && p[2]<100000.0f) {
+                const float fwd[3]={0.0f,0.0f,1.0f}; float f[3];
+                quat_rotate(p+4,fwd,f);
+                const float hp=SDL_atan2f(f[0],f[2])*57.29578f, ep=SDL_asinf(f[1]>1.0f ? 1.0f : f[1]<-1.0f ? -1.0f : f[1])*57.29578f;
+                float own[3]={p[0],p[1],p[2]};   /* (no pivot known yet: the camera turns on the spot) */
+                u3_roll_pivot(p,1,own);
+                u3_turn_pose(p,own,wrap_degrees(hp-u3_aim_last_heading),ep-u3_aim_last_elev);
+            }
+        }
+        return;
     }
     if (!r14 || r14!=u3_probe_aim_cam) return;
     static int disabled=-1;
@@ -4455,7 +4501,7 @@ static void __attribute__((ms_abi)) u3_layer_blend(uint64_t rdi, uint64_t rsi, u
     /* After the release the aiming camera fades out for a while and the walking camera only runs again ~0.1 s later (measured 2026-10-31: the
      * mouse waited unused meanwhile, the picture stood still, then went on): the same absolute turn goes on through the fade, with the walking
      * camera's sensitivity, and the walking camera is put on it each frame (u3_walk_camera) so the end of the fade shows no jump. */
-    if (disabled || pad_only_mode || !u3_aim_active_us || now-u3_aim_active_us>(held ? 100000 : 1500000)) return;
+    if (disabled || pad_only_mode || !u3_aim_active_us || now-u3_aim_active_us>(held ? 2000000 : 1500000)) return;   /* (held: a roll with the aim held stops the aiming camera for ~0.15 s, this layer goes on and turns the picture meanwhile) */
     { static int nofade=-1; if (nofade<0) { const char *e=getenv("BB_U3_NOFADE"); nofade=e && atoi(e)!=0; } if (nofade && !held) { const RuntimeGuestRegs *g0=(const RuntimeGuestRegs *)(uintptr_t)(guest_callback_rsp-0x60); const float *p0=(const float *)(uintptr_t)g0->rax; if (mouse_debug() && (uintptr_t)p0>=0x10000) printf("Mouse: U3 pose T=%.4f FADE in=%.3f,%.3f,%.3f out=0,0,0 piv=0,0,0\n",now*1e-6,(double)p0[0],(double)p0[1],(double)p0[2]); return; } }   /* (test switch: no hold of the aim picture in the fade) */
     const float w=*(const float *)(uintptr_t)(r14+0x108), t=1.0f-w;
     if (!(t>=0.0f && t<=1.0f)) return;
@@ -4469,6 +4515,13 @@ static void __attribute__((ms_abi)) u3_layer_blend(uint64_t rdi, uint64_t rsi, u
             u3_aim_total_pitch+=(input.mouse_invert_y ? -dy : dy)*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity;
             frame_us=now;
         }
+    } else if (!(u3_aim_frame_us && now-u3_aim_frame_us<25000)) {   /* aim held, the aiming camera is not running (roll): the mouse is taken here, with the aim's sensitivity */
+        float dx, dy;
+        camera_take(2,&dx,&dy);
+        u3_roll_us=now;
+        u3_aim_total_yaw+=dx*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity*input.mouse_aim_sensitivity;
+        u3_aim_total_pitch+=(input.mouse_invert_y ? -dy : dy)*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity*input.mouse_aim_sensitivity;
+        u2_native_us=now;
     }
     const RuntimeGuestRegs *g=(const RuntimeGuestRegs *)(uintptr_t)(guest_callback_rsp-0x60);
     float *p=(float *)(uintptr_t)g->rax;
@@ -4523,7 +4576,11 @@ static void __attribute__((ms_abi)) u3_layer_blend(uint64_t rdi, uint64_t rsi, u
     if (!(n>0.5f)) return;
     for (int i=0;i<4;++i) q[i]/=n;
     const float conj[4]={-p[4],-p[5],-p[6],p[7]};
-    float off[3]={p[0]-u3_aim_pivot[0],p[1]-u3_aim_pivot[1],p[2]-u3_aim_pivot[2]}, local[3], turned[3];
+    /* In a roll the aiming camera does not run: the pivot it left is stale (the player rolls away from it), orbiting it moved the picture sideways with every degree of turn; the camera turns about the pivot that follows the player (u3_roll_pivot), or on the spot when that is not known yet */
+    const int roll_spot=held && u3_aim_frame_us && now-u3_aim_frame_us>=25000;
+    float u3_aim_pivot_use[3]={roll_spot ? p[0] : u3_aim_pivot[0], roll_spot ? p[1] : u3_aim_pivot[1], roll_spot ? p[2] : u3_aim_pivot[2]};
+    if (roll_spot) u3_roll_pivot(p,0,u3_aim_pivot_use);   /* (the pivot that follows the player, when the walking layer has given its place) */
+    float off[3]={p[0]-u3_aim_pivot_use[0],p[1]-u3_aim_pivot_use[1],p[2]-u3_aim_pivot_use[2]}, local[3], turned[3];
     quat_rotate(conj,off,local);
     quat_rotate(q,local,turned);
     if (mouse_debug()) {
@@ -4538,7 +4595,7 @@ static void __attribute__((ms_abi)) u3_layer_blend(uint64_t rdi, uint64_t rsi, u
      * of heading and 2 of tilt, the game's own picture having settled elsewhere). */
     /* The game cuts from the aiming camera (1.2 m from the player) to the walking camera (2.7 m back, 0.5 m lower) in one frame ~0.5 s after the release
      * (measured: the picture jumps up): the position is kept where the last frame had it and let go of over 0.4 s. */
-    float np[3]={u3_aim_pivot[0]+turned[0],u3_aim_pivot[1]+turned[1],u3_aim_pivot[2]+turned[2]};
+    float np[3]={u3_aim_pivot_use[0]+turned[0],u3_aim_pivot_use[1]+turned[1],u3_aim_pivot_use[2]+turned[2]};
     static float last_in[3], last_out[3], cut_off[3]; static uint64_t last_in_us, cut_us;
     if (0 && !held && !cut_us && u3_walk_shown_us && now-u3_walk_shown_us<200000 && now-u3_aim_active_us<520000) {
         /* Until the cut the camera glides to where the walking camera is (one pull-back instead of two: near, cut, then back again). */
@@ -7458,7 +7515,8 @@ static void sample_host(PadData *d) {
     pthread_mutex_lock(&camera_lock);
     const int following=camera_hook_us && now-camera_hook_us<100000;
     const int joypad=sticks_hook_us && now-sticks_hook_us<100000;
-    const int native=u2_native_us && now-u2_native_us<100000; /* U2: the cover / look-around camera turns with the mouse */
+    const int native=(u2_native_us && now-u2_native_us<100000) || /* U2: the cover / look-around camera turns with the mouse */
+                     (aim_held && u3_aim_active_us && now-u3_aim_active_us<400000); /* U3: a roll with the aim held leaves no camera for ~0.15 s: the mouse waits in queue 2, not on the emulated stick */
     /* The animation camera (0x4383d0) takes the mouse while the walking camera is away, when BB_U2_BASE is on. */
     const int base_gap=u2_base_on() && !(u2_follow_seen_us && now-u2_follow_seen_us<U2_FOLLOW_RESYNC_US);
     if (mouse_debug()) { /* does the picture turn while no camera update runs (an animation holds the view)? */
@@ -7744,6 +7802,7 @@ static void sample(PadData *d) {
     d->buttons|=injected.buttons;
     /* L2 aims; L1 (grenade) aims with the same zoom camera, but only once that camera runs (L1 without a grenade does nothing) */
     aim_held=(d->buttons & BTN_L2)!=0 || ((d->buttons & BTN_L1) && zoom_camera_us && now_us()-zoom_camera_us<100000) || (u2_zoom_top_us && now_us()-u2_zoom_top_us<100000);
+    { static int prev_circle; const int c=(d->buttons & BTN_CIRCLE)!=0; if (c && !prev_circle && aim_held) u3_roll_press_us=now_us(); prev_circle=c; }   /* U3: the roll (Circle) pressed while aiming */
     if (mouse_debug()) { static int prev_aim=-1; if (aim_held!=prev_aim) printf("Mouse: aim_held=%d T=%.4f\n",aim_held,now_us()*1e-6); prev_aim=aim_held; }
     if (aim_held) aim_blend_until_us=now_us()+1300000;
     aim_native=aim_held && zoom_camera_us && now_us()-zoom_camera_us<100000 && !(u2_zoom_under_us && now_us()-u2_zoom_under_us<100000) &&
