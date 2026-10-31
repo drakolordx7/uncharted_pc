@@ -118,6 +118,7 @@ typedef struct {
 } RuntimeGuestCallback;
 /* 1 once a callback of the U3 image has been installed (the menus' markup differs from U2's: see runtime_pad.c) */
 extern volatile int runtime_u3_game;
+uint64_t runtime_image_base(void);   /* (diagnostic) where the guest image sits, to turn a vtable slot into an image offset */
 const RuntimeGuestCallback *runtime_guest_callbacks(size_t *count);
 /* Called for each entry of runtime_guest_callbacks() that was installed. */
 void runtime_guest_callback_installed(const RuntimeGuestCallback *callback);

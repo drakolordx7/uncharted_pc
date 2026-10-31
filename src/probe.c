@@ -804,6 +804,7 @@ static unsigned char *near_image_memory(size_t size) {
 }
 volatile uint64_t guest_callback_rsp;   /* the guest's rsp when a callback was entered (read by the callback) */
 volatile int runtime_u3_game;           /* 1 once a U3 callback was installed: the U3 menus mark their selected row differently */
+uint64_t runtime_image_base(void) { return (uint64_t)(uintptr_t)image; }
 static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t image_size) {
     size_t count=0;
     const RuntimeGuestCallback *callbacks=runtime_guest_callbacks(&count);

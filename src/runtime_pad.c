@@ -4345,6 +4345,44 @@ static int u3_turn_pose(float *p, const float *pivot, float yaw, float pitch) {
     p[7]=q[3];
     return 1;
 }
+/* U3 V view (look-around, R3 / d-pad up). Its camera is a class of its own (vtable image+0x1671c30; its update 0x4f1370 only runs at the start, the
+ * pose is then kept by the layer stack), so the mouse turns the final pose at the layer hook, like the cover: the total turn since V began is applied to
+ * the pose the game gives each frame (yaw about the world up, pitch about the pose's side), about the pose's own position (the view stays at the head).
+ * The mouse is taken natively (queue 2, fed while R3 is held and for ~1.3 s after), so it no longer goes through the emulated stick. */
+static float u3_walk_pivot_last[3]; static int u3_walk_pivot_ok;   /* its pivot (+0x78a0) as of its last update: the player's, the V view turns about it */
+static void u3_look_layer(uint64_t r14, uint64_t image) {
+    static int disabled=-1;
+    if (disabled<0) { const char *e=getenv("BB_U3_NATIVE"); disabled=e && atoi(e)==0; }
+    if (disabled || pad_only_mode) return;
+    const uint64_t now=now_us();
+    static U2Turn turn; static uint64_t last_us, frame_us; static float total_yaw, total_pitch;
+    const float w=*(const float *)(uintptr_t)(r14+0x108);
+    if (!(w>0.0005f && w<=1.0001f)) return;
+    const RuntimeGuestRegs *g=(const RuntimeGuestRegs *)(uintptr_t)(guest_callback_rsp-0x60);
+    float *p=(float *)(uintptr_t)g->rax;
+    if ((uintptr_t)p<0x10000) return;
+    const float len2=p[4]*p[4]+p[5]*p[5]+p[6]*p[6]+p[7]*p[7];
+    if (!(len2>0.98f && len2<1.02f && p[0]>-100000.0f && p[0]<100000.0f && p[1]>-100000.0f && p[1]<100000.0f && p[2]>-100000.0f && p[2]<100000.0f)) return;
+    if (now-last_us>300000) { total_yaw=total_pitch=0.0f; turn.pending_yaw=turn.pending_pitch=0.0f; frame_us=0; }   /* a new V: the turn starts again */
+    last_us=now;
+    u2_native_us=now;
+    if (!(frame_us && now-frame_us<1500)) {   /* (the layer can be called twice in one frame: the mouse is taken once) */
+        float step, step_pitch;
+        if (u2_mouse_turn(&turn,2,r14,u2_frame_dt(image),input.mouse_aim_sensitivity,-1.0f,&step,&step_pitch)) {
+            total_yaw+=step; total_pitch+=step_pitch;
+            total_pitch=total_pitch<-75.0f ? -75.0f : total_pitch>75.0f ? 75.0f : total_pitch;
+        }
+        frame_us=now;
+    }
+    /* The view goes round the player (it stays behind his back), about the walking camera's pivot; without a sane one, about its own position */
+    float pivot[3]={p[0],p[1],p[2]};
+    if (u3_walk_pivot_ok) {
+        const float dx=u3_walk_pivot_last[0]-p[0], dy=u3_walk_pivot_last[1]-p[1], dz=u3_walk_pivot_last[2]-p[2], d2=dx*dx+dy*dy+dz*dz;
+        if (d2>0.01f && d2<100.0f) { pivot[0]=u3_walk_pivot_last[0]; pivot[1]=u3_walk_pivot_last[1]; pivot[2]=u3_walk_pivot_last[2]; }
+    }
+    if (mouse_debug()) { static unsigned n; if ((n++&15)==0) printf("Mouse: U3 V view turn yaw=%.2f pitch=%.2f w=%.3f pivot=(%.2f %.2f %.2f)\n",(double)total_yaw,(double)total_pitch,(double)w,(double)pivot[0],(double)pivot[1],(double)pivot[2]); }
+    u3_turn_pose(p,pivot,total_yaw,total_pitch);
+}
 static void u3_cover_layer(uint64_t r14) {
     static int disabled=-1;
     if (disabled<0) { const char *e=getenv("BB_U3_NATIVE"); disabled=e && atoi(e)==0; }
@@ -4502,7 +4540,11 @@ static int u3_roll_pivot(const float *p, int capture, float out[3]) {
     return 1;
 }
 static void __attribute__((ms_abi)) u3_layer_blend(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14) {
-    (void)rdi; (void)rsi; (void)image;
+    (void)rdi; (void)rsi;
+    if (r14 && !aim_held && (look_held || now_us()<look_blend_until_us)) {
+        uint64_t vt=0;
+        if (safe_read(&vt,r14,8) && vt==runtime_image_base()+0x1671c30) { u3_look_layer(r14,image); return; }
+    }
     if (mouse_debug() && r14 && aim_held && u3_swap_press_us && now_us()-u3_swap_press_us<2500000) {   /* (trace: every layer around a shoulder switch, with the heading of the blend so far, and the heading RENDERED once per aim layer) */
         const RuntimeGuestRegs *tg=(const RuntimeGuestRegs *)(uintptr_t)(guest_callback_rsp-0x60);
         const float *tp=(const float *)(uintptr_t)tg->rax; float tw=0.0f, tf[3]; const float tfwd[3]={0.0f,0.0f,1.0f};
@@ -4763,7 +4805,9 @@ static void __attribute__((ms_abi)) u3_walk_camera(uint64_t out, uint64_t camera
     (void)image; (void)r14;
     static int disabled=-1;
     if (disabled<0) { const char *e=getenv("BB_U3_NATIVE"); disabled=e && atoi(e)==0; }
-    if (disabled || pad_only_mode || camera<0x10000 || (out&0xfffu)!=0x1f0u) return;
+    if (disabled || pad_only_mode || camera<0x10000) return;
+    if ((out&0xfffu)!=0x1f0u) return;
+    { float pv[3]; if (safe_read(pv,camera+0x78a0,12) && (pv[0]!=0.0f || pv[1]!=0.0f || pv[2]!=0.0f) && pv[0]>-100000.0f && pv[0]<100000.0f && pv[1]>-100000.0f && pv[1]<100000.0f && pv[2]>-100000.0f && pv[2]<100000.0f) { u3_walk_pivot_last[0]=pv[0]; u3_walk_pivot_last[1]=pv[1]; u3_walk_pivot_last[2]=pv[2]; u3_walk_pivot_ok=1; } }   /* (the V view replaces the walking camera and its object is zeroed: its last pivot is kept) */
     const uint64_t now=now_us();
     {   /* BB_U3_WALKPROBE=<file>: 0x300 bytes of the walking camera at +0x7600 on every update (time, camera, under-cover flag, bytes), to find the spring's speed field */
         static FILE *wf; static int winit; static unsigned wn;
@@ -4791,6 +4835,7 @@ static void __attribute__((ms_abi)) u3_walk_camera(uint64_t out, uint64_t camera
     const float len2=dir[0]*dir[0]+dir[2]*dir[2];
     if (!(len2>0.8f && len2<1.2f && dir[1]>-0.1f && dir[1]<0.1f && arc>-3.0f && arc<3.0f)) {
         float ix, iy;
+        if (mouse_debug()) { static uint64_t vt_us; if (now-vt_us>250000) { vt_us=now; printf("Mouse: U3 walk camera %llx implausible dir=(%.3f %.3f %.3f) arc=%.3f\n",(unsigned long long)camera,(double)dir[0],(double)dir[1],(double)dir[2],(double)arc); } }
         camera_take(0,&ix,&iy);
         follow_applied=0.0f; follow_arc_moved=0;
         return;
