@@ -4143,6 +4143,9 @@ static float u3_aim_base_yaw, u3_aim_base_pitch;   /* the turn the aim started w
 static int u3_aim_from_cover, u3_aim_h0_ok;   /* the aim began in cover: its base heading is not the picture's, so the turn is kept absolute (h0 - total) after the fade-in too */
 static float u3_aim_total_yaw, u3_aim_total_pitch;   /* degrees turned by the mouse since the aim began (yaw positive = to the right, pitch positive = down) */
 static uint64_t u3_aim_frame_us, u3_aim_active_us, u3_aim_keep_us;
+static uint64_t u3_swap_press_us;   /* last press of the shoulder switch (L3) while aiming: the camera of the other shoulder fades in over the aiming layer (~0.5 s) and, not being the aiming camera, was left unturned: the picture swung to its raw heading */
+static uint64_t u3_layer_us;   /* when u3_layer_heading was written: not written at all with the pad alone (pad_only_mode), where the game's own heading is right and nothing is turned */
+static float u3_layer_heading, u3_layer_elev;   /* the heading / elevation the aiming layer of u3_layer_blend gave the picture on its last frame (u3_aim_last_* is also written by u3_aim_out, from the raw output of either shoulder's camera, and alternated with it: 37 / -43 degrees measured) */
 static uint64_t u3_roll_press_us;   /* last press of the roll button while aiming: the game drops the aiming layer from the picture ~0.3 s before its camera stops (measured: the displayed heading stayed at the walking camera's while ours swung 20 degrees), so the other layers are turned too from the press on */
 static uint64_t u3_roll_us;   /* last frame of a roll with the aim held that the layer hook carried (the aiming camera does not run in a roll): the aim coming back after it is the same aim, its turn is kept (measured 2026-10-31: it was started again from zero, 240 degrees of mouse turn lost) */
 static float u3_aim_last_elev;      /* the same for the elevation of the look direction (degrees, up positive) */
@@ -4155,6 +4158,51 @@ static void quat_rotate(const float *q, const float *v, float *r) {   /* q v q^-
     r[0]=v[0]+2.0f*(q[3]*cx+q[1]*cz-q[2]*cy);
     r[1]=v[1]+2.0f*(q[3]*cy+q[2]*cx-q[0]*cz);
     r[2]=v[2]+2.0f*(q[3]*cz+q[0]*cy-q[1]*cx);
+}
+/* The shoulder offset of each aiming camera instance (one per shoulder). The rig is pivot + R(q) * s with s = (-0.4, 0.475, -1) for one shoulder only: the other
+ * instance (and every switch) put the pivot, worked out with that fixed s, up to ~1 m off (measured 2026-10-31: the position jumped 0.6-1.1 m in height at each L3,
+ * none without our camera). The player does not move at a switch: the pivot of the frame before the press is kept for 0.7 s and each instance's s is worked out so
+ * that it falls on it. */
+static const float *u3_shoulder_for(uint64_t cam, const float *o, uint64_t now) {
+    static struct { uint64_t cam, us; float s[3]; } slot[2];
+    static float hold[3]; static uint64_t hold_key;
+    const float def[3]={-0.4f,0.475f,-1.0f};
+    int k=-1;
+    for (int i=0;i<2;++i) if (slot[i].cam==cam) k=i;
+    if (k<0) { k=slot[0].us<=slot[1].us ? 0 : 1; slot[k].cam=cam; for (int i=0;i<3;++i) slot[k].s[i]=def[i]; }
+    slot[k].us=now;
+    if (u3_swap_press_us && now-u3_swap_press_us<700000) {
+        if (hold_key!=u3_swap_press_us) { hold_key=u3_swap_press_us; for (int i=0;i<3;++i) hold[i]=u3_aim_pivot[i]; }
+        const float conj[4]={-o[4],-o[5],-o[6],o[7]}, d[3]={o[0]-hold[0],o[1]-hold[1],o[2]-hold[2]};
+        float s[3];
+        quat_rotate(conj,d,s);
+        if (s[0]>-2.0f && s[0]<2.0f && s[1]>-2.0f && s[1]<2.0f && s[2]>-3.0f && s[2]<0.0f) {
+            for (int i=0;i<3;++i) slot[k].s[i]=s[i];
+            if (mouse_debug()) printf("Mouse: U3 SHOULDER T=%.4f cam=%llx s=%.3f,%.3f,%.3f swap_ms=%.0f\n",now*1e-6,(unsigned long long)cam,(double)s[0],(double)s[1],(double)s[2],(double)((now-u3_swap_press_us)*1e-3));
+        }
+    }
+    return slot[k].s;
+}
+/* A shoulder switch restarts the aiming camera from the pose we left in its output (turned by the whole mouse turn): its raw pose then already has the turn and our total
+ * counted it twice (measured 2026-10-31: the raw elevation fell from 59.6 to 23.6 at the press, the total was clamped to raw - 80 = -20.4, so one way up/down stayed blocked and the
+ * picture jumped). The first raw jump of an instance in the 0.3 s after the press that lands near the picture shown is taken as the new start: total 0, base = that pose. */
+static uint64_t u3_rebase_key; static int u3_rebase_pending; static float u3_rebase_h, u3_rebase_e;
+static int u3_raw_jump(uint64_t cam, const float *o) {
+    static struct { uint64_t cam, us; float p[3], q[4]; } slot[2];
+    const uint64_t now=now_us();
+    int k=-1;
+    for (int i=0;i<2;++i) if (slot[i].cam==cam) k=i;
+    if (k<0) { k=slot[0].us<=slot[1].us ? 0 : 1; slot[k].cam=cam; slot[k].us=0; }
+    int jump=0;
+    if (slot[k].us && now-slot[k].us<100000) {
+        const float dx=o[0]-slot[k].p[0], dy=o[1]-slot[k].p[1], dz=o[2]-slot[k].p[2];
+        const float d=slot[k].q[0]*o[4]+slot[k].q[1]*o[5]+slot[k].q[2]*o[6]+slot[k].q[3]*o[7];
+        jump=(dx*dx+dy*dy+dz*dz>0.0225f) || (SDL_fabsf(d)<0.996f);
+    }
+    slot[k].us=now;
+    for (int i=0;i<3;++i) slot[k].p[i]=o[i];
+    for (int i=0;i<4;++i) slot[k].q[i]=o[4+i];
+    return jump;
 }
 static void __attribute__((ms_abi)) u3_aim_out(uint64_t rdi,uint64_t rsi, uint64_t image, uint64_t r14) {
     (void)rdi; (void)rsi; (void)image; (void)r14;
@@ -4198,10 +4246,25 @@ static void __attribute__((ms_abi)) u3_aim_out(uint64_t rdi,uint64_t rsi, uint64
         u3_aim_total_pitch+=(input.mouse_invert_y ? -dy : dy)*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity*input.mouse_aim_sensitivity;
         u3_aim_frame_us=now;
     }
-    const float look[3]={0.0f,0.0f,1.0f}, shoulder[3]={-0.4f,0.475f,-1.0f};
+    const float look[3]={0.0f,0.0f,1.0f};
+    const float *shoulder=u3_shoulder_for(r14,o,now);
     float f[3];
     quat_rotate(o+4,look,f);
     const float elevation=SDL_asinf(f[1]>1.0f ? 1.0f : f[1]<-1.0f ? -1.0f : f[1])*57.29578f;   /* up positive; looking down by the pitch lowers it */
+    {
+        const int jumped=u3_raw_jump(r14,o);
+        if (!blending_out && jumped && u3_swap_press_us && now-u3_swap_press_us<300000 && u3_rebase_key!=u3_swap_press_us && u3_layer_us && now-u3_layer_us<200000) {
+            const float rawh=SDL_atan2f(f[0],f[2])*57.29578f;
+            const float dh=wrap_degrees(rawh-u3_layer_heading), de=elevation-u3_layer_elev;
+            if (mouse_debug()) printf("Mouse: U3 REBASE? T=%.4f raw=%.2f,%.2f shown=%.2f,%.2f total=%.2f,%.2f\n",now*1e-6,(double)rawh,(double)elevation,(double)u3_layer_heading,(double)u3_layer_elev,(double)u3_aim_total_yaw,(double)u3_aim_total_pitch);
+            if (SDL_fabsf(dh)<25.0f && SDL_fabsf(de)<8.0f) {
+                u3_rebase_key=u3_swap_press_us;
+                u3_aim_total_yaw=u3_aim_total_pitch=0.0f; u3_aim_from_cover=0; u3_aim_base_yaw=u3_aim_base_pitch=0.0f;
+                u3_rebase_h=rawh; u3_rebase_e=elevation; u3_rebase_pending=1;
+                if (mouse_debug()) printf("Mouse: U3 REBASE done\n");
+            }
+        }
+    }
     float *total_yaw=blending_out ? &u3_aim_keep_yaw : &u3_aim_total_yaw, *total_pitch=blending_out ? &u3_aim_keep_pitch : &u3_aim_total_pitch;
     if (elevation-*total_pitch>80.0f) *total_pitch=elevation-80.0f;
     if (elevation-*total_pitch<-80.0f) *total_pitch=elevation+80.0f;
@@ -4428,6 +4491,16 @@ static int u3_roll_pivot(const float *p, int capture, float out[3]) {
 }
 static void __attribute__((ms_abi)) u3_layer_blend(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14) {
     (void)rdi; (void)rsi; (void)image;
+    if (mouse_debug() && r14 && aim_held && u3_swap_press_us && now_us()-u3_swap_press_us<2500000) {   /* (trace: every layer around a shoulder switch, with the heading of the blend so far, and the heading RENDERED once per aim layer) */
+        const RuntimeGuestRegs *tg=(const RuntimeGuestRegs *)(uintptr_t)(guest_callback_rsp-0x60);
+        const float *tp=(const float *)(uintptr_t)tg->rax; float tw=0.0f, tf[3]; const float tfwd[3]={0.0f,0.0f,1.0f};
+        if ((uintptr_t)tp>0x10000 && safe_read(&tw,r14+0x108,4)) {
+            quat_rotate(tp+4,tfwd,tf);
+            printf("Mouse: U3 SWLAYER T=%.4f swap_ms=%.0f cam=%llx%s w=%.3f blend_h=%.2f blend_e=%.2f pos=%.3f,%.3f,%.3f\n",now_us()*1e-6,(double)((now_us()-u3_swap_press_us)*1e-3),(unsigned long long)r14,r14==u3_probe_aim_cam ? "(aim)" : "",(double)tw,(double)(SDL_atan2f(tf[0],tf[2])*57.29578f),(double)(SDL_asinf(tf[1]>1.0f ? 1.0f : tf[1]<-1.0f ? -1.0f : tf[1])*57.29578f),(double)tp[0],(double)tp[1],(double)tp[2]);
+        }
+        float ry=0.0f; double ra=0.0;
+        if (r14==u3_probe_aim_cam && bbgpu_camera_yaw(&ry,&ra)) printf("Mouse: U3 REND T=%.4f shown=%.2f age=%.3f\n",now_us()*1e-6,(double)ry,ra);
+    }
     if (mouse_debug() && r14 && !aim_held && u3_aim_active_us && now_us()-u3_aim_active_us<1500000) printf("Mouse: U3 AIMFADE layer cam=%llx aimcam=%llx covercam=%llx tk_key=%d cover_age_ms=%.0f\n",(unsigned long long)r14,(unsigned long long)u3_probe_aim_cam,(unsigned long long)u3_cover_cam,(int)(u3_tk_key!=0),(double)((now_us()-u3_cover_seen_us)*1e-3));
     if (mouse_debug() && r14 && !aim_held && u3_cover_seen_us && now_us()-u3_cover_seen_us<1500000) {   /* (trace: every layer of the stack after the cover, with its weight and the heading of the blend so far) */
         const RuntimeGuestRegs *g=(const RuntimeGuestRegs *)(uintptr_t)(guest_callback_rsp-0x60);
@@ -4452,8 +4525,10 @@ static void __attribute__((ms_abi)) u3_layer_blend(uint64_t rdi, uint64_t rsi, u
         if (!aim_held && u3_tk_key!=u3_cover_seen_us && (u3_exit_test()&2) && !(u3_exit_test()&1) && !(u3_aim_active_us && u3_aim_active_us>u3_cover_show_us) && now_us()-u3_cover_seen_us>=100000 && now_us()-u3_cover_seen_us<400000) { u3_cover_hold(r14); return; }
         u3_cover_layer(r14); return;
     }
-    if (r14 && r14!=u3_probe_aim_cam && aim_held && u3_aim_active_us && u3_aim_h0_ok && ((now_us()-u3_aim_active_us>30000 && now_us()-u3_aim_active_us<2000000) || (u3_roll_press_us && now_us()-u3_roll_press_us<1200000))) {
-        u3_roll_us=now_us();
+    if (r14 && r14!=u3_probe_aim_cam && aim_held && u3_aim_active_us && u3_aim_h0_ok && ((now_us()-u3_aim_active_us>30000 && now_us()-u3_aim_active_us<2000000) || (u3_roll_press_us && now_us()-u3_roll_press_us<1200000) || (u3_swap_press_us && now_us()-u3_swap_press_us<1500000))) {
+        const int swap_only=u3_swap_press_us && now_us()-u3_swap_press_us<1500000 && !(u3_roll_press_us && now_us()-u3_roll_press_us<2000000);
+        if (swap_only && !(u3_layer_us && now_us()-u3_layer_us<200000)) return;
+        if (!swap_only) u3_roll_us=now_us();
         /* A roll with the aim held: the roll's own camera layer is in the stack too (measured 2026-10-31, cam of the roll with w=1): it gets the same absolute picture */
         const RuntimeGuestRegs *g=(const RuntimeGuestRegs *)(uintptr_t)(guest_callback_rsp-0x60);
         float *p=(float *)(uintptr_t)g->rax;
@@ -4464,8 +4539,12 @@ static void __attribute__((ms_abi)) u3_layer_blend(uint64_t rdi, uint64_t rsi, u
                 quat_rotate(p+4,fwd,f);
                 const float hp=SDL_atan2f(f[0],f[2])*57.29578f, ep=SDL_asinf(f[1]>1.0f ? 1.0f : f[1]<-1.0f ? -1.0f : f[1])*57.29578f;
                 float own[3]={p[0],p[1],p[2]};   /* (no pivot known yet: the camera turns on the spot) */
-                u3_roll_pivot(p,1,own);
-                u3_turn_pose(p,own,wrap_degrees(hp-u3_aim_last_heading),ep-u3_aim_last_elev);
+                if (swap_only) { for (int i=0;i<3;++i) own[i]=u3_aim_pivot[i]; }   /* (the shoulder switch: the player stays where he is, the camera turns about him) */
+                else u3_roll_pivot(p,1,own);
+                if (mouse_debug() && swap_only) printf("Mouse: U3 SWAPTURN T=%.4f cam=%llx aimcam=%llx w=%.3f hp=%.2f -> %.2f swap_ms=%.0f total=%.2f h0=%.2f\n",now_us()*1e-6,(unsigned long long)r14,(unsigned long long)u3_probe_aim_cam,(double)*(const float *)(uintptr_t)(r14+0x108),(double)hp,(double)u3_layer_heading,(double)((now_us()-u3_swap_press_us)*1e-3),(double)u3_aim_total_yaw,(double)u3_aim_h0);
+                if (swap_only) u3_turn_pose(p,own,wrap_degrees(hp-u3_layer_heading),ep-u3_layer_elev);
+                else u3_turn_pose(p,own,wrap_degrees(hp-u3_aim_last_heading),ep-u3_aim_last_elev);
+                if (mouse_debug() && swap_only) printf("Mouse: U3 SWFIN T=%.4f cam=%llx w=%.3f fin_pos=%.3f,%.3f,%.3f own=%.3f,%.3f,%.3f\n",now_us()*1e-6,(unsigned long long)r14,(double)*(const float *)(uintptr_t)(r14+0x108),(double)p[0],(double)p[1],(double)p[2],(double)own[0],(double)own[1],(double)own[2]);
             }
         }
         return;
@@ -4547,6 +4626,7 @@ static void __attribute__((ms_abi)) u3_layer_blend(uint64_t rdi, uint64_t rsi, u
             u3_aim_base_yaw=u3_aim_total_yaw; u3_aim_base_pitch=u3_aim_total_pitch;
         }
     }   /* a new aim (L2 pressed again, also during the previous one's fade, whose frames are continuous; the turn total starts again from 0 with it): the picture it starts from (the walking camera's, w is ~0) */
+    if (u3_rebase_pending) { u3_rebase_pending=0; h0=u3_rebase_h; e0=u3_rebase_e; }   /* (the shoulder switch restarted the camera from our turned pose, see u3_raw_jump) */
     prev_held=held;
     /* The game's own cut (aiming camera -> walking camera, ~0.5 s after the release) moves the position 3 m and turns the picture with it (measured:
      * the framing stays); the held picture goes through the same change in heading and tilt, mouse turn included, so that nothing shows. */
@@ -4567,6 +4647,7 @@ static void __attribute__((ms_abi)) u3_layer_blend(uint64_t rdi, uint64_t rsi, u
     const float ramp=(held && u3_aim_from_cover) ? w : 1.0f;
     const float hd=wrap_degrees(h0-(u3_aim_base_yaw+(u3_aim_total_yaw-u3_aim_base_yaw)*ramp)), ed=e0-(u3_aim_base_pitch+(u3_aim_total_pitch-u3_aim_base_pitch)*ramp);
     u3_aim_last_heading=hd; u3_aim_last_elev=ed;   /* what the release hands to the walking camera */
+    u3_layer_heading=hd; u3_layer_elev=ed; u3_layer_us=now;
     const float ya=-wrap_degrees(hf-hd)*0.017453293f*0.5f, pa=(ef-ed)*0.017453293f*0.5f;
     const float qyaw[4]={0.0f,SDL_sinf(ya),0.0f,SDL_cosf(ya)}, qpitch[4]={SDL_sinf(pa),0.0f,0.0f,SDL_cosf(pa)};
     float tq[4], q[4];
@@ -7803,6 +7884,7 @@ static void sample(PadData *d) {
     /* L2 aims; L1 (grenade) aims with the same zoom camera, but only once that camera runs (L1 without a grenade does nothing) */
     aim_held=(d->buttons & BTN_L2)!=0 || ((d->buttons & BTN_L1) && zoom_camera_us && now_us()-zoom_camera_us<100000) || (u2_zoom_top_us && now_us()-u2_zoom_top_us<100000);
     { static int prev_circle; const int c=(d->buttons & BTN_CIRCLE)!=0; if (c && !prev_circle && aim_held) u3_roll_press_us=now_us(); prev_circle=c; }   /* U3: the roll (Circle) pressed while aiming */
+    { static int prev_l3; const int c=(d->buttons & BTN_L3)!=0; if (c && !prev_l3 && aim_held) u3_swap_press_us=now_us(); prev_l3=c; }   /* U3: the shoulder switch (L3) pressed while aiming */
     if (mouse_debug()) { static int prev_aim=-1; if (aim_held!=prev_aim) printf("Mouse: aim_held=%d T=%.4f\n",aim_held,now_us()*1e-6); prev_aim=aim_held; }
     if (aim_held) aim_blend_until_us=now_us()+1300000;
     aim_native=aim_held && zoom_camera_us && now_us()-zoom_camera_us<100000 && !(u2_zoom_under_us && now_us()-u2_zoom_under_us<100000) &&
