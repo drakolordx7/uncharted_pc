@@ -363,6 +363,7 @@ static float follow_before, follow_after; /* heading before and after the last t
 static int follow_pending;
 static volatile uint64_t aim_blend_until_us; /* the aim is blended out for about a second after L2 is released: the zoom camera keeps the mouse until then */
 static uint64_t u3_aim_active_us;   /* (U3: the last aim frame; defined again with the other U3 aim state) */
+static uint64_t u3_anim_snap_us; static float u3_anim_arc_delta;  /* U3: the climb-class layer (image+0x1671390) holds the picture: its yaw is turned there, its pitch is the walking camera's arc (+0x7874), moved by this much at the walking update */
 static float u3_walk_shown[3]; static uint64_t u3_walk_shown_us;   /* U3: the position the walking camera shows (+0x7680), as of its last update */
 static int u3_aim_fade_window(uint64_t now) { return u3_aim_active_us && now-u3_aim_active_us<1500000; }   /* U3: the layer hook (u3_layer_blend) goes on taking queue 2 for 1.5 s after the aim, longer than aim_blend_until_us (1.3 s): measured, in the last 0.2 s it had no mouse and held the picture still */
 static volatile int aim_native;   /* aim_held and the zoom (aiming) camera runs: L2 held during a roll aims nothing yet, and the mouse must keep turning the free view then */
@@ -4297,10 +4298,16 @@ static void __attribute__((ms_abi)) u3_aim_out(uint64_t rdi,uint64_t rsi, uint64
     (void)base_at_release;
     float yaw_use=*total_yaw;
     float pitch_use=*total_pitch;
+    if (mouse_debug() && !blending_out) { static uint64_t pu; if (was_out || now-pu>500000) { pu=now; printf("Mouse: U3 AIMOUT T=%.4f cam_e=%.2f total_pitch=%.2f e0=%.2f ok=%d from_cover=%d\n",now*1e-6,(double)elevation,(double)*total_pitch,(double)u3_aim_e0,u3_aim_h0_ok,u3_aim_from_cover); } }
     if (!blending_out && u3_aim_from_cover && u3_aim_h0_ok) {   /* absolute, as u3_layer_blend did during the fade-in: heading = h0 - total */
         if (u3_aim_e0-*total_pitch>80.0f) *total_pitch=u3_aim_e0-80.0f;
         if (u3_aim_e0-*total_pitch<-80.0f) *total_pitch=u3_aim_e0+80.0f;
         yaw_use=wrap_degrees(base_heading-(u3_aim_h0-*total_yaw));
+        pitch_use=elevation-(u3_aim_e0-*total_pitch);
+    }
+    else if (!blending_out && u3_aim_h0_ok) {   /* the aiming camera's own start height is not the picture's (measured: 61 degrees against 12 after a vertical mouse move, the 2nd press jumped): the height is absolute too */
+        if (u3_aim_e0-*total_pitch>80.0f) *total_pitch=u3_aim_e0-80.0f;
+        if (u3_aim_e0-*total_pitch<-80.0f) *total_pitch=u3_aim_e0+80.0f;
         pitch_use=elevation-(u3_aim_e0-*total_pitch);
     }
     if (blending_out) yaw_use=wrap_degrees(base_heading-u3_aim_last_heading);   /* the picture keeps the heading it had at the release, whatever the base has followed */
@@ -4553,7 +4560,7 @@ static void u3_anim_pivot(const float *p, float *pivot) {   /* round the player 
     const float dx=u3_walk_pivot_last[0]-p[0], dy=u3_walk_pivot_last[1]-p[1], dz=u3_walk_pivot_last[2]-p[2], d2=dx*dx+dy*dy+dz*dz;
     if (d2>0.01f && d2<100.0f) { pivot[0]=u3_walk_pivot_last[0]; pivot[1]=u3_walk_pivot_last[1]; pivot[2]=u3_walk_pivot_last[2]; }
 }
-#define U3_SCRIPT_YAW_MAX 45.0f     /* degrees each side of the scripted camera's own heading */
+#define U3_SCRIPT_YAW_MAX 45.0f    /* degrees each side of the scripted camera's own heading */
 #define U3_SCRIPT_PITCH_MAX 30.0f
 static void u3_script_layer(uint64_t r14, uint64_t image, int anim) {   /* anim: the ledge / climb camera (image+0x1671390), which the walking camera's update must not feed meanwhile */
     static int disabled=-1;
@@ -4576,10 +4583,11 @@ static void u3_script_layer(uint64_t r14, uint64_t image, int anim) {   /* anim:
     if (!(frame_us && now-frame_us<1500)) {
         float step, step_pitch;
         if (u2_mouse_turn(&turn,0,r14,u2_frame_dt(image),1.0f,0.0f,&step,&step_pitch)) {
-            total_yaw+=step; total_pitch+=step_pitch;
+            total_yaw+=step;
+            if (anim) u3_anim_arc_delta+=step_pitch/115.0f;   /* (this class gets its pitch from the game: the walking camera's arc, whose stops, distances and pivot are the pad's; measured 2026-11-01: ~115 degrees of view elevation per unit; turning the pose here put the camera into the floor and into the player) */
+            else total_pitch+=step_pitch;
             /* the game's own stick turned this camera over about +-35 degrees (measured: the heading stayed within -20..-68 while following Sully): no full turn */
             if (anim) {   /* the ledge / climb camera orbits the player with the stick, as the walking camera does: no limit on the heading */
-                total_pitch=total_pitch<-75.0f ? -75.0f : total_pitch>75.0f ? 75.0f : total_pitch;
             } else {
                 total_yaw=total_yaw<-U3_SCRIPT_YAW_MAX ? -U3_SCRIPT_YAW_MAX : total_yaw>U3_SCRIPT_YAW_MAX ? U3_SCRIPT_YAW_MAX : total_yaw;
                 total_pitch=total_pitch<-U3_SCRIPT_PITCH_MAX ? -U3_SCRIPT_PITCH_MAX : total_pitch>U3_SCRIPT_PITCH_MAX ? U3_SCRIPT_PITCH_MAX : total_pitch;
@@ -4592,8 +4600,10 @@ static void u3_script_layer(uint64_t r14, uint64_t image, int anim) {   /* anim:
         if ((n++%3)==0) {
             const float fwd[3]={0.0f,0.0f,1.0f}; float f0[3]; quat_rotate(p+4,fwd,f0);
             float ry=0.0f; double ra=0.0; const int have=bbgpu_camera_yaw(&ry,&ra);
-            printf("Mouse: U3 CLIMB w=%.2f total=%.2f/%.2f raw_h=%.2f rendered=%.2f%s age=%.3f native_ms=%.0f t=%.4f\n",(double)w,(double)total_yaw,(double)total_pitch,
-                   (double)(SDL_atan2f(f0[0],f0[2])*57.29578f),(double)ry,have ? "" : "?",ra,u2_native_us ? (now-u2_native_us)*1e-3 : -1.0,now*1e-6);
+            float pv[3]={p[0],p[1],p[2]}; u3_anim_pivot(p,pv);
+            printf("Mouse: U3 CLIMB w=%.2f total=%.2f/%.2f rel_y=%.3f dist=%.3f pos_y=%.3f raw_e=%.2f raw_h=%.2f rendered=%.2f%s age=%.3f native_ms=%.0f t=%.4f\n",(double)w,(double)total_yaw,(double)total_pitch,
+                   (double)(p[1]-pv[1]),(double)SDL_sqrtf((p[0]-pv[0])*(p[0]-pv[0])+(p[1]-pv[1])*(p[1]-pv[1])+(p[2]-pv[2])*(p[2]-pv[2])),(double)p[1],
+                   (double)(SDL_asinf(f0[1])*57.29578f),(double)(SDL_atan2f(f0[0],f0[2])*57.29578f),(double)ry,have ? "" : "?",ra,u2_native_us ? (now-u2_native_us)*1e-3 : -1.0,now*1e-6);
         }
     }
     if (mouse_debug() && !anim) { static unsigned n; if ((n++&15)==0) printf("Mouse: U3 scripted camera turn yaw=%.2f pitch=%.2f w=%.3f\n",(double)total_yaw,(double)total_pitch,(double)w); }
@@ -4799,6 +4809,10 @@ static void __attribute__((ms_abi)) u3_layer_blend(uint64_t rdi, uint64_t rsi, u
     static int prev_held;
     if (now-last_us>50000 || (held && !prev_held)) {
         h0=hf; e0=ef;
+        /* A new press: this layer runs once BEFORE the aiming camera's update resets the totals (measured: 12 ms later), so the previous aim's totals showed
+         * for a frame (elevation 80 on the first frame, the "jump" of the second press). The reset is made here too. */
+        if (held && !prev_held && !u3_aim_from_cover) { u3_aim_total_yaw=u3_aim_total_pitch=0.0f; u3_aim_base_yaw=u3_aim_base_pitch=0.0f; }
+        if (mouse_debug()) printf("Mouse: U3 AIMSTART T=%.4f h0=%.2f e0=%.2f total=%.2f/%.2f last_aim_e=%.2f held=%d w=%.3f\n",now*1e-6,(double)h0,(double)e0,(double)u3_aim_total_yaw,(double)u3_aim_total_pitch,(double)u3_aim_last_elev,held,(double)w);
         if (u3_aim_from_cover) {
             /* From cover the aim starts exactly on the picture the cover camera showed (u3_cover_show_*), whatever the blended picture h0 holds (it may still
              * hold the previous aim fading out, and the cover camera's own pose goes on turning with Drake: measured, the next press started up to 170 degrees
@@ -4932,6 +4946,22 @@ static void u3_walk_follow_cover(uint64_t camera, uint64_t now) {
     }
     if (mouse_debug()) printf("Mouse: U3 walk camera under the cover cam=%llx dir=%.2f show=%.2f turn=%.2f arc=%.3f\n",(unsigned long long)camera,(double)heading_of(d),(double)u3_cover_show_h,(double)(a*57.29578f),(double)*arcp);
 }
+/* The position the walking camera shows (+0x7680, a spring) is put on the elevation of its target (+0x7650) about the pivot (+0x78a0), at the distance the
+ * game gave it, so that a tilt of the arc shows at once instead of trailing behind the mouse (the same as the free view's, for the climb-class layer). */
+static void u3_snap_shown_elevation(uint64_t camera) {
+    const float *piv=(const float *)(uintptr_t)(camera+0x78a0), *t=(const float *)(uintptr_t)(camera+0x7650);
+    float *pos=(float *)(uintptr_t)(camera+0x7680);
+    const float r=SDL_sqrtf((t[0]-piv[0])*(t[0]-piv[0])+(t[2]-piv[2])*(t[2]-piv[2]));
+    if (!(r>0.3f && r<50.0f)) return;
+    const float te=SDL_atan2f(t[1]-piv[1],r);
+    float px=pos[0]-piv[0], py=pos[1]-piv[1], pz=pos[2]-piv[2];
+    const float h=SDL_sqrtf(px*px+pz*pz);
+    if (!(h>0.1f && h<50.0f)) return;
+    const float e=SDL_atan2f(py,h), want=te-e, d=want>0.35f ? 0.35f : want<-0.35f ? -0.35f : want;
+    const float len=SDL_sqrtf(h*h+py*py), e2=e+d, k=len*SDL_cosf(e2)/h;
+    px*=k; pz*=k; py=len*SDL_sinf(e2);
+    if (px>-400.0f && px<400.0f && py>-400.0f && py<400.0f && pz>-400.0f && pz<400.0f) { pos[0]=piv[0]+px; pos[1]=piv[1]+py; pos[2]=piv[2]+pz; }
+}
 static void __attribute__((ms_abi)) u3_walk_camera(uint64_t out, uint64_t camera, uint64_t image, uint64_t r14) {
     (void)image; (void)r14;
     static int disabled=-1;
@@ -4953,7 +4983,23 @@ static void __attribute__((ms_abi)) u3_walk_camera(uint64_t out, uint64_t camera
     }
     if (mouse_debug() && !(aim_held && u3_aim_seen_us && now-u3_aim_seen_us<150000)) { float wp[3]; if (safe_read(wp,camera+0x78a0,12)) { for (int i=0;i<3;++i) u3_dbg_walk_pivot[i]=wp[i]; u3_dbg_walk_us=now; } }
     if (aim_held && u3_aim_seen_us && now-u3_aim_seen_us<150000) return;
-    if (u3_anim_layer_us && now-u3_anim_layer_us<50000) return;   /* the ledge / climb camera holds the picture: the mouse is its */
+    if (u3_anim_layer_us && now-u3_anim_layer_us<50000) {   /* the ledge / climb camera holds the picture: the mouse is its, but the pitch is the arc of this camera */
+        float arc;
+        if (safe_read(&arc,camera+0x7874,4) && arc>-3.0f && arc<3.0f) {
+            static float top=-1.0f;
+            if (top<0.0f) { const char *e=getenv("BB_U3_ARC_TOP"); top=e ? (float)atof(e) : 1.0f; }   /* (the pad's own stops in this camera, measured 2026-11-01: 0.00 and 1.00) */
+            if (u3_anim_arc_delta!=0.0f) {
+                float v=arc+u3_anim_arc_delta;
+                v=v<0.0f ? 0.0f : v>top ? top : v;
+                if (v==v) *(float *)(uintptr_t)(camera+0x7874)=v;
+                u3_anim_arc_delta=0.0f;
+                u3_anim_snap_us=now;
+            }
+            if (u3_anim_snap_us && now-u3_anim_snap_us<150000 && !input.free_view_smoothing) u3_snap_shown_elevation(camera);   /* (while the mouse tilts, and a moment after) */
+            if (mouse_debug()) { static uint64_t arc_us; if (now-arc_us>100000) { arc_us=now; printf("Mouse: U3 ANIMARC t=%.4f arc=%.4f top=%.2f\n",now*1e-6,(double)*(const float *)(uintptr_t)(camera+0x7874),(double)top); } }
+        }
+        return;
+    }
     if (u3_cover_seen_us && now-u3_cover_seen_us<u3_exit_stick_us()) { u3_walk_follow_cover(camera,now); return; }
     static struct { uint64_t camera, seen_us; unsigned frames; } slot[4];
     int sl=-1;
@@ -5068,6 +5114,7 @@ static void __attribute__((ms_abi)) u3_walk_camera(uint64_t out, uint64_t camera
     follow_arc_max=0.76f;
     follow_camera(camera,0x78c0,0x7874,105.0f,0,0);
     follow_arc_max=1.0f;
+    if (mouse_debug()) { static uint64_t arc_us; if (now-arc_us>100000) { arc_us=now; printf("Mouse: U3 ARC t=%.4f before=%.4f after=%.4f mouse=%d\n",now*1e-6,(double)arc0,(double)*(const float *)(uintptr_t)(camera+0x7874),follow_arc_moved); } }
     if (u3_tk_key && u3_tk_key==u3_cover_seen_us && arc0==arc0) {   /* (the tilt the mouse added this frame: 105 degrees per unit of arc) */
         const float da=*(const float *)(uintptr_t)(camera+0x7874)-arc0;
         if (da>-0.5f && da<0.5f) u3_tk_e-=da*105.0f;   /* (more arc = camera higher = looks further down) */
@@ -5110,7 +5157,9 @@ static void __attribute__((ms_abi)) u3_walk_camera(uint64_t out, uint64_t camera
         const float *pivot=(const float *)(uintptr_t)(camera+0x78a0);
         const float a=follow_applied*0.017453293f, c=SDL_cosf(a), s=SDL_sinf(a);
         float px=pos[0]-pivot[0], pz=pos[2]-pivot[2], py=pos[1]-pivot[1];
-        if (tilting && target_elev_ok) {
+        static int tiltset=-1;   /* BB_U3_TILTSET=0: the direct elevation set below is left out (test: does the camera clip with it?) */
+        if (tiltset<0) { const char *e=getenv("BB_U3_TILTSET"); tiltset=!(e && atoi(e)==0); }
+        if (tilting && target_elev_ok && tiltset) {
             const float h=SDL_sqrtf(px*px+pz*pz);
             if (h>0.1f && follow_gap_us<U2_FOLLOW_RESYNC_US) {
                 /* The position's elevation is put on the target's (no vertical smoothing): the spring's lag behind the mouse's tilt is not left to show. Along the arc
