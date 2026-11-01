@@ -4663,7 +4663,12 @@ static void __attribute__((ms_abi)) u3_layer_blend(uint64_t rdi, uint64_t rsi, u
         uint64_t vt=0;
         if (safe_read(&vt,r14,8) && vt==runtime_image_base()+0x16b6060) { u3_script_layer(r14,image,0); return; }
     }
-    if (r14 && !aim_held && !(u3_cover_seen_us && now_us()-u3_cover_seen_us<2000000) && !(u3_aim_active_us && now_us()-u3_aim_active_us<1500000) &&
+    static int rmb_prev; static uint64_t rmb_since_us;
+    if (aim_held && !rmb_prev) rmb_since_us=now_us();
+    rmb_prev=aim_held;
+    /* (right mouse button without a weapon: no aiming camera comes, and the game only drops the climb-class layer that carried the mouse's turn; it stays ours until an aiming camera is seen) */
+    const int rmb_no_aim=aim_held && !(u3_aim_seen_us && u3_aim_seen_us>=rmb_since_us) && !(u3_aim_active_us && now_us()-u3_aim_active_us<1500000);
+    if (r14 && (!aim_held || rmb_no_aim) && !(u3_cover_seen_us && now_us()-u3_cover_seen_us<2000000) && !(u3_aim_active_us && now_us()-u3_aim_active_us<1500000) &&
         !look_held && now_us()>=look_blend_until_us) {
         uint64_t vt=0;
         if (safe_read(&vt,r14,8)) {
@@ -4970,7 +4975,8 @@ static void __attribute__((ms_abi)) u3_walk_camera(uint64_t out, uint64_t camera
         return;
     }
     { static uint64_t handed_for;   /* the climb camera has gone: the walking camera, which the mouse did not turn meanwhile, is put on the heading the picture showed (or it snapped back by the whole turn) */
-        if (u3_anim_layer_us && handed_for!=u3_anim_layer_us && now-u3_anim_layer_us<1500000 && !aim_held && !(u3_cover_seen_us && now-u3_cover_seen_us<2000000)) {
+        /* (right mouse button without a weapon: no aiming camera, so the hand-off is made at once, on the press, not deferred to the release, where it turned the picture back by the whole turn: measured 55 degrees) */
+        if (u3_anim_layer_us && handed_for!=u3_anim_layer_us && now-u3_anim_layer_us<1500000 && (!aim_held || !(u3_aim_seen_us && now-u3_aim_seen_us<1500000)) &&!(u3_cover_seen_us && now-u3_cover_seen_us<2000000)) {
             handed_for=u3_anim_layer_us;
             const float a=wrap_degrees(heading_of((const float *)(uintptr_t)(camera+0x78c0))-u3_anim_h)*0.017453293f, c=SDL_cosf(a), s=SDL_sinf(a);
             float *pos=(float *)(uintptr_t)(camera+0x7680), *d=(float *)(uintptr_t)(camera+0x78c0);
