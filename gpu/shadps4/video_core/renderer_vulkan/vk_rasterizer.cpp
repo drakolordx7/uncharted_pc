@@ -1786,8 +1786,26 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     // bbport: jitter geometry drawn with the scene depth, not full-screen passes (a shifted
     // full-screen quad leaves an edge column unwritten).
     draw_jitter = {};
+    // bbport (Mevlock): a draw of up to 6 indices is usually a full-screen quad (not jittered), but
+    // a quad that writes depth or tests it for equality is scene geometry: U3's chateau wall panels
+    // are single quads. Left unjittered, they sat a fraction of a pixel off their jittered
+    // neighbours and the seams opened into pinholes showing the scene colour's clear (0, 0, 1, 0):
+    // rows of bright blue dots, only with an upscaler on. BB_JITTER_SMALL=0: off.
+    static const bool jitter_small = [] {
+        const char* env = std::getenv("BB_JITTER_SMALL");
+        return !(env && env[0] == '0');
+    }();
+    const auto small_scene_geometry = [&] {
+        if (!jitter_small || !regs.depth_control.depth_enable) {
+            return false;
+        }
+        // Full-screen depth copies and resolves write depth with an always-passing test: not these.
+        const auto func = LiverpoolToVK::CompareOp(regs.depth_control.depth_func);
+        return func != vk::CompareOp::eAlways &&
+               (bool(regs.depth_control.depth_write_enable) || func == vk::CompareOp::eEqual);
+    };
     if (upscaler->Enabled() && db_desc.first && db_desc.first == camera_motion->Depth() &&
-        (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1)) {
+        (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1 || small_scene_geometry())) {
         draw_jitter = upscaler->Jitter();
     } else if (const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
                ps && upscaler->Enabled() && JitterFullScreenPass(ps->pgm_hash)) {
@@ -2452,9 +2470,18 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     pipeline->BindResources(set_writes, push_data);
 
     const vk::Pipeline handle = pipeline->Handle();
-    u32 dim_x = cs_program.dim_x;
+    // bbport: workgroups compiled as smaller ones (Shader::WorkgroupSplit): that many times the
+    // workgroups in X.
+    const Shader::HwComputeRuntimeInfo hw_cs = {
+        .workgroup_size = {cs_program.num_thread_x.full, cs_program.num_thread_y.full,
+                           cs_program.num_thread_z.full},
+        .indirect = false,
+    };
+    const u32 workgroup_split = Shader::WorkgroupSplit(cs.cs_split_eligible, hw_cs);
+    u32 dim_x = cs_program.dim_x * workgroup_split;
     const u32 dim_y = cs_program.dim_y, dim_z = cs_program.dim_z;
-    // bbport: BB_CS_SPLIT_1024 - the shader's 1024-thread group runs as 1024/target groups of
+    // bbport: BB_CS_SPLIT_1024 (only where WorkgroupSplit left the 1024-thread LocalSize, see
+    // SplitWorkgroup) - the shader's 1024-thread group runs as 1024/target groups of
     // `target` threads (vk_shader_util.cpp); the extra groups cover the same global indices.
     if (cs.split_workgroup != 0 && cs_program.num_thread_x.full == 1024) {
         dim_x *= 1024 / cs.split_workgroup;
@@ -2527,7 +2554,7 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     if (!pipelined) {
         DrainDrawPipe();
     }
-    const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline();
+    const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline(true);
     if (!pipeline) {
         return;
     }

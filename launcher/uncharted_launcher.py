@@ -211,8 +211,7 @@ FIXES = {
         {'on': {'BB_JOB_SLEEP': '1'}, 'off': {'BB_JOB_SLEEP': '0'}}),
     'fix_thread_prio': (
         'PS4 thread priorities',
-        'Gives the game threads their PS4 priorities. Can stall Uncharted 1. '
-        'Automatic: on for Uncharted 2 and 3, off for Uncharted 1.',
+        'Gives the game threads their PS4 priorities. Can stall Uncharted 1. Automatic: off.',
         {'on': {'BB_THREAD_PRIO': '1'}, 'off': {'BB_THREAD_PRIO': '0'}}),
     'fix_cs_split': (
         'GeForce GTX 10 driver reset fix',
@@ -2786,8 +2785,7 @@ class Launcher:
         log = None
         try:
             log_dir = Path(self.app.get('user_dir') or DATA_DIR / 'user')
-            log_dir.mkdir(parents=True, exist_ok=True)
-            log = open(log_dir / 'last_run.log', 'w', encoding='utf-8', buffering=1)
+            log = open_run_log(log_dir)
         except OSError:
             pass
         for raw in iter(process.stdout.readline, b''):
@@ -3358,13 +3356,26 @@ def install_update(target, wait_pid):
     return 0
 
 
+def open_run_log(log_dir, keep=5):
+    """last_run.log for a new run; the previous ones move to last_run.1.log ... last_run.<keep-1>.log
+    (a restart after a problem no longer overwrites the log that shows it)."""
+    log_dir.mkdir(parents=True, exist_ok=True)
+    for n in range(keep - 1, 0, -1):
+        older = log_dir / (f'last_run.{n - 1}.log' if n > 1 else 'last_run.log')
+        try:
+            if older.exists():
+                older.replace(log_dir / f'last_run.{n}.log')
+        except OSError:
+            pass
+    return open(log_dir / 'last_run.log', 'w', encoding='utf-8', buffering=1)
+
+
 def play_without_window(settings):
     """--play: the game with the saved settings (shortcuts, Steam); output to the console when
     there is one and to <saves folder>/last_run.log."""
     attach_stdio()
     log_dir = Path(settings.get('user_dir') or DATA_DIR / 'user')
-    log_dir.mkdir(parents=True, exist_ok=True)
-    with open(log_dir / 'last_run.log', 'w', encoding='utf-8', buffering=1) as log:
+    with open_run_log(log_dir) as log:
         try:
             made = backup_before_launch(settings)
             if made:

@@ -24,12 +24,13 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
+#include "bbport_focus_fix.h"
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 13u; // bbport: LDS barriers for workgroups larger than one wave; 12: LDS bounds checks, scalar EXEC scopes and GCN NaN semantics (shadPS4 PR #5257); 10: motion shaders hold address stand-ins
-static constexpr u32 ShaderMetaVersion = 9u; // bbport: checksum of the shader binary; 8: RuntimeInfo::Properties::dx10_clamp; 7: ImageResource::needs_native
-static constexpr u32 PipelineKeyVersion = 6u; // bbport: Info layout (ImageResource::needs_native)
+static constexpr u32 ShaderBinaryVersion = 14u; // bbport: WorkgroupSplit (SuperMedo 0.3.11, NVIDIA); 13: LDS barriers for workgroups larger than one wave; 12: LDS bounds checks, scalar EXEC scopes and GCN NaN semantics (shadPS4 PR #5257); 10: motion shaders hold address stand-ins
+static constexpr u32 ShaderMetaVersion = 10u; // bbport: InfoPersistent::cs_split_eligible; 9: checksum of the shader binary; 8: RuntimeInfo::Properties::dx10_clamp; 7: ImageResource::needs_native
+static constexpr u32 PipelineKeyVersion = 7u; // bbport: Info layout (cs_split_eligible), HwComputeRuntimeInfo::indirect; 6: ImageResource::needs_native
 // bbport: translator options that change the shaders it produces are part of the stored version,
 // so switching one retranslates the shaders instead of reusing the cached ones.
 static u32 TranslatedBinaryVersion() {
@@ -452,7 +453,8 @@ void PipelineCache::WarmUpThread() {
         u64 checksum = 0;
         if (!LoadShaderMeta(meta_ar, stage.program->info, unused, stage.spec, stage.perm_idx,
                             &checksum) ||
-            Shader::Backend::SPIRV::IsForcedShader(stage.program->info.pgm_hash)) {
+            Shader::Backend::SPIRV::IsForcedShader(stage.program->info.pgm_hash) ||
+            BbFocusFix::FocusCentreShader(stage.program->info.pgm_hash)) {
             stage.program.reset();
             return;
         }

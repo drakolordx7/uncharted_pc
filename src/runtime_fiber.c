@@ -261,8 +261,9 @@ static ABI int32_t fiber_run_with(GuestFiber *fiber,void *addr,uint64_t size,uin
 }
 static ABI int32_t fiber_run(GuestFiber *fiber,uint64_t arg,uint64_t *ret) { return fiber_run_with(fiber,NULL,0,arg,ret); }
 
-/* bbport: set while a render command context is open on this thread (probe.c, the job wait
- * patch); a fiber leaving the thread takes its context along, so the flag is cleared. */
+/* bbport (Mevlock): set while a render command context is open on this thread (probe.c: the
+ * Begin/End hooks and the job wait patch); a fiber leaving the thread takes its context along, so
+ * the flag is cleared. */
 _Thread_local int runtime_ndgi_open;
 #define NDGI_LEAVE() (runtime_ndgi_open=0)
 static ABI int32_t fiber_switch_with(GuestFiber *fiber,void *addr,uint64_t size,uint64_t arg,uint64_t *arg_on_run) {
