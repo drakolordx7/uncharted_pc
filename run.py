@@ -269,6 +269,7 @@ def main():
     player_small = env.get('BB_READBACK_SMALL_BUFFERS')
     player_gate = env.get('BB_READBACK_SMALL_GATE')
     player_copy = env.get('BB_SCALAR_COPY64_SYNC')
+    player_copy_eop = env.get('BB_COPY64_EOP_READBACK')
     all_cheats = env.setdefault('BB_CHEATS_ALL', env.get('BB_CHEATS', ''))
     while True:
         if player_merge is None:
@@ -297,6 +298,14 @@ def main():
             copy_on = exe in (EXECUTABLES['u1'], EXECUTABLES['u2'])
             env['BB_SCALAR_COPY64_SYNC'] = '2' if copy_on else '0'
             env['BB_SCALAR_COPY64_DEFER'] = '1' if copy_on else '0'
+        # U3 runs the 64-dword raycaster copy on the GPU (BB_SCALAR_COPY64_SYNC off), so without this the
+        # CPU reads stale ground-hit records and characters sink: its small outputs are read back at the
+        # end-of-pipe fence (fork #25/#4, #692, #751).
+        if player_copy_eop is None:
+            if exe == EXECUTABLES['u3']:
+                env['BB_COPY64_EOP_READBACK'] = '1'
+            else:
+                env.pop('BB_COPY64_EOP_READBACK', None)
         # Chained end-of-shader labels (toggle2 4) and met display-label waits without a drain
         # (toggle2 8) were measured in U2 only: off for U1 and U3 until they are.
         if exe in (EXECUTABLES['u1'], EXECUTABLES['u3']):
