@@ -863,7 +863,9 @@ void ConfigureToggleKey(int slot, int kind, int code) {
 bool HandleEvent(const SDL_Event& event) {
     std::scoped_lock lock{imgui_mutex};
     if (!initialized) {
-        return false;
+        // A mouse button bound as the menu key never reaches the game, before the menu exists too.
+        return (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP) &&
+               IsToggleButton(event.button.button);
     }
     ImGuiIO& io = ImGui::GetIO();
     const bool is_open = menu_open;
@@ -932,8 +934,11 @@ bool HandleEvent(const SDL_Event& event) {
     }
     case SDL_EVENT_MOUSE_BUTTON_DOWN:
     case SDL_EVENT_MOUSE_BUTTON_UP: {
-        if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && IsToggleButton(event.button.button)) {
-            SetOpen(!is_open);
+        if (IsToggleButton(event.button.button)) {
+            // Press and release both stay out of the game, like the menu key on the keyboard.
+            if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+                SetOpen(!is_open);
+            }
             return true;
         }
         if (!is_open) {
