@@ -792,6 +792,7 @@ class Launcher:
         root.after(150, self.detect_controller)
         if self.app.get('check_updates', True):
             threading.Thread(target=self.check_update, daemon=True).start()
+        threading.Thread(target=self.download_art, daemon=True).start()
 
     def px(self, size):
         return int(size * self.dpi)
@@ -2637,6 +2638,7 @@ class Launcher:
 
     def configure_art(self):
         import uncharted_art
+        uncharted_art.set_download_dir(DATA_DIR / 'art')
         uncharted_art.set_custom_art({
             'collection_banner.jpg': self.app.get('art_banner', ''),
             'u1.jpg': self.app.get('art_u1', ''),
@@ -2661,6 +2663,23 @@ class Launcher:
         size = (1600, 450) if key == 'art_banner' else (600, 900)
         title = _('Collection banner') if key == 'art_banner' else _('Change image')
         self.edit_launcher_art(key, title, size, crop_key, str(Path(path)))
+
+    def download_art(self):
+        """Fetch the cover art that is missing (the launcher ships none); runs in a thread."""
+        try:
+            import uncharted_art
+            if uncharted_art.download_missing_art():
+                self.ui_calls.put(self.art_downloaded)
+        except Exception:  # the painted scenes stay; the next start tries again
+            pass
+
+    def art_downloaded(self):
+        """New cover files arrived: reload them and repaint the cards and the banner."""
+        import uncharted_art
+        uncharted_art.clear_art_cache()
+        self.banner_key = self.banner_scaled = None
+        self.card_images = {}
+        self.refresh()
 
     def change_art(self):
         """Apply local artwork immediately while keeping the original as fallback."""

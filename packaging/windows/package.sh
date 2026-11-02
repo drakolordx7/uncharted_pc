@@ -34,7 +34,6 @@ out/pyenv/Scripts/python.exe -m PyInstaller --noconfirm --clean --log-level WARN
     --workpath out/pyi-work --specpath out/pyi-work --paths "$(cygpath -w "$PWD/scripts")" \
     --paths "$(cygpath -w "$PWD/launcher")" \
     --add-data "$(cygpath -w "$PWD/launcher/fonts");fonts" \
-    --add-data "$(cygpath -w "$PWD/launcher/covers");covers" \
     --add-data "$(cygpath -w "$PWD/launcher/textures");textures" \
     "${hidden[@]}" \
     "$(cygpath -w "$PWD/launcher/uncharted_launcher.py")"

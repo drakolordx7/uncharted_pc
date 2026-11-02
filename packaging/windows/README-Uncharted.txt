@@ -21,6 +21,8 @@ Starting
   from your game folder. "Desktop shortcut" puts it on the desktop.
 - Your own covers: put u1.jpg, u2.jpg and u3.jpg (and a wide collection_banner.jpg for the
   top of the Play page) in a folder named art next to Uncharted.exe. Updates keep it.
+  Missing covers are downloaded on first start (internet needed once) into that folder;
+  files you put there are never replaced.
 - Display page -> Frame rate: 60 FPS as on PS4, or 120 FPS. Gameplay keeps its normal speed
   and the cutscene videos still play at 60. Higher rates are experimental. Above your
   display's refresh rate use the Mailbox or Immediate presentation.

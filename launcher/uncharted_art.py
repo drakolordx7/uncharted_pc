@@ -1,16 +1,20 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """Pictures for the Uncharted launcher (Pillow).
 
-- card_scene() / banner_scene(): the three cover posters in launcher/art (u1, u2, u3).
+- card_scene() / banner_scene(): the three cover posters (u1, u2, u3), downloaded on first start
+  into the launcher's art folder (download_missing_art) or taken from the player's own art folder.
   card_scene shows the whole poster. banner_scene blurs it into a wide header.
   If a file is missing, card_scene falls back to a painted scene;
 - cover(): the collection's box art from the player's own game folder (sce_sys/icon0.png);
 - steam_artwork(): Steam library pictures for the non-Steam shortcut, made from the same files of
   the player's game folder (cover, wide header, hero banner).
 """
+import io
 import math
+import os
 import random
 import sys
+import urllib.request
 from pathlib import Path
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
@@ -165,6 +169,23 @@ _LOADED = {}
 _BANNER = None
 _CUSTOM_ART = {}
 _CUSTOM_CROPS = {}
+_DOWNLOAD_DIR = None
+# Where the cover art comes from, in order. The game's art is not shipped with the launcher.
+ART_SOURCES = {
+    'u1.jpg': ['https://images.igdb.com/igdb/image/upload/t_original/co1un2.jpg',
+               'https://upload.wikimedia.org/wikipedia/en/5/5b/Uncharted_Drake%27s_Fortune.jpg'],
+    'u2.jpg': ['https://images.igdb.com/igdb/image/upload/t_original/co1un4.jpg',
+               'https://upload.wikimedia.org/wikipedia/en/7/7b/Uncharted_2_box_artwork.jpg'],
+    'u3.jpg': ['https://images.igdb.com/igdb/image/upload/t_original/co1tpr.jpg',
+               'https://upload.wikimedia.org/wikipedia/en/0/02/Uncharted_3_Boxart.jpg'],
+    # The server sends JPEG bytes despite the .png name; the file is saved as a real JPEG.
+    'collection_banner.jpg': ['https://image.api.playstation.com/vulcan/img/rnd/202011/1101/'
+                              '6JXslFDceEZUjTfwEamrXFTJ.png?w=1920',
+                              'https://image.api.playstation.com/vulcan/img/rnd/202011/1101/'
+                              '6JXslFDceEZUjTfwEamrXFTJ.png'],
+}
+_ART_TIMEOUT = 15
+_ART_MAX_BYTES = 25 * 1024 * 1024
 
 
 def set_custom_art(paths, crops=None):
@@ -179,14 +200,78 @@ def set_custom_art(paths, crops=None):
         _BANNER = None
 
 
+def set_download_dir(path):
+    """The folder the covers are downloaded into (and looked for after the player's own)."""
+    global _DOWNLOAD_DIR
+    _DOWNLOAD_DIR = Path(path) if path else None
+
+
+def clear_art_cache():
+    """Forget the loaded covers so the next draw reads the files again."""
+    global _BANNER
+    _LOADED.clear()
+    _BANNER = None
+
+
 def art_directories():
     """Where covers are looked for, first match per file wins: the art folder next to
     Uncharted.exe (frozen) and launcher/art, the player's own covers that are never distributed;
-    then the covers that come with the port (launcher/covers, bundled as covers)."""
+    then the folder the launcher downloads the covers into (set_download_dir)."""
     here = Path(__file__).resolve().parent
-    bundle = Path(getattr(sys, '_MEIPASS', here))
     own = [Path(sys.executable).resolve().parent / 'art'] if getattr(sys, 'frozen', False) else []
-    return own + [here / 'art', bundle / 'covers', here / 'covers']
+    found = own + [here / 'art']
+    if _DOWNLOAD_DIR is not None and _DOWNLOAD_DIR not in found:
+        found.append(_DOWNLOAD_DIR)
+    return found
+
+
+def _fetch_image(url):
+    """The picture at url as a Pillow image (fully decoded), or None."""
+    request = urllib.request.Request(url, headers={'User-Agent': 'uncharted-launcher'})
+    with urllib.request.urlopen(request, timeout=_ART_TIMEOUT) as response:
+        data = response.read(_ART_MAX_BYTES + 1)
+    if not data or len(data) > _ART_MAX_BYTES:
+        return None
+    with Image.open(io.BytesIO(data)) as image:
+        image.load()
+        return image.convert('RGB') if image.format != 'JPEG' or image.mode != 'RGB' else image.copy()
+
+
+def download_missing_art(directory=None):
+    """Download the covers that no art folder has yet into `directory` (the download folder).
+    One try per source, in order; whatever fails stays missing for the next start.
+    Returns the names saved. Never raises."""
+    target = Path(directory) if directory else _DOWNLOAD_DIR
+    saved = []
+    if target is None:
+        return saved
+    for name, urls in ART_SOURCES.items():
+        try:
+            if any((d / name).is_file() for d in art_directories() + [target]):
+                continue
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            continue
+        for url in urls:
+            temp = target / (name + '.part')
+            try:
+                image = _fetch_image(url)
+                if image is None:
+                    continue
+                image.save(temp, 'JPEG', quality=92)
+                with Image.open(temp) as check:  # what was written must open again
+                    check.load()
+                os.replace(temp, target / name)
+                saved.append(name)
+                break
+            except Exception:  # offline, HTTP error, not a picture: try the next source
+                continue
+            finally:
+                try:
+                    temp.unlink()
+                except OSError:
+                    pass
+    return saved
 
 
 def load_art(name):
