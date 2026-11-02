@@ -266,6 +266,7 @@ def main():
     # (BB_TINY_READBACK). On for U2 and U3: no measurable cost in U3 (square and chateau fight). U1 unchanged.
     player_merge = env.get('BB_GPU_MERGE')
     player_tiny = env.get('BB_TINY_READBACK')
+    player_walk = env.get('BB_WALK_MIN')
     player_small = env.get('BB_READBACK_SMALL_BUFFERS')
     player_gate = env.get('BB_READBACK_SMALL_GATE')
     player_copy = env.get('BB_SCALAR_COPY64_SYNC')
@@ -279,6 +280,13 @@ def main():
                 env.pop('BB_GPU_MERGE', None)
         # PS4 thread priorities: off for all three games by the runtime default since 0.3.11 (the job wait
         # fixes the 4-core crash they were for; U1 also stopped on job asserts with them on: #620, #594).
+        # Walk key: Uncharted 1 ignores stick bytes within about 43 of the centre on each axis, so a walk
+        # below 55% (or its diagonals) did not move Nathan (fork #13).
+        if player_walk is None:
+            if exe == EXECUTABLES['u1']:
+                env['BB_WALK_MIN'] = '55'
+            else:
+                env.pop('BB_WALK_MIN', None)
         if player_tiny is None:
             env['BB_TINY_READBACK'] = '1' if exe in (EXECUTABLES['u2'], EXECUTABLES['u3']) else '0'
         # Weapons need the small results the GPU writes (a few bytes the CPU reads back) to reach

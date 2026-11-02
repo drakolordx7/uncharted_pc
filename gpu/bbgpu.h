@@ -55,6 +55,12 @@ int bbgpu_gyro_aim(void);
 enum { BBGPU_OVERLAY_KEY_NONE, BBGPU_OVERLAY_KEY_SCANCODE, BBGPU_OVERLAY_KEY_KEYCODE, BBGPU_OVERLAY_KEY_MOUSE };
 void bbgpu_overlay_key_configure(int slot, int kind, int code);
 int bbgpu_mouse_sample(float *dx, float *dy, uint32_t *buttons, int *wheel);
+/* The screenshot key (input.ini key.share, the PS4 Share button; two bindings, same kinds as the menu key):
+ * pressing it saves the next frame the game shows, at the game's own resolution, as a picture in the user
+ * folder (screenshots/). */
+void bbgpu_share_key_configure(int slot, int kind, int code);
+/* GPU thread: 1 once per press of the screenshot key. */
+int bbgpu_share_take(void);
 /* In-game trophy notice (the overlay draws it for a few seconds, one at a time): grade 1 platinum,
  * 2 gold, 3 silver, 4 bronze; png is the trophy's icon (a PNG file) or empty. */
 void bbgpu_trophy_notify(int grade, const char *game, const char *name, const void *png, uint64_t png_size);

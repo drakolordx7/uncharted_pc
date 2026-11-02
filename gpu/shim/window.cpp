@@ -8,6 +8,7 @@
 #include "common/logging/log.h"
 #include "sdl_window.h"
 #include "bbport_overlay.h"
+#include "../bbgpu.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
 #include "bbport_settings.h"
 
@@ -20,6 +21,37 @@ int mouse_wheel{};
 u32 mouse_buttons{};
 std::atomic<bool> mouse_look{false}, mouse_captured{false};
 bool window_focused{true};
+
+// bbport: the screenshot key (key.share): two bindings, kinds as bbgpu_overlay_key_configure. A press sets
+// share_requested; the presenter takes it (bbgpu_share_take) and saves the next frame.
+struct ShareKey {
+    int kind = 0; // BBGPU_OVERLAY_KEY_*
+    int code = 0;
+};
+std::mutex share_mutex;
+ShareKey share_keys[2];
+std::atomic<bool> share_requested{false};
+
+bool IsShareButton(u8 button) {
+    std::scoped_lock lock{share_mutex};
+    for (const ShareKey& k : share_keys) {
+        if (k.kind == BBGPU_OVERLAY_KEY_MOUSE && k.code == button) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool IsShareKey(const SDL_KeyboardEvent& key) {
+    std::scoped_lock lock{share_mutex};
+    for (const ShareKey& k : share_keys) {
+        if ((k.kind == BBGPU_OVERLAY_KEY_SCANCODE && static_cast<int>(key.scancode) == k.code) ||
+            (k.kind == BBGPU_OVERLAY_KEY_KEYCODE && static_cast<int>(key.key) == k.code)) {
+            return true;
+        }
+    }
+    return false;
+}
 
 u32 MouseBit(u8 button) {
     switch (button) {
@@ -117,6 +149,18 @@ extern "C" void bbgpu_display_mode_request(int mode) {
 
 extern "C" void bbgpu_mouse_configure(int look) {
     mouse_look = look != 0;
+}
+
+extern "C" void bbgpu_share_key_configure(int slot, int kind, int code) {
+    if (slot < 0 || slot > 1) {
+        return;
+    }
+    std::scoped_lock lock{share_mutex};
+    share_keys[slot] = {kind, code};
+}
+
+extern "C" int bbgpu_share_take(void) {
+    return share_requested.exchange(false) ? 1 : 0;
 }
 
 extern "C" int bbgpu_mouse_sample(float* dx, float* dy, uint32_t* buttons, int* wheel) {
@@ -301,6 +345,16 @@ bool WindowSDL::PollEvents() {
             text_active = false;
             SDL_StopTextInput(window);
             UpdateTextTitle();
+            continue;
+        }
+        // The screenshot key (a mouse button bound to it stays out of the game, like the menu key).
+        if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat && IsShareKey(event.key)) {
+            share_requested = true;
+        } else if ((event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP) &&
+                   IsShareButton(event.button.button)) {
+            if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+                share_requested = true;
+            }
             continue;
         }
         if (BbOverlay::HandleEvent(event)) {
