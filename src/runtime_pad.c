@@ -137,7 +137,7 @@ static const Action actions[ACTIONS]={
 static struct {
     Bind keys[ACTIONS][2];
     int pad[16];               /* SDL_GamepadButton, PAD_TRIGGER_*, or -1 */
-    int mouse_look, mouse_invert_y, pad_invert_y, pad_vibration, pad_vibration_strength, walk_speed;
+    int mouse_look, mouse_invert_y, pad_invert_y, pad_vibration, pad_vibration_strength, walk_speed, walk_min;
     float mouse_sensitivity;
 } input;
 
@@ -204,6 +204,11 @@ static void load_input(void) {
     }
     input.mouse_look=1; input.mouse_sensitivity=1.0f;
     input.pad_vibration=1; input.pad_vibration_strength=100; input.walk_speed=45;
+    {   /* BB_WALK_MIN=<percent>: the least deflection the walk key gives (run.py sets it for Uncharted 1) */
+        const char *m=getenv("BB_WALK_MIN");
+        const int v=m ? atoi(m) : 0;
+        input.walk_min=v<0 ? 0 : v>100 ? 100 : v;
+    }
     const char *path=getenv("BB_INPUT_CONFIG");
     FILE *f=path && *path ? fopen(path,"r") : NULL;
     if (f) {
@@ -1591,7 +1596,10 @@ static void sample_host(PadData *d) {
     const int ly=action_down(A_LS_DOWN,k,mouse,now)-action_down(A_LS_UP,k,mouse,now);
     if ((lx || ly) && action_down(A_WALK,k,mouse,now)) {
         /* Walk: the key direction at walk_speed percent of full deflection (diagonals too). */
-        const float scale=127.5f*(float)input.walk_speed/100.0f/((lx && ly) ? 1.41421356f : 1.0f);
+        /* Uncharted 1 reads a stick byte as zero within about 43 of the centre on each axis, so a slow walk
+         * (or the 45% diagonal, 40 per axis) did nothing there: BB_WALK_MIN lifts it past that. */
+        const int percent=input.walk_speed>input.walk_min ? input.walk_speed : input.walk_min;
+        const float scale=127.5f*(float)percent/100.0f/((lx && ly) ? 1.41421356f : 1.0f);
         if (lx) d->left_x=(uint8_t)(int)(127.5f+(float)lx*scale+0.5f);
         if (ly) d->left_y=(uint8_t)(int)(127.5f+(float)ly*scale+0.5f);
     } else {

@@ -267,6 +267,7 @@ def main():
     player_merge = env.get('BB_GPU_MERGE')
     player_prio = env.get('BB_THREAD_PRIO')
     player_tiny = env.get('BB_TINY_READBACK')
+    player_walk = env.get('BB_WALK_MIN')
     player_small = env.get('BB_READBACK_SMALL_BUFFERS')
     player_gate = env.get('BB_READBACK_SMALL_GATE')
     player_copy = env.get('BB_SCALAR_COPY64_SYNC')
@@ -285,6 +286,13 @@ def main():
                 env['BB_THREAD_PRIO'] = '0'
             else:
                 env.pop('BB_THREAD_PRIO', None)
+        # Walk key: Uncharted 1 ignores stick bytes within about 43 of the centre on each axis, so a walk
+        # below 55% (or its diagonals) did not move Nathan (fork #13).
+        if player_walk is None:
+            if exe == EXECUTABLES['u1']:
+                env['BB_WALK_MIN'] = '55'
+            else:
+                env.pop('BB_WALK_MIN', None)
         if player_tiny is None:
             env['BB_TINY_READBACK'] = '1' if exe in (EXECUTABLES['u2'], EXECUTABLES['u3']) else '0'
         # Weapons need the small results the GPU writes (a few bytes the CPU reads back) to reach
