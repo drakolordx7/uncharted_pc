@@ -356,7 +356,8 @@ def _store(user_dir, game, state):
     current = game_units(user_dir, game)
     manifest = _read_json(slot / 'slot.json', {})
     texts = _texts(user_dir, current)
-    if _digest(user_dir, current) == _digest(slot / 'data', _data_units(slot / 'data')):
+    here = _digest(user_dir, current)
+    if here == _digest(slot / 'data', _data_units(slot / 'data')):
         if any(manifest.get(k) != v for k, v in texts.items()):
             manifest.update(texts)
             _write_json(slot / 'slot.json', manifest)
@@ -365,6 +366,11 @@ def _store(user_dir, game, state):
     shutil.rmtree(stage, ignore_errors=True)
     _copy_units(user_dir, current, stage)
     stage.mkdir(exist_ok=True)
+    if _digest(stage, current) != here or _digest(user_dir, current) != here:
+        # the save changed while it was copied (the game was writing it, or was stopped in the middle
+        # of a write): the copy may be torn, so the slot keeps its last whole save; the next call retries
+        shutil.rmtree(stage, ignore_errors=True)
+        return False
     os.rename(slot / 'data', slot / '.data-old')
     os.rename(stage, slot / 'data')
     shutil.rmtree(slot / '.data-old', ignore_errors=True)
@@ -503,7 +509,23 @@ def recover(user_dir, running=None, rename=os.rename, now=None):
                 _store(user_dir, game, state)
         except (OSError, saves.SaveError) as error:
             errors[game] = str(error)
+    if not errors and not (running and running()):
+        _remove_leftovers(user_dir)
     return errors
+
+
+def _remove_leftovers(user_dir):
+    """A swap cut short leaves its staging folders (.slot-in-*: the incoming copy, .slot-old-*: the saves
+    that were moved aside) in the user folder. Once every pending swap is finished and each save in place
+    is stored in its slot, they hold nothing the slots lack, so they go. Kept (not removed) when any
+    game failed to recover: .slot-old-* may then be the only copy."""
+    try:
+        with _lock(user_dir):
+            for folder in Path(user_dir).glob('.slot-*'):
+                if folder.is_dir() and re.match(r'^\.slot-(in|old)-', folder.name):
+                    shutil.rmtree(folder, ignore_errors=True)
+    except (OSError, SlotError):
+        pass
 
 
 def activate(user_dir, game, slot_id, running=None, rename=os.rename, now=None):
