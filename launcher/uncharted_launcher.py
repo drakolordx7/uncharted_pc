@@ -227,7 +227,7 @@ AIM_ASSIST_CHOICES = [('on', 'On (game default)'), ('off', 'Off')]
 RESERVED_KEYS = {'Alt_L': 'Left Alt is reserved for freeing the mouse cursor.'}
 
 APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'start': 'u1', 'language': '1', 'ui_language': '', 'player_name': '',
-                'fullscreen': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'skip_intro': False,
+                'fullscreen': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'skip_intro': False, 'skip_friends_notice': True,
                 'window_size': '1920x1080', 'render_height': '1080', 'aspect': '16:9', 'speakers': 'auto', 'scaler': 'fsr1', 'sharpening': '500',
                 'anti_aliasing': 'off', 'aa_sharpness': '0.2', 'frame_generation': 'off',
                 'frame_gen_multiplier': '2', 'extra_env': '', 'close_on_play': False,
@@ -656,6 +656,8 @@ def game_environment(s, start=None):
         env['BB_SPEAKERS'] = str(s['speakers'])
     if s.get('skip_intro', False):
         env['BB_SKIP_INTRO'] = '1'
+    if s.get('skip_friends_notice', True):
+        env['BB_OFFLINE_NPID'] = '1'
     env['BB_FSR1'] = '1' if s.get('scaler', 'fsr1') == 'fsr1' else '0'
     sharpening = str(s.get('sharpening') or 'off')
     env['BB_RCAS'] = '0' if sharpening == 'off' else '1'
@@ -1604,6 +1606,10 @@ class Launcher:
         self.row(f, _('Player name'), name)
         self.check(f, 'skip_intro', _('Skip intro logos'),
                    _('Go straight to the title screen.'))
+        self.check(f, 'skip_friends_notice', _("Skip the friends' stats notice"),
+                   _("Continue and New Game go straight into the game: the game gets a local player name "
+                     "instead of 'signed out' and does not stop on the notice that friends' stats are not "
+                     "available. Nothing goes online."))
 
     def build_display(self):
         f = self.page('display', _('Display'), '')
