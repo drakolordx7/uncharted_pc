@@ -135,9 +135,11 @@ STICK_ACTIONS = [
 ROTATE_ACTIONS = ('rotate_ccw', 'rotate_cw')
 # Keys added after players already had their own bindings: the default is left out where the player
 # already uses that key for something else.
-LATE_ACTIONS = ROTATE_ACTIONS + ('walk',)
-# Not a game action: opens and closes the in-game menu (the runtime reads it from input.ini, key.overlay).
-MENU_ACTIONS = [('overlay', 'Open in-game menu', 'Insert')]
+LATE_ACTIONS = ROTATE_ACTIONS + ('walk', 'share')
+# Not game actions: opens and closes the in-game menu (key.overlay) and saves a screenshot, the PS4 Share
+# button (key.share); the runtime reads both from input.ini.
+MENU_ACTIONS = [('overlay', 'Open in-game menu', 'Insert'),
+                ('share', 'Screenshot (PS4 Share button)', 'F12')]
 # The mouse buttons and the wheel the in-game menu cannot be opened with (the left and right buttons
 # are how the menu is used).
 OVERLAY_BAD_BUTTONS = ('Mouse Left', 'Mouse Right', 'Wheel Up', 'Wheel Down')
@@ -1746,8 +1748,10 @@ class Launcher:
                 button.configure(text=name or '—', bg=CARD_HI, fg=TEXT if name else MUTED)
 
     def set_key(self, action, slot, name):
-        if action == 'overlay' and name in OVERLAY_BAD_BUTTONS:
-            self.status.configure(text=_('The in-game menu cannot use the left or right mouse button or the wheel.'),
+        if action in ('overlay', 'share') and name in OVERLAY_BAD_BUTTONS:
+            self.status.configure(text=_('The in-game menu cannot use the left or right mouse button or the wheel.')
+                                  if action == 'overlay' else
+                                  _('The screenshot key cannot use the left or right mouse button or the wheel.'),
                                   fg=GOLD)
             self.capturing = None
             self.release_capture()

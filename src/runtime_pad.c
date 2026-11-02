@@ -9,7 +9,8 @@
  *       rotate_ccw rotate_cw (held: the left stick circles counter-clockwise / clockwise, for
  *       the valves and wheels that ask for the stick turned in circles), overlay (opens and
  *       closes the in-game menu, Insert by default; a key or Mouse Middle / 4 / 5), walk (held:
- *       the movement keys push the left stick only part of the way, so the character walks).
+ *       the movement keys push the left stick only part of the way, so the character walks), share
+ *       (F12 by default: saves a screenshot of the game's picture, the PS4 Share button).
  *   pad.<action>=<controller button>   SDL names (a b x y leftshoulder rightshoulder
  *       lefttrigger righttrigger leftstick rightstick back start dpup dpdown dpleft dpright
  *       touchpad misc1 paddle1..paddle4) or "none", for the button actions above.
@@ -118,7 +119,7 @@ enum { BIND_KEY=1, BIND_MOUSE, BIND_WHEEL, BIND_LAYOUT };
 typedef struct { uint8_t kind; int32_t code; } Bind;
 typedef struct { const char *name; uint32_t ps; const char *keys; const char *pad; } Action;
 enum { A_LS_UP=16, A_LS_DOWN, A_LS_LEFT, A_LS_RIGHT, A_RS_UP, A_RS_DOWN, A_RS_LEFT, A_RS_RIGHT,
-       A_ROT_CCW, A_ROT_CW, A_OVERLAY, A_WALK, ACTIONS };
+       A_ROT_CCW, A_ROT_CW, A_OVERLAY, A_WALK, A_SHARE, ACTIONS };
 static const Action actions[ACTIONS]={
     {"cross",BTN_CROSS,"Space","a"}, {"circle",BTN_CIRCLE,"C","b"}, {"square",BTN_SQUARE,"F","x"},
     {"triangle",BTN_TRIANGLE,"E","y"}, {"l1",BTN_L1,"Q","leftshoulder"}, {"r1",BTN_R1,"G","rightshoulder"},
@@ -130,7 +131,7 @@ static const Action actions[ACTIONS]={
     {"ls_up",0,"W",NULL}, {"ls_down",0,"S",NULL}, {"ls_left",0,"A",NULL}, {"ls_right",0,"D",NULL},
     {"rs_up",0,"I",NULL}, {"rs_down",0,"K",NULL}, {"rs_left",0,"J",NULL}, {"rs_right",0,"L",NULL},
     {"rotate_ccw",0,"R",NULL}, {"rotate_cw",0,"T",NULL}, {"overlay",0,"Insert",NULL},
-    {"walk",0,"Left Ctrl",NULL},
+    {"walk",0,"Left Ctrl",NULL}, {"share",0,"F12",NULL},
 };
 #define PAD_TRIGGER_LEFT (-2)
 #define PAD_TRIGGER_RIGHT (-3)
@@ -197,6 +198,21 @@ static void configure_overlay_keys(void) {
         bbgpu_overlay_key_configure(i,kind,code);
     }
 }
+/* The screenshot key (the PS4 Share button, which the games never see: the system takes the picture) is
+ * handled by the window thread like the menu key: key.share, two bindings, a key or Mouse Middle / 4 / 5. */
+static void configure_share_keys(void) {
+    for (int i=0;i<2;++i) {
+        const Bind *b=&input.keys[A_SHARE][i];
+        int kind=BBGPU_OVERLAY_KEY_NONE, code=0;
+        if (b->kind==BIND_KEY) { kind=BBGPU_OVERLAY_KEY_SCANCODE; code=b->code; }
+        else if (b->kind==BIND_LAYOUT) { kind=BBGPU_OVERLAY_KEY_KEYCODE; code=b->code; }
+        else if (b->kind==BIND_MOUSE && (b->code==4 || b->code==8 || b->code==16)) {
+            kind=BBGPU_OVERLAY_KEY_MOUSE;
+            code=b->code==4 ? SDL_BUTTON_MIDDLE : b->code==8 ? SDL_BUTTON_X1 : SDL_BUTTON_X2;
+        } else if (b->kind) printf("Runtime: key.share cannot be a wheel or the left or right mouse button, ignored\n");
+        bbgpu_share_key_configure(i,kind,code);
+    }
+}
 static void load_input(void) {
     for (int a=0;a<ACTIONS;++a) {
         set_keys(a,actions[a].keys);
@@ -239,6 +255,7 @@ static void load_input(void) {
                input.mouse_look ? "on" : "off",input.mouse_sensitivity);
     }
     configure_overlay_keys();
+    configure_share_keys();
     if (input.mouse_sensitivity<=0.0f) input.mouse_sensitivity=1.0f;
     if (input.pad_vibration_strength<0) input.pad_vibration_strength=0;
     if (input.pad_vibration_strength>100) input.pad_vibration_strength=100;
