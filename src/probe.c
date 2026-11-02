@@ -863,8 +863,13 @@ static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t imag
             printf("Callbacks: %s at %#" PRIx64 " (patch)\n",c->name,offset);
             continue;
         }
-        if (!thunks && !(thunks=near_image_memory(8192))) { printf("Callbacks: no thunk memory\n"); return; }
-        if (used+320>8192) break;
+        /* Sized from the table (8 KiB held about 25 code hooks and the loop stopped there without a word). */
+        const size_t thunk_bytes=count*320;
+        if (!thunks && !(thunks=near_image_memory(thunk_bytes))) {
+            printf("Callbacks: no thunk memory near the image: %s and the ones after it not installed\n",c->name);
+            return;
+        }
+        if (used+320>thunk_bytes) { printf("Callbacks: thunk memory full at %s, the rest not installed\n",c->name); break; }
         unsigned char *t=thunks+used, *f=image+offset;
         size_t k=0;
         /* lea rsp, [rsp-0x80] (a hook inside a leaf function must not touch the 128 bytes below rsp that the compiler uses as scratch);
