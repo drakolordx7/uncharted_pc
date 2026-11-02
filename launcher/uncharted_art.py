@@ -341,7 +341,7 @@ def card_scene(key, width, height):
         image = SCENES[key](width * 2, height * 2).resize((width, height), Image.LANCZOS)
     elif POSTERS[key] in _CUSTOM_ART:
         return crop_image(image, (width, height), _CUSTOM_CROPS.get(POSTERS[key]))
-    return _cover(image, (width, height), (0.5, 0.5))
+    return _cover(image, (width, height), (0.5, 0.56))  # between the covers' top and bottom blue strips (rows ~225-670 of 800)
 
 
 def _rounded_mask(size, radius):
