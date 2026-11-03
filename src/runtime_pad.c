@@ -453,6 +453,9 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
         if (mouse_debug()) { static unsigned n; if ((n++&31)==0) printf("Mouse: u2 follow camera %#llx stopped (dt out of range) t=%.4f\n",(unsigned long long)camera,now*1e-6); }
         return;
     }
+    if (follow_pending && u3_aim_fade_window(now)) {   /* U3: the game pulls the walking camera back while the aim fades out (measured after the grenade launcher: kept 0 % for ~1 s, the mouse fell to the emulated stick and hardly moved): that says nothing about the direct mode */
+        follow_pending=0; follow_kept=0.5f; follow_direct=1;
+    }
     if (follow_pending) {
         float kept=wrap_degrees(heading-follow_before)/wrap_degrees(follow_after-follow_before);
         kept=kept<0.0f ? 0.0f : kept>1.0f ? 1.0f : kept;
@@ -4709,11 +4712,13 @@ static void __attribute__((ms_abi)) u3_layer_blend(uint64_t rdi, uint64_t rsi, u
                   * Once detected it holds while the layer stays shown, L2 or not (measured 2026-11-03: the turret camera orbits a pivot 2.33 m straight ahead, no lateral offset) */
         static uint64_t turret_since_us, turret_seen_us; static int turret_on;
         const uint64_t tn=now_us();
+        static uint64_t l2_last_us;
+        if (l2_held) l2_last_us=tn;
         if (turret_on && tn-turret_seen_us>150000) { turret_on=0; turret_since_us=0; }
         uint64_t tvt=0; float tw=0.0f;
         if (safe_read(&tvt,r14,8) && tvt==runtime_image_base()+0x16736f0 && safe_read(&tw,r14+0x108,4) && tw>=0.99f) {
             if (turret_on) turret_seen_us=tn;
-            else if (!l2_held) {
+            else if (!l2_held && !(l2_last_us && tn-l2_last_us<2000000)) {   /* (not just after a real aim: the grenade launcher's layer stays up at full weight ~0.4 s after the release and was taken for a turret: the aim came back by itself 0.3 s later, measured 2026-11-03) */
                 if (!turret_since_us || tn-turret_seen_us>100000) turret_since_us=tn;
                 turret_seen_us=tn;
                 if (tn-turret_since_us>300000) turret_on=1;
@@ -4781,6 +4786,20 @@ static void __attribute__((ms_abi)) u3_layer_blend(uint64_t rdi, uint64_t rsi, u
         const int swap_only=u3_swap_press_us && now_us()-u3_swap_press_us<1500000 && !(u3_roll_press_us && now_us()-u3_roll_press_us<2000000);
         if (swap_only && !(u3_layer_us && now_us()-u3_layer_us<200000)) return;
         if (!swap_only) u3_roll_us=now_us();
+        if (!swap_only && u3_aim_frame_us && now_us()-u3_aim_frame_us>=25000) {   /* the aiming camera is gone while the aim is still held (measured with the grenade launcher: the game drops its camera after the shot, only walking layers are left, and the mouse was read only in the aiming camera's own layer: the picture stood still until the release). The mouse is taken here, once a frame, with the aim's sensitivity, and the absolute heading the layers are put on follows it */
+            static uint64_t gone_us;
+            const uint64_t tn=now_us();
+            if (!(gone_us && tn-gone_us<1500)) {
+                float dx, dy;
+                camera_take(2,&dx,&dy);
+                u3_aim_total_yaw+=dx*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity*input.mouse_aim_sensitivity;
+                u3_aim_total_pitch+=(input.mouse_invert_y ? -dy : dy)*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity*input.mouse_aim_sensitivity;
+                if (u3_aim_e0-u3_aim_total_pitch>80.0f) u3_aim_total_pitch=u3_aim_e0-80.0f;
+                if (u3_aim_e0-u3_aim_total_pitch<-80.0f) u3_aim_total_pitch=u3_aim_e0+80.0f;
+                u2_native_us=tn; gone_us=tn;
+                u3_aim_last_heading=wrap_degrees(u3_aim_h0-u3_aim_total_yaw); u3_aim_last_elev=u3_aim_e0-u3_aim_total_pitch;
+            }
+        }
         /* A roll with the aim held: the roll's own camera layer is in the stack too (measured 2026-10-31, cam of the roll with w=1): it gets the same absolute picture */
         const RuntimeGuestRegs *g=(const RuntimeGuestRegs *)(uintptr_t)(guest_callback_rsp-0x60);
         float *p=(float *)(uintptr_t)g->rax;
