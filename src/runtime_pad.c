@@ -368,6 +368,8 @@ static float u3_walk_shown[3]; static uint64_t u3_walk_shown_us;   /* U3: the po
 static int u3_aim_fade_window(uint64_t now) { return u3_aim_active_us && now-u3_aim_active_us<1500000; }   /* U3: the layer hook (u3_layer_blend) goes on taking queue 2 for 1.5 s after the aim, longer than aim_blend_until_us (1.3 s): measured, in the last 0.2 s it had no mouse and held the picture still */
 static volatile int aim_native;   /* aim_held and the zoom (aiming) camera runs: L2 held during a roll aims nothing yet, and the mouse must keep turning the free view then */
 static volatile int aim_held;             /* L2 is held: the aiming camera (also while it blends in) */
+static volatile int l2_held;              /* L2 itself, without the cases where the game aims on its own (turret) */
+static volatile uint64_t u3_turret_us;    /* U3: last frame the turret's aiming-class layer was shown alone on top */
 static volatile uint64_t look_blend_until_us; /* the look-around camera (V) is blended out for about a second after the key is released: it keeps the mouse until then */
 static volatile int look_held;            /* R3 is held: first-person look around, which turns like the aim */
 static float follow_target;               /* wanted heading (degrees) */
@@ -4255,7 +4257,8 @@ static void __attribute__((ms_abi)) u3_aim_out(uint64_t rdi,uint64_t rsi, uint64
         u3_aim_frame_us=now;
     }
     const float look[3]={0.0f,0.0f,1.0f};
-    const float *shoulder=u3_shoulder_for(r14,o,now);
+    static const float turret_shoulder[3]={0.0f,0.0f,-2.33f};   /* (turret camera: orbit centre 2.33 m straight ahead) */
+    const float *shoulder=u3_turret_us && now-u3_turret_us<100000 ? turret_shoulder : u3_shoulder_for(r14,o,now);
     float f[3];
     quat_rotate(o+4,look,f);
     const float elevation=SDL_asinf(f[1]>1.0f ? 1.0f : f[1]<-1.0f ? -1.0f : f[1])*57.29578f;   /* up positive; looking down by the pitch lowers it */
@@ -4701,6 +4704,22 @@ static void __attribute__((ms_abi)) u3_layer_blend(uint64_t rdi, uint64_t rsi, u
         last_us=t;
         uint64_t vt=0; float w=0.0f;
         if (n_cur<8 && safe_read(&vt,r14,8)) { safe_read(&w,r14+0x108,4); cur[n_cur]=vt-runtime_image_base(); cw[n_cur]=w; ++n_cur; }
+    }
+    if (r14) {   /* U3 turret: the aiming-class layer (+0x16736f0) at full weight with L2 up for 0.3 s: the game aims without L2, the mouse must stay native (u3_turret_us counts as aim_held).
+                  * Once detected it holds while the layer stays shown, L2 or not (measured 2026-11-03: the turret camera orbits a pivot 2.33 m straight ahead, no lateral offset) */
+        static uint64_t turret_since_us, turret_seen_us; static int turret_on;
+        const uint64_t tn=now_us();
+        if (turret_on && tn-turret_seen_us>150000) { turret_on=0; turret_since_us=0; }
+        uint64_t tvt=0; float tw=0.0f;
+        if (safe_read(&tvt,r14,8) && tvt==runtime_image_base()+0x16736f0 && safe_read(&tw,r14+0x108,4) && tw>=0.99f) {
+            if (turret_on) turret_seen_us=tn;
+            else if (!l2_held) {
+                if (!turret_since_us || tn-turret_seen_us>100000) turret_since_us=tn;
+                turret_seen_us=tn;
+                if (tn-turret_since_us>300000) turret_on=1;
+            }
+        }
+        if (turret_on) u3_turret_us=tn;
     }
     if (r14 && !aim_held && (look_held || now_us()<look_blend_until_us)) {
         uint64_t vt=0;
@@ -8259,7 +8278,8 @@ static void sample(PadData *d) {
     replay_sample(d);
     d->buttons|=injected.buttons;
     /* L2 aims; L1 (grenade) aims with the same zoom camera, but only once that camera runs (L1 without a grenade does nothing) */
-    aim_held=(d->buttons & BTN_L2)!=0 || ((d->buttons & BTN_L1) && zoom_camera_us && now_us()-zoom_camera_us<100000) || (u2_zoom_top_us && now_us()-u2_zoom_top_us<100000);
+    l2_held=(d->buttons & BTN_L2)!=0;
+    aim_held=l2_held || ((d->buttons & BTN_L1) && zoom_camera_us && now_us()-zoom_camera_us<100000) || (u2_zoom_top_us && now_us()-u2_zoom_top_us<100000) || (u3_turret_us && now_us()-u3_turret_us<100000);
     { static int prev_circle; const int c=(d->buttons & BTN_CIRCLE)!=0; if (c && !prev_circle && aim_held) u3_roll_press_us=now_us(); prev_circle=c; }   /* U3: the roll (Circle) pressed while aiming */
     { static int prev_l3; const int c=(d->buttons & BTN_L3)!=0; if (c && !prev_l3 && aim_held) u3_swap_press_us=now_us(); prev_l3=c; }   /* U3: the shoulder switch (L3) pressed while aiming */
     if (mouse_debug()) { static int prev_aim=-1; if (aim_held!=prev_aim) printf("Mouse: aim_held=%d T=%.4f\n",aim_held,now_us()*1e-6); prev_aim=aim_held; }
