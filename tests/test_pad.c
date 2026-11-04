@@ -5,6 +5,16 @@
 
 static int capture;
 int bbgpu_overlay_captures_input(void) { return capture; }
+void bbgpu_mouse_configure(int look) { (void)look; }
+void bbgpu_overlay_key_configure(int slot, int kind, int code) { (void)slot; (void)kind; (void)code; }
+void bbgpu_share_key_configure(int slot, int kind, int code) { (void)slot; (void)kind; (void)code; }
+int bbgpu_mouse_sample(float *dx, float *dy, uint32_t *buttons, int *wheel) {
+    *dx=*dy=0; *buttons=0; *wheel=0;
+    return 0;
+}
+int bbgpu_camera_yaw(float *yaw_degrees, double *age_seconds) { (void)yaw_degrees; (void)age_seconds; return 0; }
+int bbgpu_gyro_aim(void) { return 0; }
+void bbgpu_prompts_controller(int device) { (void)device; }
 void bbgpu_menu_state(int open) { (void)open; }
 void bbgpu_game_menu_cursor(int open) { (void)open; }
 void bbgpu_controls_hint(int show, int hot, float x, float y, float w, float h) { (void)show; (void)hot; (void)x; (void)y; (void)w; (void)h; }
@@ -151,5 +161,6 @@ int main(void) {
     assert(SDL_DetachVirtualJoystick(id));
     SDL_Quit();
     unlink(path);
-    puts("PASS: pad ABI, debug camera chord, left/right clicks, SDL touch coordinates, overlay capture");
+    unlink(config);
+    puts("PASS: pad ABI, debug camera chord, left/right clicks, rotate and walk keys, SDL touch, vibration controls, overlay capture");
 }

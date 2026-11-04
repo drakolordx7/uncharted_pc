@@ -45,11 +45,9 @@ NAME = 'Uncharted'
 AUTHOR = 'SuperMedo'
 COMMUNITY_AUTHOR = 'drakolord'
 # This build; GitHub release tags are v<VERSION> (their digits are compared).
-VERSION = '0.3.6'
-# False: no update check, no Updates section, nothing downloaded (an upstream release would replace this modified build).
-UPDATES_ENABLED = False
-RELEASES_API = 'https://api.github.com/repos/Supermedo/uncharted_pc/releases/latest'
-RELEASES_PAGE = 'https://github.com/Supermedo/uncharted_pc/releases/latest'
+VERSION = '0.3.9'
+RELEASES_API = 'https://api.github.com/repos/drakolordx7/uncharted_pc/releases/latest'
+RELEASES_PAGE = 'https://github.com/drakolordx7/uncharted_pc/releases/latest'
 UPDATE_DIR = Path(tempfile.gettempdir()) / 'uncharted-update'
 # Never copied over an installation by an update (the package does not hold them either).
 USER_FILES = ('user', 'out', 'art', 'bbport.ini', 'input.ini', 'last_run.log')
@@ -116,21 +114,23 @@ FRAME_GEN_MULTIPLIERS = [('2', '2×'), ('3', '3× (DLSS, GeForce RTX 50)'),
 # Controls (input.ini, read by the game: src/runtime_pad.c). Actions with their PS4 names, the
 # default keys ("A|B": two bindings) and the default controller buttons (SDL names).
 BUTTON_ACTIONS = [
-    ('cross', 'Cross ✕', 'Space', 'a'), ('circle', 'Circle ○', 'Left Ctrl', 'b'),
+    ('cross', 'Cross ✕', 'Space', 'a'), ('circle', 'Circle ○', 'C', 'b'),
     ('square', 'Square □', 'F', 'x'), ('triangle', 'Triangle △', 'E', 'y'),
-    ('l1', 'L1', 'G', 'leftshoulder'), ('r1', 'R1', 'R', 'rightshoulder'),
+    ('l1', 'L1', 'Q', 'leftshoulder'), ('r1', 'R1', 'G', 'rightshoulder'),
     ('l2', 'L2 (aim)', 'Mouse Right', 'lefttrigger'), ('r2', 'R2 (fire)', 'Mouse Left', 'righttrigger'),
-    ('l3', 'L3', 'Left Shift', 'leftstick'), ('r3', 'R3', 'Mouse Middle', 'rightstick'),
+    ('l3', 'L3', 'Left Shift', 'leftstick'), ('r3', 'R3', 'V', 'rightstick'),
     ('options', 'Options', 'Escape|Return', 'start'), ('touchpad', 'Touchpad', 'Tab', 'back'),
-    ('up', 'D-pad up', 'V', 'dpup'), ('down', 'D-pad down', 'P', 'dpdown'),
-    ('left', 'Weapon 1 (D-pad left)', '1|Wheel Up', 'dpleft'), ('right', 'Weapon 2 (D-pad right)', '2|Wheel Down', 'dpright'),
+    ('up', 'D-pad up', 'Up', 'dpup'), ('down', 'D-pad down', 'Down', 'dpdown'),
+    ('left', 'D-pad left', 'Left|Wheel Up', 'dpleft'), ('right', 'D-pad right', 'Right|Wheel Down', 'dpright'),
 ]
 STICK_ACTIONS = [
     ('ls_up', 'Move forward', 'W'), ('ls_down', 'Move back', 'S'),
     ('ls_left', 'Move left', 'A'), ('ls_right', 'Move right', 'D'),
     ('rs_up', 'Look up', 'I'), ('rs_down', 'Look down', 'K'),
     ('rs_left', 'Look left', 'J'), ('rs_right', 'Look right', 'L'),
-    ('walk', 'Walk (hold with the movement keys)', 'C'),
+    ('rotate_ccw', 'Turn valve / wheel (hold; A and D work too)', 'R'),
+    ('rotate_cw', 'Turn valve / wheel, second key (hold)', 'T'),
+    ('walk', 'Walk (hold with the movement keys)', 'Left Ctrl'),
 ]
 # Hold one of the last two and the left stick circles: the games' valves, wheels and cranks ask for
 # the stick turned in circles, which the eight movement-key directions cannot do (#609).
@@ -237,8 +237,10 @@ APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_
                 'anti_aliasing': 'off', 'aa_sharpness': '0.2', 'frame_generation': 'off',
                 'frame_gen_multiplier': '2', 'extra_env': '', 'close_on_play': False,
                 'mouse_look': True, 'mouse_sensitivity': '1.0', 'mouse_aim_sensitivity': '1.0', 'mouse_invert_y': False,
-                'free_view_smoothing': False, 'aim_raw': False,
-                'pad_invert_y': False, 'key_icons': True, 'art_banner': '', 'art_u1': '', 'art_u2': '', 'art_u3': '', 'steam_art': '', 'art_crops': {}, 'shortcut_name': 'Uncharted: The Nathan Drake Collection', 'shortcut_icon': '', 'trophy_game': 'u1', 'pad_vibration': True, 'pad_vibration_strength': '100', 'button_prompts': 'auto', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True,
+                'free_view_smoothing': False, 'aim_raw': False, 'key_icons': True,
+                'pad_invert_y': False, 'art_banner': '', 'art_u1': '', 'art_u2': '', 'art_u3': '', 'steam_art': '', 'art_crops': {},
+                'shortcut_name': 'Uncharted: The Nathan Drake Collection', 'shortcut_icon': '', 'trophy_game': 'u1',
+                'auto_backup': True, 'backup_keep': '10', 'save_slots': {}, 'pad_vibration': True, 'pad_vibration_strength': '100', 'walk_speed': '45', 'button_prompts': 'auto', 'aim_assist': 'on', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True,
                 **{key: 'auto' for key in FIXES},
                 **{f'{game}_infinite_{cheat}': False for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')}}
 
@@ -398,6 +400,71 @@ def game_available(s, key):
     return (Path(folder) / exe).is_file() or bool(own and (Path(folder) / 'eboot.bin').is_file())
 
 
+def saves_user_dir(s):
+    """The folder the game keeps its saves in (Game page, else user/ beside the launcher)."""
+    return Path(str(s.get('user_dir') or '').strip() or DATA_DIR / 'user')
+
+
+def backup_keep(s):
+    try:
+        return max(1, min(100, int(str(s.get('backup_keep') or '10'))))
+    except ValueError:
+        return 10
+
+
+def backup_before_launch(s):
+    """The automatic backup of every save before a game starts (Saves page), so a crash that damages
+    a save can be undone; None when it is off, there are no saves or nothing changed."""
+    if not s.get('auto_backup', True):
+        return None
+    return uncharted_saves.auto_backup(saves_user_dir(s), backup_keep(s), game=game_info(game_folder(s, s['start'])))
+
+
+def active_slots(s):
+    """{game: slot id} chosen on the Play page (Saves page: save slots)."""
+    value = s.get('save_slots')
+    return {k: str(v) for k, v in value.items() if k in uncharted_slots.GAMES} if isinstance(value, dict) else {}
+
+
+def prepare_slots(s, running=None):
+    """Before a game starts: every game's active slot in the saves folder (the save there stored into
+    its own slot first). Returns {game: slot id in place} (.swapped: the games whose save changed);
+    SlotError while a swap is refused."""
+    user = saves_user_dir(s)
+    placed = uncharted_slots.sync(user, active_slots(s), running or uncharted_saves.game_process_running)
+    if s['start'] in placed:
+        uncharted_slots.mark_played(user, s['start'], placed[s['start']])
+    return placed
+
+
+def shown_slot_name(name):
+    """The name a slot goes by on screen: the stored "Main" is shown translated."""
+    return _('Main') if name == uncharted_slots.DEFAULT_NAME else name
+
+
+_SAVE_EDITOR = []
+
+
+def load_save_editor():
+    """scripts/save_editor.py (BB_SAVE_EDITOR names another copy), or None. The launcher uses
+    describe(save_dir) -> str or dict for the Saves list and open_editor(save_dir, game=, parent=)
+    for the Edit button."""
+    if not _SAVE_EDITOR:
+        module = None
+        for path in (os.environ.get('BB_SAVE_EDITOR'), PORT_DIR / 'scripts' / 'save_editor.py'):
+            if path and Path(path).is_file():
+                try:
+                    import importlib.util
+                    spec = importlib.util.spec_from_file_location('save_editor', str(path))
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    break
+                except Exception:  # a broken editor must not break the launcher
+                    module = None
+        _SAVE_EDITOR.append(module)
+    return _SAVE_EDITOR[0]
+
+
 def mouse_sensitivity(s, key='mouse_sensitivity'):
     """The saved sensitivity as the game reads it: a number in the slider's range."""
     try:
@@ -517,7 +584,8 @@ def write_input_ini(s):
              f"aim_raw={1 if s.get('aim_raw') else 0}",
              f"pad_invert_y={1 if s.get('pad_invert_y') else 0}",
              f"pad_vibration={1 if s.get('pad_vibration', True) else 0}",
-             f"pad_vibration_strength={vibration_strength(s)}"]
+             f"pad_vibration_strength={vibration_strength(s)}",
+             f"walk_speed={walk_speed(s)}"]
     lines += [f'key.{action}={keys.get(action, "")}' for action in DEFAULT_KEYS]
     lines += [f'pad.{action}={pad.get(action, "none")}' for action in DEFAULT_PAD]
     path = input_ini_path()
@@ -615,6 +683,8 @@ def game_environment(s, start=None):
     for key, (_title, _hint, choices) in FIXES.items():
         env.update(choices.get(str(s.get(key) or 'auto'), {}))
     env['BB_BUTTON_PROMPTS'] = str(s.get('button_prompts') or 'auto')
+    if str(s.get('aim_assist') or 'on') == 'off':
+        env['BB_AIM_ASSIST'] = '0'
     env['BB_CHEATS'] = ','.join(f'{game}:{cheat}' for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')
                                 if s.get(f'{game}_infinite_{cheat}'))
     env['BB_KEY_ICONS'] = '1' if s.get('key_icons', True) else '0'
@@ -731,7 +801,7 @@ class Launcher:
         root.protocol('WM_DELETE_WINDOW', self.close)
         root.after(100, self.drain_output)
         root.after(150, self.detect_controller)
-        if UPDATES_ENABLED and self.app.get('check_updates', True):
+        if self.app.get('check_updates', True):
             threading.Thread(target=self.check_update, daemon=True).start()
         threading.Thread(target=self.download_art, daemon=True).start()
         threading.Thread(target=self.download_dlss, daemon=True).start()
@@ -1605,8 +1675,7 @@ class Launcher:
         self.row(f, _('Mouse sensitivity'),
                  Slider(self.tk, self.target(f), self.var('mouse_sensitivity'), MOUSE_SENS_MIN, MOUSE_SENS_MAX, 0.05,
                         COLORS, self.px, self.font_ui_md, width=300, log=True, entry=True),
-                 _('How far the camera turns for a mouse movement; 1.00 is the default. Drag the slider or '
-                   'type a number (0.1 to 10) for a faster turn.'))
+                 _('Default is 1.00.'))
         self.row(f, _('Aim sensitivity'),
                  Slider(self.tk, self.target(f), self.var('mouse_aim_sensitivity'), MOUSE_SENS_MIN, MOUSE_SENS_MAX, 0.05,
                         COLORS, self.px, self.font_ui_md, width=300, log=True, entry=True),
@@ -2515,15 +2584,7 @@ class Launcher:
         self.pill(holder, _('Open the saves folder'),
                   lambda: self.open_path(self.var('user_dir').get(), 'user_dir')).pack(side='left', padx=(8, 0))
         self.section(f, _('Updates'))
-        if not UPDATES_ENABLED:
-            self.note(f, _('Updates are not supported in this version. Visit the original GitHub page to get the '
-                           'latest version (it may not be compatible with this version).'), top=2)
-            card = self.target(f)
-            holder = self.tk.Frame(card, bg=CARD)
-            holder.grid(row=self.next_row(card), column=0, columnspan=2, sticky='w', pady=(12, 0))
-            self.pill(holder, _('Original GitHub page'), lambda: webbrowser.open(RELEASES_PAGE)).pack(side='left')
-            return
-        self.check(f, 'check_updates', _('Look for a new version when the launcher starts'))
+        self.check(f, 'check_updates', _('Check for updates on launch'))
         card = self.target(f)
         holder = self.tk.Frame(card, bg=CARD)
         holder.grid(row=self.next_row(card), column=0, columnspan=2, sticky='w', pady=(12, 0))
@@ -2887,8 +2948,6 @@ class Launcher:
     # ---- updates -------------------------------------------------------------------------------
     def check_update(self, manual=False):
         """Helper thread: asks GitHub for the newest release and offers it when it is newer."""
-        if not UPDATES_ENABLED:
-            return
         try:
             version, url, digest, page = latest_release()
         except (OSError, ValueError, KeyError) as failure:
@@ -2926,9 +2985,7 @@ class Launcher:
         if not self.process:
             self.status.configure(text=text, fg=GOLD)
 
-    def install_update(self, version, url, page):
-        if not UPDATES_ENABLED:
-            return
+    def install_update(self, version, url, digest, page):
         if self.process:
             self.messagebox.showinfo(NAME, _('Close the game before updating.'))
             return
@@ -3456,7 +3513,7 @@ def main():
     args = sys.argv[1:]
     if args and args[0] in ('--run', '--script'):
         sys.exit(run_role(args))
-    if UPDATES_ENABLED and args[:1] == ['--install-update'] and len(args) == 3:
+    if args[:1] == ['--install-update'] and len(args) == 3:
         sys.exit(install_update(args[1], args[2]))
     if FROZEN and UPDATE_DIR not in PORT_DIR.parents:
         shutil.rmtree(UPDATE_DIR, ignore_errors=True)  # what a finished update left behind

@@ -77,12 +77,12 @@ struct Action {
 // Same defaults as the input code reads when input.ini has no entry.
 constexpr Action Actions[] = {
     {"cross", "Space"},       {"circle", "C"},          {"square", "F"},       {"triangle", "E"},
-    {"l1", "G"},              {"r1", "R"},             {"l2", "Mouse Right"}, {"r2", "Mouse Left"},
+    {"l1", "Q"},              {"r1", "G"},             {"l2", "Mouse Right"}, {"r2", "Mouse Left"},
     {"l3", "Left Shift"},     {"r3", "V"},              {"touchpad", "Tab"},   {"ls_up", "W"},
     {"ls_down", "S"},         {"ls_left", "A"},         {"ls_right", "D"},     {"rs_up", "I"},
     {"rs_down", "K"},         {"rs_left", "J"},         {"rs_right", "L"},     {"options", "Escape|Return"},
-    {"up", "Up"},             {"down", "Down"},         {"left", "1|Wheel Up"},
-    {"right", "2|Wheel Down"},
+    {"up", "Up"},             {"down", "Down"},         {"left", "Left|Wheel Up"},
+    {"right", "Right|Wheel Down"},
 };
 constexpr int ActionCount = sizeof(Actions) / sizeof(Actions[0]);
 

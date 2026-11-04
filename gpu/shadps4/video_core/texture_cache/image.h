@@ -175,6 +175,9 @@ public:
         u32 vo_surface : 1;
     } usage{};
     bool scene_proxy = false; ///< bbport: SceneTargets holds a reduced-size proxy of it
+    /// bbport: remade by format (TextureCache::ResolveDepthOverlap): its Vulkan image is recycled
+    /// when it is deleted.
+    bool recycle_on_delete = false;
     u8 bb_prompt = 0;            ///< bbport: a key prompt drawn moved or zoomed (BbKeyIcons::PromptKind)
     u64 bb_key_hash = 0;         ///< bbport: hash of a HUD button texture BbKeyIcons repaints (draw diagnosis)
     bool bb_pulse = false;       ///< bbport: a mask repainted with a blinking halo (BbKeyIcons::IsPulseMask)

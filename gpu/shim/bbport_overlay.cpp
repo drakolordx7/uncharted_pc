@@ -18,6 +18,7 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <thread>
 
 #include <SDL3/SDL.h>
 #include "bbport_keyicons.h"
@@ -196,22 +197,22 @@ constexpr ControlAction ControlActions[] = {
     {"square", {"Melee", "Combat rapproché", "Combate cuerpo a cuerpo", "Combate corpo a corpo"}, "F"},
     {"triangle", {"Interact / Pick up", "Interagir / Ramasser", "Interactuar / Recoger", "Interagir / Pegar"}, "E"},
     {"l1", {"Grenade / Hold to aim", "Grenade / Maintenir pour viser", "Granada / Mantener para apuntar",
-            "Granada / Segurar para mirar"}, "G"},
-    {"r1", {"Reload", "Recharger", "Recargar", "Recarregar"}, "R"},
+            "Granada / Segurar para mirar"}, "Q"},
+    {"r1", {"Reload", "Recharger", "Recargar", "Recarregar"}, "G"},
     {"l2", {"Aim weapon", "Viser avec l'arme", "Apuntar con el arma", "Mirar com a arma"}, "Mouse Right"},
     {"r2", {"Fire weapon", "Tirer avec l'arme", "Disparar el arma", "Atirar com a arma"}, "Mouse Left"},
     {"l3", {"Switch shoulder while aiming", "Changer d'épaule en visant", "Cambiar de hombro al apuntar",
             "Trocar de ombro ao mirar"}, "Left Shift"},
     {"r3", {"Reset camera", "Réinitialiser la caméra", "Reiniciar la cámara", "Redefinir a câmera"}, "V"},
     {"walk", {"Walk (hold with the movement keys)", "Marcher (à tenir avec les touches de déplacement)",
-              "Caminar (mantener con las teclas de movimiento)", "Andar (segurar com as teclas de movimento)"}, ""},
+              "Caminar (mantener con las teclas de movimiento)", "Andar (segurar com as teclas de movimento)"}, "Left Ctrl"},
     {"options", {"Pause", "Pause", "Pausa", "Pausa"}, "Escape|Return"},
     {"touchpad", {"Journal", "Journal", "Diario", "Diário"}, "Tab"},
     {"up", {"Look", "Regarder", "Mirar", "Olhar"}, "Up"},
     {"down", {"D-pad down (photo mode removed)", "Croix du bas (mode photo retiré)", "Cruceta abajo (modo foto retirado)",
               "Direcional para baixo (modo foto removido)"}, "Down"},
-    {"left", {"Weapon 1 (sidearm)", "Arme 1 (arme de poing)", "Arma 1 (arma corta)", "Arma 1 (arma secundária)"}, "1|Wheel Up"},
-    {"right", {"Weapon 2 (main weapon)", "Arme 2 (arme principale)", "Arma 2 (arma principal)", "Arma 2 (arma principal)"}, "2|Wheel Down"},
+    {"left", {"Weapon 1 (sidearm)", "Arme 1 (arme de poing)", "Arma 1 (arma corta)", "Arma 1 (arma secundária)"}, "Left|Wheel Up"},
+    {"right", {"Weapon 2 (main weapon)", "Arme 2 (arme principale)", "Arma 2 (arma principal)", "Arma 2 (arma principal)"}, "Right|Wheel Down"},
 };
 const char* ActionLabel(const ControlAction& action) {
     return action.label[ui_language.load()];

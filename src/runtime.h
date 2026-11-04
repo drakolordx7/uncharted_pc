@@ -100,21 +100,36 @@ int runtime_savedata_pick(int32_t user, const char *title, const char (*names)[3
 void runtime_thread_attach_host(const char *name);
 uintptr_t runtime_fiber_resolve(const char *name);
 void runtime_fiber_report(void);
-/* Host functions the loader runs at the start of matching guest functions (probe.c): the code
- * at `offset` must equal `signature`; `moved` bytes of whole position-independent instructions
- * move to the thunk. The callback gets the guest's rdi, rsi and r14 there, the image base and the
- * registers the thunk saved. Without a callback, `patch` replaces the first `moved` bytes instead
+/* For fault reports (no allocation, any thread): the guest thread and fiber running here, or NULL. */
+const char *runtime_thread_name_here(void);
+const char *runtime_fiber_name_here(void);
+/* Host functions the loader runs at the start of matching guest functions (probe.c). The guest
+ * code is found by `pattern`, not by a fixed address, so every build of a game is covered that
+ * contains it: hex bytes separated by spaces, "??" for a byte that differs between builds
+ * (RIP-relative displacements, call targets). The pattern must match exactly once in the
+ * executable segments; the hook sits `skip` bytes into the match, and `moved` bytes of whole
+ * position-independent instructions there move to the thunk. Entries with the same name are
+ * variants (one per build of the code, or one per copy of the code in a build): each one that matches is
+ * installed, in table order, and a site is hooked once (an entry may be a catch-all after specific ones).
+ * The callback gets the guest's rdi, rsi and r14 there, the image base, and the registers the
+ * thunk saved. Without a callback, `patch` (`moved` bytes) replaces the code at the hook instead
  * (a fix in the game's code). */
 typedef struct {
     uint64_t r15, r13, r12, rbx, r11, r10, r9, r8, rdx, rcx, rax, rflags;
 } RuntimeGuestRegs;
+typedef void (__attribute__((ms_abi)) *RuntimeGuestFn)(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                       const RuntimeGuestRegs *regs);
+/* An entry with `pattern` NULL sits at a fixed `offset` of one build instead (antikmewzik's hooks for
+ * CUSA02320): the code there must equal `signature` (`signature_size` bytes). */
 typedef struct {
     const char *name;
+    const char *pattern;
+    size_t skip, moved;
+    RuntimeGuestFn callback;
+    const unsigned char *patch;
     uint64_t offset;
     const unsigned char *signature;
-    size_t signature_size, moved;
-    void (__attribute__((ms_abi)) *callback)(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14);
-    const unsigned char *patch;
+    size_t signature_size;
 } RuntimeGuestCallback;
 /* 1 once a callback of the U3 image has been installed (the menus' markup differs from U2's: see runtime_pad.c) */
 extern volatile int runtime_u3_game;

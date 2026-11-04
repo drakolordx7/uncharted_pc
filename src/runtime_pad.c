@@ -15,11 +15,14 @@
  *       lefttrigger righttrigger leftstick rightstick back start dpup dpdown dpleft dpright
  *       touchpad misc1 paddle1..paddle4) or "none", for the button actions above.
  *   mouse_look=1  mouse_sensitivity=1.0  mouse_invert_y=0  pad_invert_y=0
- *   free_view_smoothing=0 (U1: 1 keeps the game's smoothing of the walking camera)  aim_raw=0 (U1: 1 = no smoothing while aiming)
+ *   pad_vibration=1  pad_vibration_strength=100  walk_speed=45 (walk key deflection, percent)
+ *   mouse_aim_sensitivity=1.0  free_view_smoothing=0 (U1: 1 keeps the game's smoothing of the walking camera)
+ *   aim_raw=0 (U1: 1 = no smoothing while aiming)
  *
  * Defaults (no file): WASD move, mouse look, left button R2 (fire), right button L2 (aim),
- * Space Cross, C Circle, F Square, E Triangle, G L1 (grenade), R R1, Left Shift L3, V R3, Escape/Enter
- * Options, Tab touchpad, arrow keys and the wheel the d-pad, IJKL the right stick. */
+ * Space Cross, C Circle, F Square, E Triangle, Q L1, G R1, Left Shift L3, V R3, Escape/Enter
+ * Options, Tab touchpad, arrow keys and the wheel the d-pad, IJKL the right stick, R and T
+ * turn the left stick round counter-clockwise and clockwise, Left Ctrl walks. */
 #define _GNU_SOURCE
 #include "runtime.h"
 #include "gpu/bbgpu.h"
@@ -31,6 +34,9 @@
 #include <time.h>
 #include <SDL3/SDL.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 void stickwatch_arm(uint64_t a0, uint64_t a1, uint64_t image);   /* runtime_stickwatch.c, TEMPORARY */
 void stickwatch_enable(int on);
 void stickwatch_summary(void);
@@ -124,42 +130,62 @@ static SDL_Gamepad *current_gamepad(void) {
 #define MOUSE_DEGREES_PER_PIXEL 0.15f
 
 /* ---- bindings (input.ini) ---------------------------------------------------------------- */
-enum { BIND_KEY=1, BIND_MOUSE, BIND_WHEEL };
-typedef struct { uint8_t kind; int16_t code; } Bind;
+/* BIND_KEY: a physical key (SDL scancode, US position). BIND_LAYOUT: a character key the player
+ * chose, found in the current keyboard layout (SDL keycode), so "Z" is the key labelled Z on an
+ * AZERTY keyboard too. The default letters stay positions: WASD is ZQSD on AZERTY. */
+enum { BIND_KEY=1, BIND_MOUSE, BIND_WHEEL, BIND_LAYOUT };
+typedef struct { uint8_t kind; int32_t code; } Bind;
 typedef struct { const char *name; uint32_t ps; const char *keys; const char *pad; } Action;
-enum { A_LS_UP=16, A_LS_DOWN, A_LS_LEFT, A_LS_RIGHT, A_RS_UP, A_RS_DOWN, A_RS_LEFT, A_RS_RIGHT, A_WALK, ACTIONS };
+enum { A_LS_UP=16, A_LS_DOWN, A_LS_LEFT, A_LS_RIGHT, A_RS_UP, A_RS_DOWN, A_RS_LEFT, A_RS_RIGHT,
+       A_ROT_CCW, A_ROT_CW, A_OVERLAY, A_WALK, A_SHARE, ACTIONS };
 static const Action actions[ACTIONS]={
-    {"cross",BTN_CROSS,"Space","a"}, {"circle",BTN_CIRCLE,"Left Ctrl","b"}, {"square",BTN_SQUARE,"F","x"},
-    {"triangle",BTN_TRIANGLE,"E","y"}, {"l1",BTN_L1,"G","leftshoulder"}, {"r1",BTN_R1,"R","rightshoulder"},
+    {"cross",BTN_CROSS,"Space","a"}, {"circle",BTN_CIRCLE,"C","b"}, {"square",BTN_SQUARE,"F","x"},
+    {"triangle",BTN_TRIANGLE,"E","y"}, {"l1",BTN_L1,"Q","leftshoulder"}, {"r1",BTN_R1,"G","rightshoulder"},
     {"l2",BTN_L2,"Mouse Right","lefttrigger"}, {"r2",BTN_R2,"Mouse Left","righttrigger"},
-    {"l3",BTN_L3,"Left Shift","leftstick"}, {"r3",BTN_R3,"Mouse Middle","rightstick"},
+    {"l3",BTN_L3,"Left Shift","leftstick"}, {"r3",BTN_R3,"V","rightstick"},
     {"options",BTN_OPTIONS,"Escape|Return","start"}, {"touchpad",BTN_TOUCHPAD,"Tab","back"},
-    {"up",BTN_UP,"V","dpup"}, {"down",BTN_DOWN,"P","dpdown"},
-    {"left",BTN_LEFT,"1|Wheel Up","dpleft"}, {"right",BTN_RIGHT,"2|Wheel Down","dpright"},
+    {"up",BTN_UP,"Up","dpup"}, {"down",BTN_DOWN,"Down","dpdown"},
+    {"left",BTN_LEFT,"Left|Wheel Up","dpleft"}, {"right",BTN_RIGHT,"Right|Wheel Down","dpright"},
     {"ls_up",0,"W",NULL}, {"ls_down",0,"S",NULL}, {"ls_left",0,"A",NULL}, {"ls_right",0,"D",NULL},
     {"rs_up",0,"I",NULL}, {"rs_down",0,"K",NULL}, {"rs_left",0,"J",NULL}, {"rs_right",0,"L",NULL},
-    {"walk",0,"C",NULL},
+    {"rotate_ccw",0,"R",NULL}, {"rotate_cw",0,"T",NULL}, {"overlay",0,"Insert",NULL},
+    {"walk",0,"Left Ctrl",NULL}, {"share",0,"F12",NULL},
 };
 #define PAD_TRIGGER_LEFT (-2)
 #define PAD_TRIGGER_RIGHT (-3)
 static struct {
     Bind keys[ACTIONS][2];
     int pad[16];               /* SDL_GamepadButton, PAD_TRIGGER_*, or -1 */
-    int mouse_look, mouse_invert_y, pad_invert_y;
+    int mouse_look, mouse_invert_y, pad_invert_y, pad_vibration, pad_vibration_strength, walk_speed, walk_min;
     int free_view_smoothing;   /* 1: keep the game's own smoothing of the walking camera (U1) */
     int aim_raw;               /* 1: no smoothing of the mouse while aiming / looking around (U1) */
     float mouse_sensitivity, mouse_aim_sensitivity;
 } input;
 
-static Bind parse_bind(const char *name) {
+/* Whether `name` is one of the keys in `defaults` ("Escape|Return"). */
+static int default_key(const char *name, const char *defaults) {
+    const size_t length=strlen(name);
+    for (const char *d=defaults; d && *d; ) {
+        const char *end=strchr(d,'|');
+        const size_t n=end ? (size_t)(end-d) : strlen(d);
+        if (n==length && !SDL_strncasecmp(d,name,n)) return 1;
+        d=end ? end+1 : NULL;
+    }
+    return 0;
+}
+static Bind parse_bind(const char *name, const char *defaults) {
     static const struct { const char *name; uint8_t kind; int16_t code; } mouse[]={
         {"Mouse Left",BIND_MOUSE,1}, {"Mouse Right",BIND_MOUSE,2}, {"Mouse Middle",BIND_MOUSE,4},
         {"Mouse 4",BIND_MOUSE,8}, {"Mouse 5",BIND_MOUSE,16}, {"Wheel Up",BIND_WHEEL,1}, {"Wheel Down",BIND_WHEEL,-1},
     };
     for (size_t i=0;i<sizeof(mouse)/sizeof(*mouse);++i)
         if (!SDL_strcasecmp(name,mouse[i].name)) return (Bind){mouse[i].kind,mouse[i].code};
+    if (name[0]>' ' && name[0]<127 && !name[1] && !default_key(name,defaults)) {
+        const SDL_Keycode key=SDL_GetKeyFromName(name);
+        if (key!=SDLK_UNKNOWN) return (Bind){BIND_LAYOUT,(int32_t)key};
+    }
     const SDL_Scancode code=SDL_GetScancodeFromName(name);
-    return code==SDL_SCANCODE_UNKNOWN ? (Bind){0,0} : (Bind){BIND_KEY,(int16_t)code};
+    return code==SDL_SCANCODE_UNKNOWN ? (Bind){0,0} : (Bind){BIND_KEY,(int32_t)code};
 }
 static void set_keys(int action, const char *value) {
     char text[128];
@@ -167,8 +193,8 @@ static void set_keys(int action, const char *value) {
     input.keys[action][0]=input.keys[action][1]=(Bind){0,0};
     char *second=strchr(text,'|');
     if (second) *second++=0;
-    if (*text) input.keys[action][0]=parse_bind(text);
-    if (second && *second) input.keys[action][1]=parse_bind(second);
+    if (*text) input.keys[action][0]=parse_bind(text,actions[action].keys);
+    if (second && *second) input.keys[action][1]=parse_bind(second,actions[action].keys);
 }
 static int parse_pad(const char *value) {
     if (!SDL_strcasecmp(value,"lefttrigger")) return PAD_TRIGGER_LEFT;
@@ -214,6 +240,12 @@ static void load_input(void) {
     }
     input.mouse_look=1; input.mouse_sensitivity=1.0f; input.mouse_aim_sensitivity=1.0f;
     input.free_view_smoothing=0; input.aim_raw=0;
+    input.pad_vibration=1; input.pad_vibration_strength=100; input.walk_speed=45;
+    {   /* BB_WALK_MIN=<percent>: the least deflection the walk key gives (run.py sets it for Uncharted 1) */
+        const char *m=getenv("BB_WALK_MIN");
+        const int v=m ? atoi(m) : 0;
+        input.walk_min=v<0 ? 0 : v>100 ? 100 : v;
+    }
     const char *path=getenv("BB_INPUT_CONFIG");
     FILE *f=path && *path ? fopen(path,"r") : NULL;
     if (f) {
@@ -227,10 +259,16 @@ static void load_input(void) {
             if (!strcmp(key,"mouse_look")) input.mouse_look=atoi(value)!=0;
             else if (!strcmp(key,"mouse_sensitivity")) input.mouse_sensitivity=(float)atof(value);
             else if (!strcmp(key,"mouse_aim_sensitivity")) input.mouse_aim_sensitivity=(float)atof(value);
-            else if (!strcmp(key,"mouse_invert_y")) input.mouse_invert_y=atoi(value)!=0;
-            else if (!strcmp(key,"pad_invert_y")) input.pad_invert_y=atoi(value)!=0;
             else if (!strcmp(key,"free_view_smoothing")) input.free_view_smoothing=atoi(value)!=0;
             else if (!strcmp(key,"aim_raw")) input.aim_raw=atoi(value)!=0;
+            else if (!strcmp(key,"mouse_invert_y")) input.mouse_invert_y=atoi(value)!=0;
+            else if (!strcmp(key,"pad_invert_y")) input.pad_invert_y=atoi(value)!=0;
+            else if (!strcmp(key,"pad_vibration")) input.pad_vibration=atoi(value)!=0;
+            else if (!strcmp(key,"pad_vibration_strength")) input.pad_vibration_strength=atoi(value);
+            else if (!strcmp(key,"walk_speed")) {
+                const int v=atoi(value);
+                input.walk_speed=v<10 ? 10 : v>100 ? 100 : v;
+            }
             else for (int a=0;a<ACTIONS;++a) {
                 if (!strncmp(key,"key.",4) && !strcmp(key+4,actions[a].name)) set_keys(a,value);
                 else if (a<16 && !strncmp(key,"pad.",4) && !strcmp(key+4,actions[a].name)) input.pad[a]=parse_pad(value);
@@ -244,6 +282,8 @@ static void load_input(void) {
     configure_share_keys();
     if (input.mouse_sensitivity<=0.0f) input.mouse_sensitivity=1.0f;
     if (input.mouse_aim_sensitivity<=0.0f) input.mouse_aim_sensitivity=1.0f;
+    if (input.pad_vibration_strength<0) input.pad_vibration_strength=0;
+    if (input.pad_vibration_strength>100) input.pad_vibration_strength=100;
     bbgpu_mouse_configure(input.mouse_look);
 }
 
@@ -266,9 +306,24 @@ static uint8_t mouse_axis(float rate) {
 static int bind_down(const Bind *b, const bool *k, uint32_t mouse, uint64_t now) {
     switch (b->kind) {
     case BIND_KEY: return k && k[b->code];
+    case BIND_LAYOUT: {
+        const SDL_Scancode code=k ? SDL_GetScancodeFromKey((SDL_Keycode)b->code,NULL) : SDL_SCANCODE_UNKNOWN;
+        return code!=SDL_SCANCODE_UNKNOWN && k[code];
+    }
     case BIND_MOUSE: return (mouse & (uint32_t)b->code)!=0;
     case BIND_WHEEL: return now<wheel_until_us[b->code>0 ? 0 : 1];
     default: return 0;
+    }
+}
+/* Once the keyboard is up: where the layout put each character key the player chose. */
+static void log_layout_keys(void) {
+    for (int a=0;a<ACTIONS;++a) for (int i=0;i<2;++i) {
+        const Bind *b=&input.keys[a][i];
+        if (b->kind!=BIND_LAYOUT) continue;
+        const SDL_Scancode code=SDL_GetScancodeFromKey((SDL_Keycode)b->code,NULL);
+        printf("Runtime: key.%s %s: the key labelled so in this keyboard layout (US position %s)\n",
+               actions[a].name,SDL_GetKeyName((SDL_Keycode)b->code),
+               code==SDL_SCANCODE_UNKNOWN ? "none" : SDL_GetScancodeName(code));
     }
 }
 static int action_down(int a, const bool *k, uint32_t mouse, uint64_t now) {
@@ -499,7 +554,6 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
         follow_target=wrap_degrees(heading-correction);
     }
     follow_target=wrap_degrees(follow_target-turn); /* a positive turn lowers the heading */
-    follow_view=follow_direct ? follow_target : heading;
     if (!follow_direct) {
         /* the joypad turns the camera (with the shortfall as extra speed); a small probe turn shows
          * whether direct turns are kept again */
@@ -920,7 +974,7 @@ static void u2_zoom_camera(uint64_t camera, uint64_t image) {
         if (h>1e-4f) {
             const float e=SDL_atan2f(d[1],h)*57.29578f;
             float e2=e-step_pitch;
-            e2=e2>70.0f ? 70.0f : e2<-70.0f ? -70.0f : e2;
+            e2=e2>70.0f ? 70.0f : e2<-85.0f ? -85.0f : e2;
             const float r=e2*0.017453293f, k=SDL_cosf(r)/h;
             d[0]*=k; d[2]*=k; d[1]=SDL_sinf(r);
         }
@@ -1377,418 +1431,6 @@ static const unsigned char u3_follow_camera_code[]={
     0x44,0x89,0x8d,0xa0,0xfe,0xff,0xff,0x48,0x89,0x8d,0x48,0xfe,0xff,0xff,0x49,0x89,0xd5,0x48,0x89,0xf3,
     0x49,0x89,0xff,0x4c,0x8b,0x65,0x20,0x4c,
 };
-static uint64_t u2_dt_holder;   /* the game's clock holder (US 1.02: image+0x1161ee8), from the cover update's lea of it */
-static int u2_camera_kind(uint64_t update) {
-    static struct { uint64_t update; int kind; } known[16];
-    static int n;
-    for (int i=0;i<n;++i) if (known[i].update==update) return known[i].kind;
-    unsigned char code[52];
-    int kind=U2_CAM_OTHER;
-    if (safe_read(code,update,sizeof(code)))
-        for (int k=U2_CAM_FOLLOW;k<=U2_CAM_CHASE && kind==U2_CAM_OTHER;++k) {
-            int same=1;
-            for (int i=0;i<52 && same && u2_update_code[k][i]!=-2;++i) same=u2_update_code[k][i]<0 || code[i]==u2_update_code[k][i];
-            if (same) kind=k;
-        }
-    if (kind==U2_CAM_COVER && !u2_dt_holder) {   /* lea rdx, [rip+holder] at +0x424 */
-        unsigned char lea[7];
-        if (safe_read(lea,update+0x424,7) && lea[0]==0x48 && lea[1]==0x8d && lea[2]==0x15) {
-            int32_t disp; memcpy(&disp,lea+3,4);
-            u2_dt_holder=update+0x424+7+(uint64_t)(int64_t)disp;
-        }
-    }
-    if (n<16) { known[n].update=update; known[n].kind=kind; ++n; }
-    if (mouse_debug()) printf("Mouse: u2 camera update %#llx kind %d\n",(unsigned long long)update,kind);
-    return kind;
-}
-/* The game's frame time (seconds; 0 while paused): float at [[holder]+0x70]+0x14. 1/60 when not known. */
-static float u2_frame_dt(void) {
-    uint64_t holder=0, clock=0;
-    float dt=0.0f;
-    if (!u2_dt_holder || !safe_read(&holder,u2_dt_holder,8) || holder<0x10000 || !safe_read(&clock,holder+0x70,8) ||
-        clock<0x10000 || !safe_read(&dt,clock+0x14,4)) return 1.0f/60.0f;
-    return dt;
-}
-/* The mouse's turn (degrees) for this frame from a queue; the same camera updated twice in one frame gets the same
- * step. Returns 0 while paused (the motion is dropped). */
-typedef struct { float frame_yaw, frame_pitch; uint64_t frame_us, frame_camera; } U2Turn;
-static int u2_mouse_turn(U2Turn *t, int queue, uint64_t camera, float *yaw, float *pitch) {
-    const uint64_t now=now_us();
-    if (t->frame_us && now-t->frame_us<1500 && t->frame_camera==camera) { *yaw=t->frame_yaw; *pitch=t->frame_pitch; return 1; }
-    float dx, dy;
-    camera_take(queue,&dx,&dy);
-    if (!(u2_frame_dt()>0.0f)) return 0;
-    const float k=MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity;
-    *yaw=dx*k; *pitch=(input.mouse_invert_y ? -dy : dy)*k;
-    t->frame_us=now; t->frame_camera=camera; t->frame_yaw=*yaw; t->frame_pitch=*pitch;
-    return 1;
-}
-static void quat_mul(const float *a, const float *b, float *o) { /* quaternions x y z w, o = a * b */
-    o[0]=a[3]*b[0]+a[0]*b[3]+a[1]*b[2]-a[2]*b[1];
-    o[1]=a[3]*b[1]-a[0]*b[2]+a[1]*b[3]+a[2]*b[0];
-    o[2]=a[3]*b[2]+a[0]*b[1]-a[1]*b[0]+a[2]*b[3];
-    o[3]=a[3]*b[3]-a[0]*b[0]-a[1]*b[1]-a[2]*b[2];
-}
-static volatile uint64_t u2_follow_seen_us, u2_cover_seen_us, u2_look_seen_us, u2_chase_us;
-static volatile uint64_t u2_zoom_us;              /* last frame the zoom (aiming) camera was updated */
-static volatile uint64_t u2_zoom_top_us;          /* it ran on top of the stack (the aim, also the truck turret with the aim released) */
-static volatile uint64_t u2_zoom_under_us;        /* under the walking camera, blending out (L2 held in a roll): not an aim */
-static volatile uint64_t u2_zoom_below_cover_us;  /* under the cover or the shield's look camera, blending out: not an aim */
-static volatile uint64_t u2_zoom_below_look_us;
-/* Cover camera: it turns its direction (x y z w at camera+0x1c0) about the vertical by the stick and moves its pitch
- * (degrees, camera+0x1b0, limits -[shape+0xc]..[shape+8], shape = *(camera+0x1290)); the mouse turns both directly, and
- * the camera's position (a spring at +0x1d0) about its pivot (+0x230) by the same angle, so there is nothing left to
- * catch up. While the cover blends in (the stack entry's weight at +0x34 stays at 0 for a fifth of a second, then rises
- * in about a second) the cover is brought in from the first frame, linearly in 0.35 s, and the state is turned by the
- * mouse's turn since the cover began divided by the weight (at most twice), so the picture follows the mouse. */
-static U2Turn u2_cover_turn;
-static void u2_cover_camera(uint64_t camera, uint64_t entry) {
-    u2_cover_seen_us=now_us();
-    if (aim_native || look_held) { float ix, iy; camera_take(3,&ix,&iy); return; }   /* (the aim or look camera has this motion) */
-    float step, step_pitch;
-    if (!u2_mouse_turn(&u2_cover_turn,3,camera,&step,&step_pitch)) return;
-    float *dir=(float *)(uintptr_t)(camera+0x1c0);
-    float *pitch=(float *)(uintptr_t)(camera+0x1b0);
-    uint64_t shape=0;
-    safe_read(&shape,camera+0x1290,8);
-    { /* a camera that has just been made (the cover camera of the next spot) does not hold usable numbers yet */
-        const float *pos=(const float *)(uintptr_t)(camera+0x1d0), *pivot=(const float *)(uintptr_t)(camera+0x230);
-        const float sum=dir[0]+dir[1]+dir[2]+*pitch+pos[0]+pos[1]+pos[2]+pivot[0]+pivot[1]+pivot[2];
-        if (!(sum>-1e6f && sum<1e6f) || shape<0x10000) return;
-    }
-    float limits[2];   /* pitch limits: up to [shape+8], down to -[shape+0xc] (a bad shape pointer: no turn) */
-    if (!safe_read(limits,shape+8,sizeof(limits)) || !(limits[0]>-360.0f && limits[0]<360.0f && limits[1]>-360.0f && limits[1]<360.0f)) return;
-    u2_native_us=now_us();
-    {
-        /* two cover cameras are updated together when one cover leads to another: one slot per camera */
-        static struct { uint64_t camera, seen_us, start_us, frame_us; float total_yaw, total_pitch, done_yaw, done_pitch; int entering; } slot[2];
-        const uint64_t now=now_us();
-        int si=-1;
-        for (int i=0;i<2;++i) if (slot[i].camera==camera && now-slot[i].seen_us<300000) si=i;
-        float w=1.0f;
-        if (entry>0x10000) { float f; if (safe_read(&f,entry+0x34,4) && f>=0.0f && f<=1.0f) w=f; }
-        if (si<0) {   /* a cover camera seen for the first time (or after a pause): the motion queued before it is dropped */
-            si=slot[0].seen_us<=slot[1].seen_us ? 0 : 1;
-            memset(&slot[si],0,sizeof(slot[si]));
-            slot[si].camera=camera; slot[si].start_us=now;
-            slot[si].entering=w<0.05f;   /* (a camera already in the mix, blending out, is not entering) */
-            step=step_pitch=0.0f;
-        }
-        slot[si].seen_us=now;
-        if (u2_cover_turn.frame_us!=slot[si].frame_us) { slot[si].frame_us=u2_cover_turn.frame_us; slot[si].total_yaw+=step; slot[si].total_pitch+=step_pitch; }
-        if (w>=0.999f) slot[si].entering=0;
-        if (slot[si].entering) {
-            float ramp=(float)(now-slot[si].start_us)*(1.0f/350000.0f); ramp=ramp>1.0f ? 1.0f : ramp;
-            if (ramp>w) { w=ramp; if (entry>0x10000) { safe_write(entry+0x34,&w,4); safe_write(entry+0x38,&w,4); } }
-        }
-        const float k=slot[si].entering && w<0.999f ? 1.0f/(w<0.5f ? 0.5f : w) : 1.0f;
-        const float want_yaw=slot[si].total_yaw*k, want_pitch=slot[si].total_pitch*k;
-        step=want_yaw-slot[si].done_yaw; slot[si].done_yaw=want_yaw;
-        step_pitch=want_pitch-slot[si].done_pitch; slot[si].done_pitch=want_pitch;
-    }
-    if (step!=0.0f) {
-        const float a=step*0.017453293f, c=SDL_cosf(a), s=SDL_sinf(a);
-        const float x=dir[0], z=dir[2];
-        dir[0]=x*c-z*s;
-        dir[2]=x*s+z*c;
-        float *pos=(float *)(uintptr_t)(camera+0x1d0);
-        const float *pivot=(const float *)(uintptr_t)(camera+0x230);
-        const float px=pos[0]-pivot[0], pz=pos[2]-pivot[2];
-        pos[0]=pivot[0]+px*c-pz*s;
-        pos[2]=pivot[2]+px*s+pz*c;
-    }
-    if (step_pitch!=0.0f) {
-        const float v=*pitch-step_pitch, lo=-limits[1], hi=limits[0];
-        *pitch=v<lo ? lo : v>hi ? hi : v;
-    }
-    if (mouse_debug() && (step!=0.0f || step_pitch!=0.0f))
-        printf("Mouse: u2 cover t=%.4f step=%.3f pitch step=%.3f pitch=%.3f\n",now_us()*1e-6,step,step_pitch,*pitch);
-}
-/* Look-around camera (R3; update 0x432450 in US 1.02): its yaw and pitch come from the previous orientation quaternion
- * (input block +0x10); the mouse turns that quaternion, yaw about the vertical on the left, pitch about the side on the
- * right. It is also the shield's camera: without R3 (and its blend-out) it keeps the stick. */
-static U2Turn u2_look_turn;
-static void u2_look_camera(uint64_t camera, uint64_t input_block) {
-    u2_look_seen_us=now_us();
-    if (!look_held && now_us()>=look_blend_until_us) return;
-    float step, step_pitch;
-    if (!u2_mouse_turn(&u2_look_turn,2,camera,&step,&step_pitch)) return;
-    u2_native_us=now_us();
-    if (step==0.0f && step_pitch==0.0f) return;
-    float *q=(float *)(uintptr_t)(input_block+0x10);
-    const float yaw[4]={0.0f,SDL_sinf(-step*0.5f*0.017453293f),0.0f,SDL_cosf(-step*0.5f*0.017453293f)};
-    const float pitch[4]={SDL_sinf(step_pitch*0.5f*0.017453293f),0.0f,0.0f,SDL_cosf(step_pitch*0.5f*0.017453293f)};
-    float turned[4], result[4];
-    quat_mul(yaw,q,turned);
-    quat_mul(turned,pitch,result);
-    const float n=SDL_sqrtf(result[0]*result[0]+result[1]*result[1]+result[2]*result[2]+result[3]*result[3]);
-    if (!(n>0.5f)) return;
-    for (int i=0;i<4;++i) q[i]=result[i]/n;
-}
-/* Chapter 5 truck chase (update 0x4496b0 in US 1.02): a yaw and a pitch offset (degrees, camera+0x188 and +0x18c) let the
- * player look around a little (about -15..15 degrees; the picture turns 0.88 degrees per degree, and 1.7 % of the offset
- * goes back to zero each frame). The mouse sets the offsets: the target is kept here and written before each update, a
- * little above to make up for what the update takes back, so the look holds where the mouse leaves it. */
-static U2Turn u2_chase_turn;
-static void u2_chase_camera(uint64_t camera) {
-    if (aim_native || look_held) return;
-    u2_chase_us=now_us();
-    float *off=(float *)(uintptr_t)(camera+0x188);
-    static uint64_t sess_us, sess_camera; static float target_yaw, target_pitch;
-    const uint64_t now=now_us();
-    float step, step_pitch;
-    if (!u2_mouse_turn(&u2_chase_turn,2,camera,&step,&step_pitch)) return;
-    if (!(off[0]>-60.0f && off[0]<60.0f && off[1]>-60.0f && off[1]<60.0f)) return;   /* (a camera not set yet) */
-    if (camera!=sess_camera || now-sess_us>300000) { sess_camera=camera; target_yaw=off[0]; target_pitch=off[1]; step=step_pitch=0.0f; }
-    sess_us=now;
-    u2_native_us=now;
-    target_yaw-=step/0.88f; target_pitch+=step_pitch/0.88f;
-    target_yaw=target_yaw<-15.0f ? -15.0f : target_yaw>15.0f ? 15.0f : target_yaw;
-    target_pitch=target_pitch<-13.0f ? -13.0f : target_pitch>13.0f ? 13.0f : target_pitch;
-    off[0]=target_yaw/0.983f; off[1]=target_pitch/0.983f;
-}
-/* Zoom camera (aiming with L2, the grenade with L1; update 0x452c50 in US 1.02): the stick turns its unit aim direction
- * at camera+0x1f30; the mouse turns it directly (to the right raises atan2(z, x), down lowers the elevation). Two zoom
- * cameras (one per shoulder) are updated while the shoulder switches: both get the same turn. The first frame of an aim
- * drops the motion queued before it. After the aim is released the game blends the camera out for about a second and it
- * keeps the mouse meanwhile, unless it blends out under the cover camera (the cover takes the mouse at once) or under
- * the shield's look camera (the stick turns the picture). */
-static U2Turn u2_zoom_turn;
-static void u2_zoom_camera(uint64_t camera) {
-    static uint64_t last_frame_us;
-    const uint64_t now=now_us();
-    const int first_frame=now-last_frame_us>300000;
-    last_frame_us=now;
-    if ((!aim_held && now>=aim_blend_until_us) || look_held) return;
-    if (!aim_held && u2_zoom_below_look_us && now-u2_zoom_below_look_us<100000) return;
-    if (!aim_held && u2_zoom_below_cover_us && now-u2_zoom_below_cover_us<100000) return;
-    float step, step_pitch;
-    if (!u2_mouse_turn(&u2_zoom_turn,2,1,&step,&step_pitch)) return;
-    u2_native_us=now;
-    if (first_frame) {
-        step=step_pitch=0.0f;
-        u2_zoom_turn.frame_yaw=u2_zoom_turn.frame_pitch=0.0f;   /* (the second shoulder camera of the frame reads these too) */
-    }
-    if (step==0.0f && step_pitch==0.0f) return;
-    float *d=(float *)(uintptr_t)(camera+0x1f30);
-    if (!(d[0]>-1.5f && d[0]<1.5f && d[1]>-1.5f && d[1]<1.5f && d[2]>-1.5f && d[2]<1.5f)) return; /* a new camera: not set yet */
-    if (step!=0.0f) {
-        const float a=step*0.017453293f, c=SDL_cosf(a), s=SDL_sinf(a);
-        const float x=d[0], z=d[2];
-        d[0]=x*c-z*s;
-        d[2]=x*s+z*c;
-    }
-    if (step_pitch!=0.0f) {
-        const float h=SDL_sqrtf(d[0]*d[0]+d[2]*d[2]);
-        if (h>1e-4f) {
-            float e=SDL_atan2f(d[1],h)*57.29578f-step_pitch;
-            e=e>70.0f ? 70.0f : e<-85.0f ? -85.0f : e;
-            const float r=e*0.017453293f, k=SDL_cosf(r)/h;
-            d[0]*=k; d[2]*=k; d[1]=SDL_sinf(r);
-        }
-    }
-    if (mouse_debug()) printf("Mouse: u2 aim t=%.4f step=%.3f pitch step=%.3f dir=(%.3f %.3f %.3f)\n",now*1e-6,step,step_pitch,d[0],d[1],d[2]);
-}
-static void __attribute__((ms_abi)) u2_camera_manager(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14, const RuntimeGuestRegs *regs) {
-    (void)rdi; (void)rsi; (void)image; (void)r14;
-    static int disabled=-1;
-    if (disabled<0) { const char *e=getenv("BB_U2_NATIVE"); disabled=e && atoi(e)==0; }
-    const uint64_t update=regs->r8, camera=regs->r10;
-    if (disabled || !gyro_on() || camera<0x10000 || update<0x10000) return;
-    /* the thunk moves rsp down 0x80 (the red zone) before it saves the block: the guest's rsp is 0x80 above the block */
-    const uint64_t rsp=(uint64_t)(uintptr_t)(regs+1)+0x80;
-    const uint64_t now=now_us();
-    if (!u2_cams_us) printf("Mouse: U2 native cameras on (aim, cover, look around, truck chase)\n");
-    u2_cams_us=now;
-    switch (u2_camera_kind(update)) {
-    case U2_CAM_FOLLOW: u2_follow_seen_us=now; break;   /* turned by u2_follow_camera */
-    case U2_CAM_COVER: u2_cover_camera(camera,regs->r13); break;
-    case U2_CAM_LOOK: u2_look_camera(camera,rsp+0xe0); break;
-    case U2_CAM_CHASE: u2_chase_camera(camera); break;
-    case U2_CAM_ZOOM:
-        u2_zoom_us=now;
-        if (u2_follow_seen_us && now-u2_follow_seen_us<3000) u2_zoom_under_us=now;
-        else if (u2_cover_seen_us && now-u2_cover_seen_us<3000) u2_zoom_below_cover_us=now;
-        else if (u2_look_seen_us && now-u2_look_seen_us<3000) { u2_zoom_below_cover_us=now; u2_zoom_below_look_us=now; }
-        else u2_zoom_top_us=now;
-        u2_zoom_camera(camera);
-        break;
-    default: break;
-    }
-}
-/* Gyro aiming, from Umar-Qayyum-dev's raw mouse aiming (Supermedo/uncharted_pc#561), U1 1.00 and 1.02.
- * The cover camera (CameraControlCover) turns with the right stick in its own update: its horizontal
- * direction (x, 0, z) turns around the vertical, and its pitch (degrees) moves within limits (up to
- * limits[0], down to -limits[1]). At the start of the update the mouse turns both directly, the same
- * amount as the follow camera. */
-static void cover_camera(float *dir, float *pitch, const float *limits) {
-    if (!gyro_on()) return;
-    const uint64_t now=now_us();
-    if (cover_hook_us && now-cover_hook_us>100000 && !(camera_hook_us && now-camera_hook_us<100000)) {
-        float ignore_x, ignore_y;
-        camera_take(0,&ignore_x,&ignore_y);
-    }
-    cover_hook_us=now;
-    follow_push=0.0f;
-    float dx, dy;
-    frame_motion(now,&dx,&dy);
-    if (aim_held && !aim_starting(now)) return; /* the aiming camera takes the mouse */
-    if (mouse_debug()) printf("Mouse: cover t=%.4f dx=%.1f dy=%.1f heading=%.2f pitch=%.2f limits=%.1f..%.1f\n",
-                              now*1e-6,dx,dy,heading_of(dir),*pitch,limits ? -limits[1] : 0.0f,limits ? limits[0] : 0.0f);
-    const float turn=dx*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity;
-    if (turn!=0.0f) {
-        const float a=turn*0.017453293f, c=SDL_cosf(a), s=SDL_sinf(a);
-        const float x=dir[0], z=dir[2];
-        dir[0]=x*c-z*s;
-        dir[2]=x*s+z*c;
-    }
-    cover_view=heading_of(dir);
-    if (dy!=0.0f && limits) {
-        float v=*pitch-(input.mouse_invert_y ? -dy : dy)*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity;
-        if (v>limits[0]) v=limits[0];
-        if (v<-limits[1]) v=-limits[1];
-        *pitch=v;
-    }
-}
-/* Turns an aim direction (x, y, z) by yaw and pitch (degrees), keeping its length; pitch stays
- * within +-70 degrees. Same yaw sense as the follow camera: a positive yaw lowers the heading. */
-static void aim_turn(float *v, float yaw, float pitch) {
-    const float x=v[0], y=v[1], z=v[2];
-    const float len=SDL_sqrtf(x*x+y*y+z*z), h=SDL_sqrtf(x*x+z*z);
-    if (!(len>0.5f && len<1.5f) || h<1e-4f) return;
-    const float a=yaw*0.017453293f, c=SDL_cosf(a), s=SDL_sinf(a);
-    const float hx=(x*c-z*s)/h, hz=(x*s+z*c)/h;
-    float p=SDL_atan2f(y,h)+pitch*0.017453293f;
-    if (p>1.2217f) p=1.2217f;
-    if (p<-1.2217f) p=-1.2217f;
-    v[0]=hx*SDL_cosf(p)*len; v[1]=SDL_sinf(p)*len; v[2]=hz*SDL_cosf(p)*len;
-}
-/* Popping out keeps the aim: the first aim direction of a press turns to press_view, unless that
- * is more than this far. Further away Drake turns his body to aim, and the game itself swings the
- * aim round (40-110 degrees within 0.3 s, measured): a turn of ours on top doubled it. */
-#define POP_OUT_MAX_DEGREES 30.0f
-/* Raw aim. The aim controller (U1 1.02 0x276a10; rsi = the controller) gets the aiming camera's
- * remembered aim direction (camera+0x1830) in rcx: it turns it by the stick, the camera saves it
- * back, and the shown direction adds aim assist and recoil on top. Called from the aiming camera's
- * own call site (return address main_return), the mouse turns that direction directly; other
- * callers are left alone and take no mouse motion. The return address is above the
- * registers the hook saved (the hook is at the function's first instruction). */
-static void raw_aim(const char *game, uint64_t controller, const RuntimeGuestRegs *regs, uint64_t image,
-                    uint64_t main_return, uint64_t main_return_alt) {
-    if (!gyro_on()) return;
-    /* the thunk (probe.c) moves rsp down 0x80 (the red zone) before it saves the block, so the return address is
-     * the word 0x80 bytes above the block */
-    const uint64_t ret=*(const uint64_t *)((uintptr_t)(regs+1)+0x80)-image;
-    float *dir=(float *)(uintptr_t)regs->rcx;
-    static uint64_t other_logged;
-    if (ret!=main_return && ret!=main_return_alt) {
-        if (other_logged!=ret) {
-            other_logged=ret;
-            printf("Gyro: %s aim controller from another caller (return %#llx), left alone\n",game,
-                   (unsigned long long)ret);
-        }
-        return;
-    }
-    static int first=1;
-    if (first) {
-        first=0;
-        printf("Gyro: %s raw aim on: controller %#llx, remembered direction %#llx (controller %+lld)\n",
-               game,(unsigned long long)controller,(unsigned long long)(uintptr_t)dir,
-               (long long)((uintptr_t)dir-controller));
-    }
-    const uint64_t now=now_us();
-    pthread_mutex_lock(&camera_lock);
-    const float dx=aim_dx, dy=aim_dy;
-    aim_dx=aim_dy=0.0f;
-    pthread_mutex_unlock(&camera_lock);
-    aim_direct_us=now;
-    const float k=MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity;
-    if (mouse_debug()) printf("Mouse: aim t=%.4f ctl=%#llx yaw=%.3f pitch=%.3f dx=%.1f dy=%.1f\n",now*1e-6,(unsigned long long)controller,
-                              heading_of(dir),SDL_atan2f(dir[1],SDL_sqrtf(dir[0]*dir[0]+dir[2]*dir[2]))*57.29578f,dx,dy);
-    /* While aim is held the game may swap in new aiming cameras (after a roll: a new one about
-     * every 100 ms while Drake gets up), which threw away the turns given to the one before. A new
-     * controller in the same aim press gets the press's turns on top of the game's own direction; on
-     * the same controller the game's own changes (aim assist, recoil) stay. Two aiming cameras can
-     * also take turns within one frame (blending): each controller keeps how much of this press's
-     * turns it already has, so each gets every turn exactly once. The pop-out turn (press_view) is
-     * the press's first turn. */
-    static uint64_t session_press;
-    static float turned_yaw, turned_pitch; /* this press's turns (degrees) */
-    static struct { uint64_t controller, last_us; float yaw, pitch; } given[4];
-    static float last_dir[3];
-    static int have_last;
-    /* The pop-out turn still to give: in one frame it was a snap (2-25 degrees, at times 60-80), so it
-     * eases in, most of it within 0.2 s (a 0.06 s time constant). */
-    static float pop_left;
-    static uint64_t pop_us;
-    if (session_press!=aim_press_us) {
-        session_press=aim_press_us;
-        turned_yaw=turned_pitch=0.0f;
-        pop_left=0.0f;
-        pop_us=now;
-        memset(given,0,sizeof(given));
-        have_last=0;
-        /* the mouse turned the view during the shoulder move: start where it looks now */
-        float view;
-        if (view_now(now,&view)) { press_view=view; press_view_ok=1; }
-        if (press_view_ok) {
-            const float pop=wrap_degrees(heading_of(dir)-press_view);
-            const int kept=SDL_fabsf(pop)<=POP_OUT_MAX_DEGREES;
-            if (kept) pop_left=pop;
-            printf("Gyro: %s aim press: view %.1f, aim %.1f, turn %.1f%s\n",game,press_view,heading_of(dir),pop,
-                   kept ? "" : " (too far, the game's aim kept)");
-        } else {
-            printf("Gyro: %s aim press: no view known, the game's aim kept\n",game);
-        }
-    }
-    if (!aim_held) return;
-    int slot=0;
-    for (int i=0;i<4;++i) {
-        if (given[i].controller==controller) { slot=i; break; }
-        if (given[i].last_us<given[slot].last_us) slot=i;
-    }
-    /* A new controller that starts where the last one ended (U1 swaps aiming cameras while aiming)
-     * copied the turns already; one that starts elsewhere (after a roll: the game's own direction)
-     * gets them. */
-    if (given[slot].controller!=controller) {
-        given[slot].controller=controller;
-        given[slot].yaw=given[slot].pitch=0.0f;
-        if (have_last && dir[0]*last_dir[0]+dir[1]*last_dir[1]+dir[2]*last_dir[2]>0.9986f) { /* within 3 degrees */
-            given[slot].yaw=turned_yaw; given[slot].pitch=turned_pitch;
-        }
-    }
-    given[slot].last_us=now;
-    if (pop_left!=0.0f) {
-        const float give=SDL_fabsf(pop_left)<0.05f ? pop_left
-                         : pop_left*(1.0f-SDL_expf(-(float)(now-pop_us)*1e-6f/0.06f));
-        turned_yaw+=give;
-        pop_left-=give;
-    }
-    pop_us=now;
-    if (dx!=0.0f || dy!=0.0f) {
-        turned_yaw+=dx*k;
-        turned_pitch+=-(input.mouse_invert_y ? -dy : dy)*k;
-    }
-    const float yaw=turned_yaw-given[slot].yaw, pitch=turned_pitch-given[slot].pitch;
-    if (yaw!=0.0f || pitch!=0.0f) aim_turn(dir,yaw,pitch);
-    given[slot].yaw=turned_yaw; given[slot].pitch=turned_pitch;
-    last_dir[0]=dir[0]; last_dir[1]=dir[1]; last_dir[2]=dir[2]; have_last=1;
-}
-static void __attribute__((ms_abi)) u1_aim_controller(uint64_t output, uint64_t controller, uint64_t image,
-                                                      uint64_t r14, const RuntimeGuestRegs *regs) {
-    (void)output; (void)r14;
-    /* the aiming camera's update calls it with rcx = camera+0x1830: 1.02 at 0xc4c52 (the function is 0x276a10, the
-     * update 0xc43b0), 1.00 at 0xc4b62 (0x2764c0; the code around is the same). Another build is left alone. */
-    raw_aim("U1",controller,regs,image,0xc4c57,0xc4b67);
-}
-/* U1 1.02 cover camera update (vtable 0x927320): rsi = the camera, direction +0x240, pitch +0x230,
- * its settings at +0x1300 with the pitch limits at +0x8 (up) and +0xc (down). */
-static void __attribute__((ms_abi)) u1_cover_camera(uint64_t output, uint64_t camera, uint64_t image,
-                                                    uint64_t r14, const RuntimeGuestRegs *regs) {
-    (void)output; (void)image; (void)r14; (void)regs;
-    const float *settings=*(const float *const *)(uintptr_t)(camera+0x1300);
-    cover_camera((float *)(uintptr_t)(camera+0x240),(float *)(uintptr_t)(camera+0x230),settings ? settings+2 : NULL);
-}
 /* U1: the game's pad update (image+0x117200) fills the caller's joypad state (its first argument):
  * the sticks as floats lx ly rx ry at +0 and again at +0x10, converted from the pad's bytes. Cameras
  * other than the follow camera (aiming: about 45 degrees/s * x|x|, no speed ramp) get the mouse as a
@@ -2039,7 +1681,7 @@ static void __attribute__((ms_abi)) u1b_aim_camera(uint64_t unused0, uint64_t un
             if (h>1e-4f) {
                 float e=SDL_atan2f(aim[1],h)*57.29578f;
                 float e2=e-frame_turn_pitch;
-                e2=e2>70.0f ? 70.0f : e2<-70.0f ? -70.0f : e2;
+                e2=e2>70.0f ? 70.0f : e2<-85.0f ? -85.0f : e2;
                 const float r=e2*0.017453293f, k=SDL_cosf(r)/h;
                 aim[0]*=k; aim[2]*=k; aim[1]=SDL_sinf(r);
                 *pitch-=e2-e;
@@ -2475,64 +2117,7 @@ static const unsigned char u1b_pad_update_code[]={
 static const unsigned char u1b_aim_camera_code[]={
     0xc5,0xf8,0x28,0x84,0x24,0x20,0x01,0x00,0x00,0xc5,0xf8,0x29,0x84,0x24,0x60,0x01,0x00,0x00,
 };
-/* U2 UpdateFocus (player-base.cpp:1101): the camera's look-at spring went NaN once at 240 Hz and
- * the game's assertion ended it. The assertion's call now restarts the spring at the player's
- * target ([rbp-0x60]): position (+0x2b0, y +0x2a4) and velocities (+0x2c0, +0x2a8); a NaN target
- * still stops at the trap. */
-#define U2_FOCUS_RESET \
-    0xc5,0xf8,0x28,0x45,0xa0,                            /* vmovaps xmm0, [rbp-0x60] (the target) */ \
-    0x0f,0x2e,0xc0,0x7a,0x2c,                            /* ucomiss xmm0, xmm0; jp trap */ \
-    0xc5,0xf8,0x29,0x83,0xb0,0x02,0x00,0x00,             /* vmovaps [rbx+0x2b0], xmm0 */ \
-    0xc4,0xe3,0x79,0x17,0x83,0xa4,0x02,0x00,0x00,0x01,   /* vextractps [rbx+0x2a4], xmm0, 1 */ \
-    0xc5,0xf8,0x29,0x45,0xd0,                            /* vmovaps [rbp-0x30], xmm0 */ \
-    0xc5,0xf0,0x57,0xc9,                                 /* vxorps xmm1, xmm1, xmm1 */ \
-    0xc5,0xf8,0x29,0x8b,0xc0,0x02,0x00,0x00,             /* vmovaps [rbx+0x2c0], xmm1 */ \
-    0x83,0xa3,0xa8,0x02,0x00,0x00,0x00,                  /* and dword [rbx+0x2a8], 0 */ \
-    0xeb,0x02,                                           /* jmp (store the focus) */ \
-    0xcd,0x41                                            /* trap: int 0x41 */
-static const unsigned char u2_focus_reset_100[]={U2_FOCUS_RESET};              /* replaces 56 bytes */
-static const unsigned char u2_focus_reset_102[]={0x66,0x90,U2_FOCUS_RESET};    /* 58 bytes: a nop first */
-_Static_assert(sizeof(u2_focus_reset_100)==56 && sizeof(u2_focus_reset_102)==58,"patch sizes");
-/* U2 game/character-leg-ik.cpp:391, assertion IsFinite(deltaTransform): the root delta the leg IK
- * gets from its caller can be NaN for a frame (train wreck, chapter 1: issues #88, #253) and the
- * game stopped. The leg IK only adds its y to two accumulators, so a non-finite delta now counts as
- * no movement: it is zeroed (also in the caller's vector at [r15]) and the update goes on. Build 100
- * (US and EU 1.00) calls the assertion handler (5 bytes), build 102 loads it (7 bytes). */
-#define U2_LEG_IK_ZERO(jump)     0xc5,0xf8,0x57,0xc0,                          /* vxorps xmm0, xmm0, xmm0 */     0xc4,0xc1,0x78,0x29,0x07,                     /* vmovaps [r15], xmm0 */     0xeb,jump                                     /* jmp (the update) */
-#define CC8 0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc
-static const unsigned char u2_leg_ik_zero_100[]={U2_LEG_IK_ZERO(0x2d),CC8,CC8,CC8,CC8,CC8};
-static const unsigned char u2_leg_ik_zero_102[]={U2_LEG_IK_ZERO(0x2f),CC8,CC8,CC8,CC8,CC8,0xcc,0xcc};
-/* U1 and U2 "pAction != NULL" (moveactioncontroller.cpp:40), from Mevlock's dev fork: the
- * player's move actions come from a pool of 64 slots. Two move states swapping every frame
- * (landing into a fight, often right after a jump) keep one action each swap; at 144 FPS bursts
- * took 16-30 slots, and a longer one filled the pool and stopped the game. The slot count passed
- * where the character is set up becomes 256 (+144 KB from the character's heap). One site in U1
- * and one in U2, in every build; U3 has no such pool. */
-static const unsigned char move_pool_256[]={0xb9,0x00,0x01,0x00,0x00}; /* mov ecx, 256 */
-_Static_assert(sizeof(u2_leg_ik_zero_100)==51 && sizeof(u2_leg_ik_zero_102)==53,"patch sizes");
-/* U3 Player::UpdateFocus (player.cpp:1897, assertion m_lookAt.X() == m_lookAt.X(): the crash
- * climbing the fort in chapter 8). The point Nate looks at ([player+0xef0], velocity +0xf00)
- * springs towards a target; once NaN it stays NaN, and the function's own reset (taken when the
- * point is far off) never runs for it: NaN compares false. The assertion's path now takes that
- * reset when the target is a number (the velocity register zeroed first, as on the reset's usual
- * way in); a NaN target still stops the game. BilalReloaded's fix for 1.02 (his Uncharted port,
- * GPL v2, GitHub #13 there), and the same for 1.00 (reset at 0x390779, target at rbp-0xa0, zero in
- * xmm4). */
-static const unsigned char u3_focus_reset_100[]={
-    0xc5,0xd8,0x57,0xe4,                          /* vxorps xmm4, xmm4, xmm4 */
-    0xc5,0xf8,0x28,0x85,0x60,0xff,0xff,0xff,      /* vmovaps xmm0, [rbp-0xa0] (the target) */
-    0xc5,0xf8,0xc2,0xc8,0x00,                     /* vcmpeqps xmm1, xmm0, xmm0 */
-    0xc5,0xf8,0x50,0xc1,                          /* vmovmskps eax, xmm1 */
-    0x83,0xf8,0x0f,                               /* cmp eax, 15 */
-    0x0f,0x84,0xa3,0xfe,0xff,0xff,                /* je the reset (0x390779) */
-    0xcd,0x41,                                    /* the target is NaN too: trap as before */
-    CC8,CC8,0xcc,0xcc,0xcc,
-};
-static const unsigned char u3_focus_reset_102[]={
-    0xc5,0xd0,0x57,0xed,0xc5,0xf8,0x28,0x45,0x80,0xc5,0xf8,0xc2,0xc8,0x00,0xc5,0xf8,0x50,0xc1,
-    0x83,0xf8,0x0f,0x0f,0x84,0xa5,0xfe,0xff,0xff,0xcd,0x41,CC8,CC8,CC8,
-};
-_Static_assert(sizeof(u2_leg_ik_zero)==sizeof(u2_leg_ik_assert_code),"same size");
+/* (antikmewzik's U2 NaN fixes at fixed offsets: the pattern entries u2_focus_reset_100/102 and u2_leg_ik_zero_100/102 cover them) */
 /* U1 1.02: the options menu "Game" (difficulty, subtitles, hints, tutorial tips, friend stats, photo mode) is
  * built in three places, each row a pair of objects (text id at +8) given to the menu by the function at
  * 0x132f00 (rdi the menu, rsi the row). The photo mode row (text id 0xa3da9f13, "Photo Mode Enable
@@ -5338,69 +4923,266 @@ static const unsigned char u3_walk_camera_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,
 static const unsigned char u3_cover_camera_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x38,0x02,0x00,0x00,0x48,0x89,0xd3,0x49};
 static const unsigned char u3_aim_camera_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xb8,0x02,0x00,0x00,0x49,0x89,0xd6,0x49};
 static const unsigned char u3_aim_out_code[]={0xc7,0x43,0x48,0x00,0x00,0x80,0xbf,0xc6,0x43,0x4c,0x00,0xe9,0xbc,0xe9,0xff,0xff};
+/* U2 UpdateFocus (player-base.cpp:1101): the camera's look-at spring went NaN once at 240 Hz and
+ * the game's assertion ended it. The assertion's call now restarts the spring at the player's
+ * target ([rbp-0x60]): position (+0x2b0, y +0x2a4) and velocities (+0x2c0, +0x2a8); a NaN target
+ * still stops at the trap. */
+#define U2_FOCUS_RESET \
+    0xc5,0xf8,0x28,0x45,0xa0,                            /* vmovaps xmm0, [rbp-0x60] (the target) */ \
+    0x0f,0x2e,0xc0,0x7a,0x2c,                            /* ucomiss xmm0, xmm0; jp trap */ \
+    0xc5,0xf8,0x29,0x83,0xb0,0x02,0x00,0x00,             /* vmovaps [rbx+0x2b0], xmm0 */ \
+    0xc4,0xe3,0x79,0x17,0x83,0xa4,0x02,0x00,0x00,0x01,   /* vextractps [rbx+0x2a4], xmm0, 1 */ \
+    0xc5,0xf8,0x29,0x45,0xd0,                            /* vmovaps [rbp-0x30], xmm0 */ \
+    0xc5,0xf0,0x57,0xc9,                                 /* vxorps xmm1, xmm1, xmm1 */ \
+    0xc5,0xf8,0x29,0x8b,0xc0,0x02,0x00,0x00,             /* vmovaps [rbx+0x2c0], xmm1 */ \
+    0x83,0xa3,0xa8,0x02,0x00,0x00,0x00,                  /* and dword [rbx+0x2a8], 0 */ \
+    0xeb,0x02,                                           /* jmp (store the focus) */ \
+    0xcd,0x41                                            /* trap: int 0x41 */
+static const unsigned char u2_focus_reset_100[]={U2_FOCUS_RESET};              /* replaces 56 bytes */
+static const unsigned char u2_focus_reset_102[]={0x66,0x90,U2_FOCUS_RESET};    /* 58 bytes: a nop first */
+_Static_assert(sizeof(u2_focus_reset_100)==56 && sizeof(u2_focus_reset_102)==58,"patch sizes");
+/* U2 game/character-leg-ik.cpp:391, assertion IsFinite(deltaTransform): the root delta the leg IK
+ * gets from its caller can be NaN for a frame (train wreck, chapter 1: issues #88, #253) and the
+ * game stopped. The leg IK only adds its y to two accumulators, so a non-finite delta now counts as
+ * no movement: it is zeroed (also in the caller's vector at [r15]) and the update goes on. Build 100
+ * (US and EU 1.00) calls the assertion handler (5 bytes), build 102 loads it (7 bytes). */
+#define U2_LEG_IK_ZERO(jump)     0xc5,0xf8,0x57,0xc0,                          /* vxorps xmm0, xmm0, xmm0 */     0xc4,0xc1,0x78,0x29,0x07,                     /* vmovaps [r15], xmm0 */     0xeb,jump                                     /* jmp (the update) */
+#define CC8 0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc
+static const unsigned char u2_leg_ik_zero_100[]={U2_LEG_IK_ZERO(0x2d),CC8,CC8,CC8,CC8,CC8};
+static const unsigned char u2_leg_ik_zero_102[]={U2_LEG_IK_ZERO(0x2f),CC8,CC8,CC8,CC8,CC8,0xcc,0xcc};
+/* U1 and U2 "pAction != NULL" (moveactioncontroller.cpp:40), from Mevlock's dev fork: the
+ * player's move actions come from a pool of 64 slots. Two move states swapping every frame
+ * (landing into a fight, often right after a jump) keep one action each swap; at 144 FPS bursts
+ * took 16-30 slots, and a longer one filled the pool and stopped the game. The slot count passed
+ * where the character is set up becomes 256 (+144 KB from the character's heap). One site in U1
+ * and one in U2, in every build; U3 has no such pool. */
+static const unsigned char move_pool_256[]={0xb9,0x00,0x01,0x00,0x00}; /* mov ecx, 256 */
+_Static_assert(sizeof(u2_leg_ik_zero_100)==51 && sizeof(u2_leg_ik_zero_102)==53,"patch sizes");
+/* U3 Player::UpdateFocus (player.cpp:1897, assertion m_lookAt.X() == m_lookAt.X(): the crash
+ * climbing the fort in chapter 8). The point Nate looks at ([player+0xef0], velocity +0xf00)
+ * springs towards a target; once NaN it stays NaN, and the function's own reset (taken when the
+ * point is far off) never runs for it: NaN compares false. The assertion's path now takes that
+ * reset when the target is a number (the velocity register zeroed first, as on the reset's usual
+ * way in); a NaN target still stops the game. BilalReloaded's fix for 1.02 (his Uncharted port,
+ * GPL v2, GitHub #13 there), and the same for 1.00 (reset at 0x390779, target at rbp-0xa0, zero in
+ * xmm4). */
+static const unsigned char u3_focus_reset_100[]={
+    0xc5,0xd8,0x57,0xe4,                          /* vxorps xmm4, xmm4, xmm4 */
+    0xc5,0xf8,0x28,0x85,0x60,0xff,0xff,0xff,      /* vmovaps xmm0, [rbp-0xa0] (the target) */
+    0xc5,0xf8,0xc2,0xc8,0x00,                     /* vcmpeqps xmm1, xmm0, xmm0 */
+    0xc5,0xf8,0x50,0xc1,                          /* vmovmskps eax, xmm1 */
+    0x83,0xf8,0x0f,                               /* cmp eax, 15 */
+    0x0f,0x84,0xa3,0xfe,0xff,0xff,                /* je the reset (0x390779) */
+    0xcd,0x41,                                    /* the target is NaN too: trap as before */
+    CC8,CC8,0xcc,0xcc,0xcc,
+};
+static const unsigned char u3_focus_reset_102[]={
+    0xc5,0xd0,0x57,0xed,0xc5,0xf8,0x28,0x45,0x80,0xc5,0xf8,0xc2,0xc8,0x00,0xc5,0xf8,0x50,0xc1,
+    0x83,0xf8,0x0f,0x0f,0x84,0xa5,0xfe,0xff,0xff,0xcd,0x41,CC8,CC8,CC8,
+};
+_Static_assert(sizeof(u3_focus_reset_100)==51 && sizeof(u3_focus_reset_102)==53,"patch sizes");
+/* Aim assist (Supermedo/uncharted_pc#598). While aiming, each game picks the enemy nearest the
+ * reticle and then (a) slows the turn down (friction: the stick's turn speed is multiplied by a
+ * factor below 1) and (b) turns the aim along with the target (magnetism). Both are applied in the
+ * aiming machine's UpdatePlayerAiming (player-aiming-machine3.cpp), right after it stores whether a
+ * target was found:
+ *   U1: mov [r13+0xcd9], al; je <skip>   (friction scales [r13+0xcc8/0xccc], magnetism [r13+0xcf0/0xcf4])
+ *   U2: mov [r13+0xce1], al; je <skip>   (friction scales [r13+0xcd0/0xcd4], magnetism [r13+0xcf8/0xcfc])
+ *   U3: the same block is guarded by Naughty Dog's own dev menu switch "Disable Aim Assist" (byte +0x3d of
+ *       the per-player debug settings, 64 bytes each): cmp byte [settings+player*64+0x3d], 0; jne <skip>.
+ *       Friction is [r13+0x100/0x104] (back to 1 at 1 per second without a target), magnetism
+ *       [r13+0x134/0x138].
+ * BB_AIM_ASSIST=0 makes that jump unconditional (the je/jne opcode 0f 84/0f 85 becomes nop; jmp with the
+ * same displacement), as the U3 switch does; unset (or any other value) keeps the game's own aim.
+ * Sites: U1 1.00 0x2786d7, 1.02 0x278cc7; U2 1.00 0x336a2e, 1.02 0x71d0ee; U3 1.00 0x31aa32, 1.02 0x92c3ac. */
+static const unsigned char aim_assist_jump[]={0x90,0xe9};
+static int aim_assist_gate(const RuntimeGuestCallback *c, uint64_t offset) {
+    if (!strstr(c->name," aim assist")) return 1;
+    static int off=-1;
+    if (off<0) { const char *t=getenv("BB_AIM_ASSIST"); off=t && t[0]=='0'; }
+    if (!off || !offset) return off;
+    static const struct { uint64_t offset; const char *build; } known[]={
+        {0x2786d7,"U1 1.00"},{0x278cc7,"U1 1.02"},{0x336a2e,"U2 1.00"},{0x71d0ee,"U2 1.02"},
+        {0x31aa32,"U3 1.00"},{0x92c3ac,"U3 1.02"}};
+    const char *build=NULL;
+    for (size_t i=0;i<sizeof(known)/sizeof(*known);++i) if (known[i].offset==offset) build=known[i].build;
+    if (build) printf("Aim assist: off (%s, patched at %#llx)\n",build,(unsigned long long)offset);
+    else printf("Aim assist: off (%.2s, other build, patched at %#llx)\n",c->name,(unsigned long long)offset);
+    return 1;
+}
+/* The camera code, the pad code and the assertion are found by their instructions, so a build of the
+ * game that has them works (version 1.00 and 1.02 are known; "build" below). RIP-relative
+ * displacements and call targets are wildcards. Entries with one name are variants for the builds. */
+/* U1/U2/U3 (both versions): Naughty Dog's constant-update-engine code keeps a table of the resources a shader uses
+ * (header, then 0x30-byte entries) and fills it in a leaf function that holds its running entry indices in the
+ * 128 bytes below rsp (the compiler's red zone). A table placed across a page boundary takes a GPU-tracking write
+ * fault inside that function when the next page is write-protected, and the red zone comes out of the exception
+ * zeroed: one entry then gets the wrong index, its word is garbage, and the draw that walks the table calls a
+ * null member pointer (issue cluster C5). The pages the table covers are written once before the function starts,
+ * so the fault, if there is one, happens while no red-zone data is live. */
+static void __attribute__((ms_abi)) cue_table_pretouch(uint64_t table, uint64_t slots, uint64_t image, uint64_t r14, const RuntimeGuestRegs *regs) {
+    (void)slots; (void)image; (void)r14;
+    const uint32_t count=(uint32_t)regs->rdx;
+    if (!count || count>64) return;
+    const uint64_t end=table+0x28+0x30ull*count;
+    for (uint64_t page=table&~0xfffull;page<end;page+=0x1000) {
+        const uint8_t *at=(const uint8_t *)(uintptr_t)(page<table ? table : page);
+        __asm__ volatile("lock orb $0, (%0)" : : "r"(at) : "memory","cc");
+    }
+}
+/* Wheels and valves (U1). While a wheel waits to be turned, its script asks the native
+ * pad-get-gesture-interval every frame for one of the circle gestures: the left stick clockwise
+ * (hash 0xb50c63fd, the facility generator in "Unwelcome Guests") or counter-clockwise (0x47bb5537,
+ * the submarine hatches). The hook at the native's start notes which one; while it was asked in the
+ * last 0.3 s, the movement keys left and right and the rotate keys turn the left stick in circles
+ * that way (rotate_stick), so A or D turns any wheel. Arguments: rdi the count, rsi the array (pad,
+ * then the gesture name hash at +8). */
+static volatile int wheel_dir;            /* -1 counter-clockwise, 1 clockwise */
+static volatile uint64_t wheel_asked_us;
+static void __attribute__((ms_abi)) u1_gesture_query(uint64_t argc, uint64_t argv, uint64_t image, uint64_t r14, const RuntimeGuestRegs *regs) {
+    (void)image; (void)r14; (void)regs;
+    if (argc<2 || !argv) return;
+    const uint32_t hash=*(const uint32_t *)(uintptr_t)(argv+8);
+    const int dir=hash==0xb50c63fdu ? 1 : hash==0x47bb5537u ? -1 : 0;
+    if (!dir) return;
+    const uint64_t now=now_us();
+    if (wheel_dir!=dir || now-wheel_asked_us>1000000)
+        printf("Pad: a wheel waits for the left stick turned %s\n",dir>0 ? "clockwise" : "counter-clockwise");
+    wheel_dir=dir;
+    wheel_asked_us=now;
+}
+/* antikmewzik's hooks sit at fixed offsets of CUSA02320 (pattern NULL, see RuntimeGuestCallback); their callbacks take
+ * no register block. */
+#define AT(name,off,sig,sig_size,moved_bytes,cb,patch_bytes) \
+    {name,NULL,0,moved_bytes,(RuntimeGuestFn)(void (*)(void))(cb),patch_bytes,off,sig,sig_size}
 static const RuntimeGuestCallback guest_callbacks[]={
-    {"U3 aiming camera (output)",0x515128,u3_aim_out_code,sizeof(u3_aim_out_code),7,u3_aim_out,NULL},
-    {"U3 layer blend (mouse)",0x10193f2,u3_layer_probe_code,sizeof(u3_layer_probe_code),7,u3_layer_blend,NULL},
-    {"U3 walking camera (mouse)",0x4e8e40,u3_walk_camera_code,sizeof(u3_walk_camera_code),8,u3_walk_camera,NULL},
-    {"U3 cover camera (seen)",0x4ce080,u3_cover_camera_code,sizeof(u3_cover_camera_code),8,u3_cover_camera_seen,NULL},
-    {"U3 aiming camera (seen)",0x513890,u3_aim_camera_code,sizeof(u3_aim_camera_code),8,u3_aim_camera_seen,NULL},
-    {"U1 menu event (list jump)",0x1336c0,u1_menu_event_code,sizeof(u1_menu_event_code),6,u1_menu_event,NULL},
-    {"U1 follow camera (mouse)",0xaecf0,u1_follow_camera_code,sizeof(u1_follow_camera_code),6,u1_follow_camera,NULL},
-    {"U1 pad update (mouse)",0x117200,u1_pad_update_code,sizeof(u1_pad_update_code),6,u1_pad_update,NULL},
-    {"U1 joypad sticks (mouse)",0x11784e,u1_joypad_sticks_code,sizeof(u1_joypad_sticks_code),5,u1_joypad_sticks,NULL},
-    {"U1 follow camera (mouse, 1.02)",0xaede0,u1b_follow_camera_code,sizeof(u1b_follow_camera_code),6,u1b_follow_camera,NULL},
-    {"U1 pad update (mouse, 1.02)",0x117350,u1b_pad_update_code,sizeof(u1b_pad_update_code),6,u1_pad_update,NULL},
-    {"U1 joypad sticks (mouse, 1.02)",0x11799e,u1_joypad_sticks_code,sizeof(u1_joypad_sticks_code),5,u1_joypad_sticks,NULL},
-    {"U1 aiming camera (mouse, 1.02)",0xb62a7,u1b_aim_camera_code,sizeof(u1b_aim_camera_code),9,u1b_aim_camera,NULL},
-    {"U1 zoom camera entry (mouse, 1.02)",0xc43b0,u1b_zoom_entry_code,sizeof(u1b_zoom_entry_code),6,u1b_zoom_entry,NULL},
-    {"U1 look-around camera (mouse, 1.02)",0xb3930,u1b_look_camera_code,sizeof(u1b_look_camera_code),6,u1b_look_camera,NULL},
-    {"U1 cover camera (mouse, 1.02)",0xa3f40,u1b_cover_camera_code,sizeof(u1b_cover_camera_code),6,u1b_cover_camera,NULL},
-    {"U1 turret camera (mouse, 1.02)",0x2a9690,u1b_turret_camera_code,sizeof(u1b_turret_camera_code),6,u1b_turret_camera,NULL},
-    {"U2 follow camera (mouse)",0x171fe0,u2_follow_camera_code,sizeof(u2_follow_camera_code),6,u2_follow_camera,NULL},
-    {"U3 follow camera (mouse)",0x121b90,u3_follow_camera_code,sizeof(u3_follow_camera_code),6,u3_follow_camera,NULL},
-    {"U2 camera update (mouse, collection)",0x4374cc,u2b_camera_hook_code,sizeof(u2b_camera_hook_code),7,u2b_camera_hook,NULL},
-    {"U2 stick filter (collection)",0x4316cc,u2_stick_filter_code,sizeof(u2_stick_filter_code),5,u2_stick_filter,NULL},
-    {"U2 list widget update (collection)",0x57e410,u2_bind_code,sizeof(u2_bind_code),8,u2_widget_hook,NULL},
-    {"U2 treasure model (mouse, collection)",0x5d7c05,u2_model_code,sizeof(u2_model_code),8,u2_model_hook,NULL},
-    {"U3 treasure model (mouse, collection)",0x65f6b0,u3_model_code,sizeof(u3_model_code),8,u3_model_hook,NULL},
-    {"U2 prompt bar: compare-with-friends prompt (hook, collection)",0x5a54c7,u2_compare_cmp_code,sizeof(u2_compare_cmp_code),5,u2_compare_prompt,NULL},
-    {"U2 prompt bar: no compare-with-friends prompt (collection)",0x5a54cc,u2_compare_jz_code,sizeof(u2_compare_jz_code),sizeof(u2_compare_jz_patch),NULL,u2_compare_jz_patch},
-    {"U2 menu text probe (collection)",0x5b56d0,u2_text_probe_code,sizeof(u2_text_probe_code),8,u2_text_probe,NULL},
-    {"U3 menu text probe (collection)",0x63d6f0,u2_text_probe_code,sizeof(u2_text_probe_code),8,u2_text_probe,NULL},
-    {"U3 slider draw (collection)",0x5e2190,u2_bind_code,sizeof(u2_bind_code),8,u3_widget_hook,NULL},
-    {"U3 list widget draw (collection)",0x5dca50,u2_bind_code,sizeof(u2_bind_code),8,u3_widget_hook,NULL},
-    {"U3 list widget draw (rows, scroll bar)",0x5e3e60,u2_bind_code,sizeof(u2_bind_code),8,u3_list_hook,NULL},
-    {"U3 menu builder (photo row)",0x649660,u2_menu_builder_code,sizeof(u2_menu_builder_code),6,u3_menu_builder_hook,NULL},
-    {"U3 list widget draw (option rows)",0x5de7c0,u2_bind_code,sizeof(u2_bind_code),8,u3_option_row_hook,NULL},
-    {"U3 carousel draw (chapters)",0x5eccb0,u2_bind_code,sizeof(u2_bind_code),8,u3_carousel_hook,NULL},
-    {"U3 dialog choices draw (confirmation boxes)",0x5e0de0,u2_bind_code,sizeof(u2_bind_code),8,u3_dialog_hook,NULL},
-    {"U3 prompt bar: no compare-with-friends prompt (collection)",0x627d65,u3_compare_cmp_code,sizeof(u3_compare_cmp_code),sizeof(u3_compare_cmp_patch),NULL,u3_compare_cmp_patch},
-    {"U3 prompt bar flags (collection)",0x6277e8,u3_bar_flags_code,sizeof(u3_bar_flags_code),6,u3_bar_flags,NULL},
-    {"U2 menu builder probe (collection)",0x5c53a0,u2_menu_builder_code,sizeof(u2_menu_builder_code),6,u2_menu_builder_probe,NULL},
-    {"U2 text lookup probe (collection)",0xcddc00,u2_text_lookup_code,sizeof(u2_text_lookup_code),6,u2_text_lookup_probe,NULL},
-    {"U3 text lookup probe (collection)",0xf32ae0,u2_text_lookup_code,sizeof(u2_text_lookup_code),6,u2_text_lookup_probe,NULL},
-    {"U1 controls menu: keyboard row",0x145881,u1_add_keys_row_code,sizeof(u1_add_keys_row_code),5,u1_add_keys_row,NULL},
-    {"U1 compare-with-friends prompt (hook)",0x128f64,u1_compare_code,sizeof(u1_compare_code),5,u1_compare_prompt,NULL},
-    {"U1 compare-with-friends prompt (skip 1)",0x128f69,u1_compare_je_code,sizeof(u1_compare_je_code),sizeof(u1_compare_je_patch),NULL,u1_compare_je_patch},
-    {"U1 compare-with-friends prompt (skip 2)",0x128f76,u1_compare_jmp_code,sizeof(u1_compare_jmp_code),sizeof(u1_compare_jmp_patch),NULL,u1_compare_jmp_patch},
-    {"U1 menu add item",0x132f00,u1_menu_add_item_code,sizeof(u1_menu_add_item_code),6,u1_menu_add_item,NULL},
-    {"U1 prompt bar flags",0x128c8a,u1_bar_flags_code,sizeof(u1_bar_flags_code),10,u1_bar_flags,NULL},
-    {"U1 credits tick",0x3b41e0,u1_credits_code,sizeof(u1_credits_code),6,u1_credits_tick,NULL},
-    {"U1 menu text draw",0x13acf0,u1_text_draw_code,sizeof(u1_text_draw_code),6,u1_text_draw,NULL},
-    {"U1 menu item draw (1)",0x133fbc,u1_menu_item_begin_code,sizeof(u1_menu_item_begin_code),9,u1_menu_item_begin,NULL},
-    {"U1 menu item draw end (1)",0x133fc8,u1_menu_item_end1_code,sizeof(u1_menu_item_end1_code),7,u1_menu_item_end,NULL},
-    {"U1 menu item draw (2)",0x133feb,u1_menu_item_begin_code,sizeof(u1_menu_item_begin_code),9,u1_menu_item_begin,NULL},
-    {"U1 menu item draw end (2)",0x133ff7,u1_menu_item_end2_code,sizeof(u1_menu_item_end2_code),8,u1_menu_item_end,NULL},
-    {"U1 options menu without photo mode (1)",0x144e3b,u1_photo_row_1_code,sizeof(u1_photo_row_1_code),
-     sizeof(u1_photo_row_1_patch),NULL,u1_photo_row_1_patch},
-    {"U1 options menu without photo mode (2)",0x1450d4,u1_photo_row_2_code,sizeof(u1_photo_row_2_code),
-     sizeof(u1_photo_row_2_patch),NULL,u1_photo_row_2_patch},
-    {"U1 options menu without photo mode (3)",0x1452eb,u1_photo_row_3_code,sizeof(u1_photo_row_3_code),
-     sizeof(u1_photo_row_3_patch),NULL,u1_photo_row_3_patch},
-    {"U2 camera focus NaN reset",0x33ba13,u2_focus_assert_code,sizeof(u2_focus_assert_code),
-     sizeof(u2_focus_reset),NULL,u2_focus_reset},
-    {"U2 leg IK NaN delta",0x8ec618,u2_leg_ik_assert_code,sizeof(u2_leg_ik_assert_code),
-     sizeof(u2_leg_ik_zero),NULL,u2_leg_ik_zero},
+    /* U1 script native pad-get-gesture-interval (1.00 at 0x2f3130, 1.02 at 0x2f37c0) */
+    {"U1 wheel gesture query",
+      "55 48 89 e5 41 57 41 56 41 54 53 48 83 ec 10 83 ff 02 0f 8c ?? ?? ?? ?? 48 63 06 41 be 01 00 "
+      "00 00 48 83 f8 04 77 0b 48 8d 0d ?? ?? ?? ?? 44 8b 34 81 44 8b 66 08 49 63 c6 48 69 d8 78 01 "
+      "00 00",
+      0x0, 6, u1_gesture_query, NULL, 0, NULL, 0},
+    /* U2 leg IK NaN delta, build 100 */
+    {"U2 leg IK NaN delta",
+      "e8 ?? ?? ?? ?? 48 85 c0 74 27 48 8d 3d ?? ?? ?? ?? 48 8d 35 "
+      "?? ?? ?? ?? 48 8d 15 ?? ?? ?? ?? 48 8d 0d ?? ?? ?? ?? 41 b8 "
+      "87 01 00 00 45 31 c9 ff d0 cd 41 c4 c1 78 28 07 c4 e3 79 04 c0 01",
+      0x0, 51, NULL, u2_leg_ik_zero_100, 0, NULL, 0},
+    /* U2 leg IK NaN delta, build 102 */
+    {"U2 leg IK NaN delta",
+      "48 8b 05 ?? ?? ?? ?? 48 85 c0 74 27 48 8d 3d ?? ?? ?? ?? 48 "
+      "8d 35 ?? ?? ?? ?? 48 8d 15 ?? ?? ?? ?? 48 8d 0d ?? ?? ?? ?? "
+      "41 b8 87 01 00 00 45 31 c9 ff d0 cd 41 c4 c1 78 28 07 c4 e3 79 04 c0 01",
+      0x0, 53, NULL, u2_leg_ik_zero_102, 0, NULL, 0},
+    /* U1 and U2 move action pool: mov edx,6; mov ecx,64 (slots); mov r8d,32 */
+    {"U1/U2 move action pool 256 slots",
+      "ba 06 00 00 00 b9 40 00 00 00 41 b8 20 00 00 00",
+      0x5, 5, NULL, move_pool_256, 0, NULL, 0},
+    /* U3 player focus NaN reset, build 100 */
+    {"U3 player focus NaN reset",
+      "c4 e3 79 04 cb 00 c5 f0 c2 c9 00 c5 f8 50 c1 83 f8 0f 74 38 "
+      "e8 ?? ?? ?? ?? 48 85 c0 74 27 48 8d 3d ?? ?? ?? ?? 48 8d 35 "
+      "?? ?? ?? ?? 48 8d 15 ?? ?? ?? ?? 48 8d 0d ?? ?? ?? ?? 41 b8 "
+      "69 07 00 00 45 31 c9 ff d0 cd 41 c5 f8 28 45 c0",
+      0x14, 51, NULL, u3_focus_reset_100, 0, NULL, 0},
+    /* U3 player focus NaN reset, build 102 (BilalReloaded) */
+    {"U3 player focus NaN reset",
+      "c4 e3 79 04 cb 00 c5 f0 c2 c9 00 c5 f8 50 c1 83 f8 0f 74 3a "
+      "48 8b 05 ?? ?? ?? ?? 48 85 c0 74 27 48 8d 3d ?? ?? ?? ?? 48 "
+      "8d 35 ?? ?? ?? ?? 48 8d 15 ?? ?? ?? ?? 48 8d 0d ?? ?? ?? ?? "
+      "41 b8 6a 07 00 00 45 31 c9 ff d0 cd 41",
+      0x14, 53, NULL, u3_focus_reset_102, 0, NULL, 0},
+    /* U2 camera focus NaN reset, build 100 */
+    {"U2 camera focus NaN reset",
+      "e8 ?? ?? ?? ?? 48 85 c0 74 27 48 8d 3d ?? ?? ?? ?? 48 8d 35 "
+      "?? ?? ?? ?? 48 8d 15 ?? ?? ?? ?? 48 8d 0d ?? ?? ?? ?? 41 b8 "
+      "4d 04 00 00 45 31 c9 ff d0 cd 41 c5 f8 28 45 d0",
+      0x0, 56, NULL, u2_focus_reset_100, 0, NULL, 0},
+    /* U2 camera focus NaN reset, build 102 */
+    {"U2 camera focus NaN reset",
+      "48 8b 05 ?? ?? ?? ?? 48 85 c0 74 27 48 8d 3d ?? ?? ?? ?? 48 "
+      "8d 35 ?? ?? ?? ?? 48 8d 15 ?? ?? ?? ?? 48 8d 0d ?? ?? ?? ?? "
+      "41 b8 4d 04 00 00 45 31 c9 ff d0 cd 41 c5 f8 28 45 d0",
+      0x0, 58, NULL, u2_focus_reset_102, 0, NULL, 0},
+
+    /* Aim assist off (BB_AIM_ASSIST=0, see aim_assist_gate; the names select it there): U1 and U2 both builds, U3 1.02, U3 1.00 */
+    {"U1 aim assist",
+      "48 8b 85 ?? ?? ?? ?? 24 01 41 88 85 d9 0c 00 00 0f 84 ?? ?? ?? ?? 48 8b 85",
+      16, 2, NULL, aim_assist_jump, 0, NULL, 0},
+    {"U2 aim assist",
+      "48 8b 85 ?? ?? ?? ?? 24 01 41 88 85 e1 0c 00 00 0f 84 ?? ?? ?? ?? 48 8b 85",
+      16, 2, NULL, aim_assist_jump, 0, NULL, 0},
+    {"U3 aim assist",
+      "48 8d 15 ?? ?? ?? ?? 80 7c 0a 3d 00 0f 85 ?? ?? ?? ?? 4d 89 ee 89 c0 48 8b 9c c5",
+      12, 2, NULL, aim_assist_jump, 0, NULL, 0},
+    {"U3 aim assist",
+      "48 8d 0d ?? ?? ?? ?? 80 7c 01 3d 00 0f 85 ?? ?? ?? ?? 48 8b 85 ?? ?? ?? ?? 41 89 c6",
+      12, 2, NULL, aim_assist_jump, 0, NULL, 0},
+
+    /* The 7 bytes after the mov r9 are `mov qword [rdi], 0`: link_modules.py (patches/redzone.json, PR #403) replaces that
+     * store with a jump to a red-zone-safe copy on Windows, so they are masked and the hook is found either way. */
+    {"CUE table fill",
+      "55 41 57 41 56 41 55 41 54 53 49 b9 00 24 00 0d 10 00 00 00 ?? ?? ?? ?? ?? ?? ?? 45 31 f6",
+      0, 5, cue_table_pretouch, NULL, 0, NULL, 0},
+    AT("U3 aiming camera (output)",0x515128,u3_aim_out_code,sizeof(u3_aim_out_code),7,u3_aim_out,NULL),
+    AT("U3 layer blend (mouse)",0x10193f2,u3_layer_probe_code,sizeof(u3_layer_probe_code),7,u3_layer_blend,NULL),
+    AT("U3 walking camera (mouse)",0x4e8e40,u3_walk_camera_code,sizeof(u3_walk_camera_code),8,u3_walk_camera,NULL),
+    AT("U3 cover camera (seen)",0x4ce080,u3_cover_camera_code,sizeof(u3_cover_camera_code),8,u3_cover_camera_seen,NULL),
+    AT("U3 aiming camera (seen)",0x513890,u3_aim_camera_code,sizeof(u3_aim_camera_code),8,u3_aim_camera_seen,NULL),
+    AT("U1 menu event (list jump)",0x1336c0,u1_menu_event_code,sizeof(u1_menu_event_code),6,u1_menu_event,NULL),
+    AT("U1 follow camera (mouse)",0xaecf0,u1_follow_camera_code,sizeof(u1_follow_camera_code),6,u1_follow_camera,NULL),
+    AT("U1 pad update (mouse)",0x117200,u1_pad_update_code,sizeof(u1_pad_update_code),6,u1_pad_update,NULL),
+    AT("U1 joypad sticks (mouse)",0x11784e,u1_joypad_sticks_code,sizeof(u1_joypad_sticks_code),5,u1_joypad_sticks,NULL),
+    AT("U1 follow camera (mouse, 1.02)",0xaede0,u1b_follow_camera_code,sizeof(u1b_follow_camera_code),6,u1b_follow_camera,NULL),
+    AT("U1 pad update (mouse, 1.02)",0x117350,u1b_pad_update_code,sizeof(u1b_pad_update_code),6,u1_pad_update,NULL),
+    AT("U1 joypad sticks (mouse, 1.02)",0x11799e,u1_joypad_sticks_code,sizeof(u1_joypad_sticks_code),5,u1_joypad_sticks,NULL),
+    AT("U1 aiming camera (mouse, 1.02)",0xb62a7,u1b_aim_camera_code,sizeof(u1b_aim_camera_code),9,u1b_aim_camera,NULL),
+    AT("U1 zoom camera entry (mouse, 1.02)",0xc43b0,u1b_zoom_entry_code,sizeof(u1b_zoom_entry_code),6,u1b_zoom_entry,NULL),
+    AT("U1 look-around camera (mouse, 1.02)",0xb3930,u1b_look_camera_code,sizeof(u1b_look_camera_code),6,u1b_look_camera,NULL),
+    AT("U1 cover camera (mouse, 1.02)",0xa3f40,u1b_cover_camera_code,sizeof(u1b_cover_camera_code),6,u1b_cover_camera,NULL),
+    AT("U1 turret camera (mouse, 1.02)",0x2a9690,u1b_turret_camera_code,sizeof(u1b_turret_camera_code),6,u1b_turret_camera,NULL),
+    AT("U2 follow camera (mouse)",0x171fe0,u2_follow_camera_code,sizeof(u2_follow_camera_code),6,u2_follow_camera,NULL),
+    AT("U3 follow camera (mouse)",0x121b90,u3_follow_camera_code,sizeof(u3_follow_camera_code),6,u3_follow_camera,NULL),
+    AT("U2 camera update (mouse, collection)",0x4374cc,u2b_camera_hook_code,sizeof(u2b_camera_hook_code),7,u2b_camera_hook,NULL),
+    AT("U2 stick filter (collection)",0x4316cc,u2_stick_filter_code,sizeof(u2_stick_filter_code),5,u2_stick_filter,NULL),
+    AT("U2 list widget update (collection)",0x57e410,u2_bind_code,sizeof(u2_bind_code),8,u2_widget_hook,NULL),
+    AT("U2 treasure model (mouse, collection)",0x5d7c05,u2_model_code,sizeof(u2_model_code),8,u2_model_hook,NULL),
+    AT("U3 treasure model (mouse, collection)",0x65f6b0,u3_model_code,sizeof(u3_model_code),8,u3_model_hook,NULL),
+    AT("U2 prompt bar: compare-with-friends prompt (hook, collection)",0x5a54c7,u2_compare_cmp_code,sizeof(u2_compare_cmp_code),5,u2_compare_prompt,NULL),
+    AT("U2 prompt bar: no compare-with-friends prompt (collection)",0x5a54cc,u2_compare_jz_code,sizeof(u2_compare_jz_code),sizeof(u2_compare_jz_patch),NULL,u2_compare_jz_patch),
+    AT("U2 menu text probe (collection)",0x5b56d0,u2_text_probe_code,sizeof(u2_text_probe_code),8,u2_text_probe,NULL),
+    AT("U3 menu text probe (collection)",0x63d6f0,u2_text_probe_code,sizeof(u2_text_probe_code),8,u2_text_probe,NULL),
+    AT("U3 slider draw (collection)",0x5e2190,u2_bind_code,sizeof(u2_bind_code),8,u3_widget_hook,NULL),
+    AT("U3 list widget draw (collection)",0x5dca50,u2_bind_code,sizeof(u2_bind_code),8,u3_widget_hook,NULL),
+    AT("U3 list widget draw (rows, scroll bar)",0x5e3e60,u2_bind_code,sizeof(u2_bind_code),8,u3_list_hook,NULL),
+    AT("U3 menu builder (photo row)",0x649660,u2_menu_builder_code,sizeof(u2_menu_builder_code),6,u3_menu_builder_hook,NULL),
+    AT("U3 list widget draw (option rows)",0x5de7c0,u2_bind_code,sizeof(u2_bind_code),8,u3_option_row_hook,NULL),
+    AT("U3 carousel draw (chapters)",0x5eccb0,u2_bind_code,sizeof(u2_bind_code),8,u3_carousel_hook,NULL),
+    AT("U3 dialog choices draw (confirmation boxes)",0x5e0de0,u2_bind_code,sizeof(u2_bind_code),8,u3_dialog_hook,NULL),
+    AT("U3 prompt bar: no compare-with-friends prompt (collection)",0x627d65,u3_compare_cmp_code,sizeof(u3_compare_cmp_code),sizeof(u3_compare_cmp_patch),NULL,u3_compare_cmp_patch),
+    AT("U3 prompt bar flags (collection)",0x6277e8,u3_bar_flags_code,sizeof(u3_bar_flags_code),6,u3_bar_flags,NULL),
+    AT("U2 menu builder probe (collection)",0x5c53a0,u2_menu_builder_code,sizeof(u2_menu_builder_code),6,u2_menu_builder_probe,NULL),
+    AT("U2 text lookup probe (collection)",0xcddc00,u2_text_lookup_code,sizeof(u2_text_lookup_code),6,u2_text_lookup_probe,NULL),
+    AT("U3 text lookup probe (collection)",0xf32ae0,u2_text_lookup_code,sizeof(u2_text_lookup_code),6,u2_text_lookup_probe,NULL),
+    AT("U1 controls menu: keyboard row",0x145881,u1_add_keys_row_code,sizeof(u1_add_keys_row_code),5,u1_add_keys_row,NULL),
+    AT("U1 compare-with-friends prompt (hook)",0x128f64,u1_compare_code,sizeof(u1_compare_code),5,u1_compare_prompt,NULL),
+    AT("U1 compare-with-friends prompt (skip 1)",0x128f69,u1_compare_je_code,sizeof(u1_compare_je_code),sizeof(u1_compare_je_patch),NULL,u1_compare_je_patch),
+    AT("U1 compare-with-friends prompt (skip 2)",0x128f76,u1_compare_jmp_code,sizeof(u1_compare_jmp_code),sizeof(u1_compare_jmp_patch),NULL,u1_compare_jmp_patch),
+    AT("U1 menu add item",0x132f00,u1_menu_add_item_code,sizeof(u1_menu_add_item_code),6,u1_menu_add_item,NULL),
+    AT("U1 prompt bar flags",0x128c8a,u1_bar_flags_code,sizeof(u1_bar_flags_code),10,u1_bar_flags,NULL),
+    AT("U1 credits tick",0x3b41e0,u1_credits_code,sizeof(u1_credits_code),6,u1_credits_tick,NULL),
+    AT("U1 menu text draw",0x13acf0,u1_text_draw_code,sizeof(u1_text_draw_code),6,u1_text_draw,NULL),
+    AT("U1 menu item draw (1)",0x133fbc,u1_menu_item_begin_code,sizeof(u1_menu_item_begin_code),9,u1_menu_item_begin,NULL),
+    AT("U1 menu item draw end (1)",0x133fc8,u1_menu_item_end1_code,sizeof(u1_menu_item_end1_code),7,u1_menu_item_end,NULL),
+    AT("U1 menu item draw (2)",0x133feb,u1_menu_item_begin_code,sizeof(u1_menu_item_begin_code),9,u1_menu_item_begin,NULL),
+    AT("U1 menu item draw end (2)",0x133ff7,u1_menu_item_end2_code,sizeof(u1_menu_item_end2_code),8,u1_menu_item_end,NULL),
+    AT("U1 options menu without photo mode (1)",0x144e3b,u1_photo_row_1_code,sizeof(u1_photo_row_1_code),
+     sizeof(u1_photo_row_1_patch),NULL,u1_photo_row_1_patch),
+    AT("U1 options menu without photo mode (2)",0x1450d4,u1_photo_row_2_code,sizeof(u1_photo_row_2_code),
+     sizeof(u1_photo_row_2_patch),NULL,u1_photo_row_2_patch),
+    AT("U1 options menu without photo mode (3)",0x1452eb,u1_photo_row_3_code,sizeof(u1_photo_row_3_code),
+     sizeof(u1_photo_row_3_patch),NULL,u1_photo_row_3_patch),
+
 };
 int runtime_guest_callback_wanted(const RuntimeGuestCallback *c, uint64_t offset) {
     return aim_assist_gate(c,offset);
@@ -5409,46 +5191,7 @@ const RuntimeGuestCallback *runtime_guest_callbacks(size_t *count) {
     *count=sizeof(guest_callbacks)/sizeof(*guest_callbacks);
     return guest_callbacks;
 }
-void runtime_guest_callback_installed(const RuntimeGuestCallback *callback) {
-    if (callback->callback==u1_aim_controller) aim_hooked=1;
-}
-
-/* The button pictures for this controller: 1 PlayStation (DualShock, DualSense: the game's own),
- * 2 Xbox (everything else; the buttons are named by position, so a Switch pad is shown as the
- * Xbox layout). */
-static int prompts_pad_device(SDL_Gamepad *g) {
-    const SDL_GamepadType type=SDL_GetGamepadType(g);
-    if (type==SDL_GAMEPAD_TYPE_PS3 || type==SDL_GAMEPAD_TYPE_PS4 || type==SDL_GAMEPAD_TYPE_PS5) return 1;
-    return SDL_GetGamepadButtonLabel(g,SDL_GAMEPAD_BUTTON_SOUTH)==SDL_GAMEPAD_BUTTON_LABEL_CROSS ? 1 : 2;
-}
-
-/* Turning the left stick in circles (valves, wheels, cranks: the games detect the turn from the
- * stick passing the four directions up, left, down, right in order, each at most 0.31 s after the
- * last, and rolling the eight movement-key directions never does). While a rotate key is held the
- * left stick circles at full deflection, 1.25 turns a second, a smooth sweep that starts where the
- * stick points (the movement keys held, or up). `rotate_dir`: -1 counter-clockwise, 1 clockwise. */
-#define ROTATE_TURNS_PER_SECOND 1.25f
-static int host_rotate;               /* the rotate keys held right now (set in sample_host) */
-static int host_sideways;             /* the movement keys left or right held (set in sample_host) */
-static float rotate_angle;            /* radians clockwise from up */
-static uint64_t rotate_last_us;
-static void rotate_stick(PadData *d, int rotate_dir, uint64_t now) {
-    if (!rotate_dir) { rotate_last_us=0; return; }
-    if (!rotate_last_us || now-rotate_last_us>100000) {
-        const float x=((float)d->left_x-127.5f)/127.5f, y=((float)d->left_y-127.5f)/127.5f;
-        rotate_angle=x*x+y*y>0.25f ? SDL_atan2f(x,-y) : 0.0f;
-    } else {
-        float dt=(float)(now-rotate_last_us)*1e-6f;
-        if (dt>0.05f) dt=0.05f;
-        rotate_angle+=(float)rotate_dir*dt*ROTATE_TURNS_PER_SECOND*6.2831853f;
-        if (rotate_angle>6.2831853f) rotate_angle-=6.2831853f;
-        if (rotate_angle<0.0f) rotate_angle+=6.2831853f;
-    }
-    rotate_last_us=now;
-    const float x=127.5f+127.5f*SDL_sinf(rotate_angle), y=127.5f-127.5f*SDL_cosf(rotate_angle);
-    d->left_x=(uint8_t)(x<0.0f ? 0 : x>255.0f ? 255 : (int)(x+0.5f));
-    d->left_y=(uint8_t)(y<0.0f ? 0 : y>255.0f ? 255 : (int)(y+0.5f));
-}
+void runtime_guest_callback_installed(const RuntimeGuestCallback *callback) { (void)callback; }
 
 /* ---- menu objects (U1 1.02, found in the disassembly) ---------------------------------------
  * (the callback is defined with its table below) A game menu object: item count (int) at +0x98, the item pointers from +0xa0, the selected item (int) at
@@ -7836,6 +7579,34 @@ static void u2_controls_hint(uint64_t now, uint32_t mouse, int menu_on) {
     bbgpu_controls_hint(show,hot,U2_HINT_X,U2_HINT_Y,U2_HINT_W,U2_HINT_H);
     if (show && hot && clicked) { printf("Runtime: U2 keys window requested from the Commandes menu\n"); bbgpu_open_controls(); }
 }
+/* Turning the left stick in circles (valves, wheels, cranks: the games detect the turn from the
+ * stick passing the four directions up, left, down, right in order, each at most 0.31 s after the
+ * last, and rolling the eight movement-key directions never does). While a rotate key is held the
+ * left stick circles at full deflection, 1.25 turns a second, a smooth sweep that starts where the
+ * stick points (the movement keys held, or up). `rotate_dir`: -1 counter-clockwise, 1 clockwise. */
+#define ROTATE_TURNS_PER_SECOND 1.25f
+static int host_rotate;               /* the rotate keys held right now (set in sample_host) */
+static int host_sideways;             /* the movement keys left or right held (set in sample_host) */
+static float rotate_angle;            /* radians clockwise from up */
+static uint64_t rotate_last_us;
+static void rotate_stick(PadData *d, int rotate_dir, uint64_t now) {
+    if (!rotate_dir) { rotate_last_us=0; return; }
+    if (!rotate_last_us || now-rotate_last_us>100000) {
+        const float x=((float)d->left_x-127.5f)/127.5f, y=((float)d->left_y-127.5f)/127.5f;
+        rotate_angle=x*x+y*y>0.25f ? SDL_atan2f(x,-y) : 0.0f;
+    } else {
+        float dt=(float)(now-rotate_last_us)*1e-6f;
+        if (dt>0.05f) dt=0.05f;
+        rotate_angle+=(float)rotate_dir*dt*ROTATE_TURNS_PER_SECOND*6.2831853f;
+        if (rotate_angle>6.2831853f) rotate_angle-=6.2831853f;
+        if (rotate_angle<0.0f) rotate_angle+=6.2831853f;
+    }
+    rotate_last_us=now;
+    const float x=127.5f+127.5f*SDL_sinf(rotate_angle), y=127.5f-127.5f*SDL_cosf(rotate_angle);
+    d->left_x=(uint8_t)(x<0.0f ? 0 : x>255.0f ? 255 : (int)(x+0.5f));
+    d->left_y=(uint8_t)(y<0.0f ? 0 : y>255.0f ? 255 : (int)(y+0.5f));
+}
+
 static void sample_host(PadData *d) {
     host_rotate=host_sideways=0;
     memset(d,0,sizeof(*d));
@@ -7868,6 +7639,8 @@ static void sample_host(PadData *d) {
     if (wheel>0) wheel_until_us[0]=now+80000;
     if (wheel<0) wheel_until_us[1]=now+80000;
     const bool *k=SDL_WasInit(SDL_INIT_VIDEO) && !pad_only ? SDL_GetKeyboardState(NULL) : NULL;
+    static int layout_logged;
+    if (k && !layout_logged) { layout_logged=1; log_layout_keys(); }
     if (g) {
         for (int a=0;a<16;++a) {
             const int b=input.pad[a];
@@ -7986,15 +7759,18 @@ static void sample_host(PadData *d) {
         ly=0;
     }
     if (ly) d->left_y=(uint8_t)(ly<0 ? 0 : 255);
-    /* The walk key (configurable, none by default) held with the movement keys, outside the menus: the stick is pushed only part way */
+    /* The walk key held with the movement keys, outside the menus: the stick is pushed only part way */
     if (!menu_mode && (lx||ly) && action_down(A_WALK,k,mouse,now)) {
-        /* stick deflection in percent of full (BB_WALK_STICK to tune): below the game's dead zone Drake stops (36 % did) */
-        static int percent;
-        if (!percent) { const char *e=getenv("BB_WALK_STICK"); percent=e && atoi(e)>0 && atoi(e)<=100 ? atoi(e) : 55; }
-        const int amp=(percent*127/100)*((lx && ly) ? 707 : 1000)/1000; /* diagonal: same length as a straight push */
-        if (lx) d->left_x=(uint8_t)(128+lx*amp);
-        if (ly) d->left_y=(uint8_t)(128+ly*amp);
+        /* Walk: the key direction at walk_speed percent of full deflection (diagonals too). */
+        /* Uncharted 1 reads a stick byte as zero within about 43 of the centre on each axis, so a slow walk
+         * (or the 45% diagonal, 40 per axis) did nothing there: BB_WALK_MIN lifts it past that. */
+        const int percent=input.walk_speed>input.walk_min ? input.walk_speed : input.walk_min;
+        const float scale=127.5f*(float)percent/100.0f/((lx && ly) ? 1.41421356f : 1.0f);
+        if (lx) d->left_x=(uint8_t)(int)(127.5f+(float)lx*scale+0.5f);
+        if (ly) d->left_y=(uint8_t)(int)(127.5f+(float)ly*scale+0.5f);
     }
+    host_rotate=action_down(A_ROT_CW,k,mouse,now)-action_down(A_ROT_CCW,k,mouse,now);
+    host_sideways=lx!=0;
     const int rx=action_down(A_RS_RIGHT,k,mouse,now)-action_down(A_RS_LEFT,k,mouse,now);
     const int ry=action_down(A_RS_DOWN,k,mouse,now)-action_down(A_RS_UP,k,mouse,now);
     if (rx) d->right_x=(uint8_t)(rx<0 ? 0 : 255);
@@ -8031,10 +7807,6 @@ static void sample_host(PadData *d) {
         if (captured && (following || joypad || native || base_gap) && (q!=2 || aim_held || look_held || now_us()<aim_blend_until_us || u3_aim_fade_window(now_us()) ||now_us()<look_blend_until_us || (u2_chase_us && now_us()-u2_chase_us<200000))) { camera_dx[q]+=mdx; camera_dy[q]+=mdy; }
         else { camera_dx[q]=camera_dy[q]=0; }
     }
-    /* gyro aiming: kept while aiming (at low frame rates the aim controller runs only every 100-200 ms) */
-    const int raw_aiming=raw_aim_armed(now);
-    if (captured && raw_aiming) { aim_dx+=mdx; aim_dy+=mdy; }
-    else { aim_dx=aim_dy=0.0f; }
     pthread_mutex_unlock(&camera_lock);
     const int direct_x=base_gap || joypad || native || (following && !aim_native && !look_held && follow_direct);
     const int direct_y=base_gap || joypad || native || (following && !aim_native && !look_held && follow_direct && follow_has_arc);
@@ -8319,12 +8091,24 @@ static void sample(PadData *d) {
         static int was_look=-1;
         if (was_look!=look_held) { was_look=look_held; printf("Mouse: R3 look %s t=%.4f\n",look_held ? "down" : "up",now_us()*1e-6); }
     }
-    if (injected.touch_side>=0) touch_click(d,injected.touch_side);
+    if (injected.touch_x>=0) {
+        d->buttons|=BTN_TOUCHPAD; d->touch_count=1;
+        d->touches[0]=(PadTouch){.x=(uint16_t)injected.touch_x,.y=(uint16_t)injected.touch_y,.id=0};
+    } else if (injected.touch_side>=0) touch_click(d,injected.touch_side);
     else if ((d->buttons & BTN_TOUCHPAD) && !d->touch_count) touch_click(d,0);
     if (injected.buttons & BTN_L2) d->l2=255;
     if (injected.buttons & BTN_R2) d->r2=255;
     uint8_t *axes[4]={&d->left_x,&d->left_y,&d->right_x,&d->right_y};
     for (int i=0;i<4;++i) if (injected.stick[i]>=0) *axes[i]=(uint8_t)injected.stick[i];
+    {
+        int dir=injected.rotate ? injected.rotate : host_rotate;
+        const uint64_t at=now_us();
+        /* At a wheel: left / right (keys, or the pad-file lx= at an end) and the rotate keys turn
+         * the stick the way the wheel wants (u1_gesture_query). */
+        if (wheel_asked_us && at-wheel_asked_us<300000 &&
+            (dir || host_sideways || injected.stick[0]==0 || injected.stick[0]==255)) dir=wheel_dir;
+        rotate_stick(d,dir,at);
+    }
     /* U2, U3 (no joypad callback): the right stick held a little while the mouse turns the follow
      * camera's direction (follow_push, see follow_camera), unless the stick is in use */
     const uint64_t now=now_us();
@@ -8389,7 +8173,12 @@ static ABI int32_t pad_vibration(int32_t handle, const uint8_t *param) {
     pthread_mutex_lock(&lock);
     SDL_Gamepad *g=current_gamepad();
     /* Only the controller in use shakes: with the keyboard and mouse as the last device, the pads lying around stay still. */
-    if (g && bbgpu_input_mode()!=0) SDL_RumbleGamepad(g,(uint16_t)(param[0]*257),(uint16_t)(param[1]*257),1000);
+    if (g && input.pad_vibration && bbgpu_input_mode()!=0) {
+        const unsigned strength=(unsigned)input.pad_vibration_strength;
+        const uint16_t low=(uint16_t)((param[0]*257u*strength+50u)/100u);
+        const uint16_t high=(uint16_t)((param[1]*257u*strength+50u)/100u);
+        SDL_RumbleGamepad(g,low,high,1000);
+    }
     else if (g) SDL_RumbleGamepad(g,0,0,0);
     pthread_mutex_unlock(&lock);
     return 0;
