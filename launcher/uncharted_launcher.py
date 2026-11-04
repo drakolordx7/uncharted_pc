@@ -40,7 +40,7 @@ CONFIG_FILE = CONFIG_DIR / 'settings.json'
 NAME = 'Uncharted'
 AUTHOR = 'SuperMedo'
 # This build; GitHub release tags are v<VERSION> (their digits are compared).
-VERSION = '0.3.11'
+VERSION = '0.3.13'
 RELEASES_API = 'https://api.github.com/repos/Supermedo/uncharted_pc/releases/latest'
 RELEASES_PAGE = 'https://github.com/Supermedo/uncharted_pc/releases/latest'
 UPDATE_DIR = Path(tempfile.gettempdir()) / 'uncharted-update'
@@ -175,6 +175,13 @@ FIXES = {
         'Copies small GPU results back every frame (fixes black weapons and stuck brightness). '
         'Automatic: on in Uncharted 2 and 3.',
         {'on': {'BB_READBACK_SMALL_BUFFERS': '1'}, 'off': {'BB_READBACK_SMALL_BUFFERS': '0'}}),
+    'fix_small_gate': (
+        'Sinking characters fix',
+        'Stops characters sinking into the ground, floating or twitching in Uncharted 3. '
+        'Automatic: the lighter part of the fix in Uncharted 3. On is the full fix, for when '
+        'characters still sink; it costs more FPS in heavy scenes.',
+        {'on': {'BB_READBACK_SMALL_GATE': '1', 'BB_COPY64_EOP_READBACK': '1'},
+         'off': {'BB_READBACK_SMALL_GATE': '0', 'BB_COPY64_EOP_READBACK': '0'}}),
     'fix_vram': (
         'Small video memory mode',
         'Keeps 4-8 GB graphics cards inside their video memory. Automatic: on for cards up to 8 GB.',

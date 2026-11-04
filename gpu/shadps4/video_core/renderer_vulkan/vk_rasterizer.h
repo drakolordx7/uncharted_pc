@@ -128,14 +128,20 @@ public:
     /// code (the auto-exposure multiplier of Uncharted, among others). The dispatch notes them and
     /// the next end-of-pipe event copies them to guest memory (BB_READBACK_SMALL_BUFFERS=0: off).
     void NoteSmallWrittenBuffers(const Shader::Info& stage);
+    /// bbport (BB_COPY64_EOP_READBACK=1): the dwords a dispatch of the 64-dword copy shader
+    /// (6a6422a9) writes, when they total 64 KiB or less, are read back at the next end-of-pipe
+    /// event, and that event's label waits for them. True when the dispatch noted such a range
+    /// (it is then submitted at once).
+    bool NoteCopy64Readback(const Shader::Info& stage);
     void ReadBackSmallWrittenBuffers();
     /// Before a guest-visible write: fences deferred earlier are written first.
     void WaitDeferredSignals() {
         scheduler.WaitDeferredSignals();
     }
     /// Runs `signal` after the guest memory copies issued so far, without waiting here.
-    void SignalAfterHostCopies(std::function<void()> signal, u64 landing_seq = 0) {
-        scheduler.SignalAfterHostCopies(std::move(signal), landing_seq);
+    void SignalAfterHostCopies(std::function<void()> signal, u64 landing_seq = 0,
+                               bool off_recorder = false) {
+        scheduler.SignalAfterHostCopies(std::move(signal), landing_seq, off_recorder);
     }
     /// The GPU command thread or the draw recording thread (fault handling runs inline there).
     bool IsGpuSideThread() const;
@@ -339,6 +345,7 @@ private:
     VideoCore::TextureCache texture_cache;
     std::mutex small_written_mutex;
     std::vector<std::pair<VAddr, u32>> small_written_buffers;
+    std::vector<std::pair<VAddr, u32>> copy64_readbacks; ///< NoteCopy64Readback; small_written_mutex
     AmdGpu::Liverpool* liverpool;
     Core::MemoryManager* memory;
     boost::icl::interval_set<VAddr> mapped_ranges;

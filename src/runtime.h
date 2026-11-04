@@ -92,11 +92,16 @@ uintptr_t runtime_savedata_resolve(const char *name);
 void runtime_trophy_configure(const char *dir);
 uintptr_t runtime_trophy_resolve(const char *name);
 void runtime_savedata_report(void);
+/* Waits up to timeout_ms for a save in progress: 0 none, 1 it finished, -1 timed out. */
+int runtime_savedata_wait_idle(unsigned timeout_ms);
 int runtime_savedata_pick(int32_t user, const char *title, const char (*names)[32], uint32_t count,
                           int which, const char *focus, char out[32], void *param_out);
 void runtime_thread_attach_host(const char *name);
 uintptr_t runtime_fiber_resolve(const char *name);
 void runtime_fiber_report(void);
+/* For fault reports (no allocation, any thread): the guest thread and fiber running here, or NULL. */
+const char *runtime_thread_name_here(void);
+const char *runtime_fiber_name_here(void);
 /* Host functions the loader runs at the start of matching guest functions (probe.c). The guest
  * code is found by `pattern`, not by a fixed address, so every build of a game is covered that
  * contains it: hex bytes separated by spaces, "??" for a byte that differs between builds

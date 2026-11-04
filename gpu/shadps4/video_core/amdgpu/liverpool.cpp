@@ -379,8 +379,12 @@ void SignalFlip(Vulkan::Rasterizer& rasterizer, const u8*) {
         rasterizer.OnGuestFlip();
         rasterizer.GetBufferCache().CheckStableBindings();
         rasterizer.CheckConstants();
+        // On the landing thread, never inline on the recording or a copy thread: an EOP flip's
+        // interrupt handler prepares the frame and waits for the recording thread
+        // (Scheduler::SyncRecording), which would wait for itself (Uncharted 1, cutscenes).
         rasterizer.SignalAfterHostCopies(
-            [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxFlip); }, landing_seq);
+            [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxFlip); }, landing_seq,
+            true);
         return;
     }
     rasterizer.WaitDeferredSignals();
@@ -533,7 +537,8 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
         }
         case PM4ItOpcode::WaitOnDeCounterDiff: {
             const auto diff = it_body[0];
-            while ((cblock.de_count - cblock.ce_count) >= diff) {
+            while (cblock.ce_count >= cblock.de_count &&
+                   (cblock.ce_count - cblock.de_count) >= diff) {
                 YIELD_CE();
             }
             break;
