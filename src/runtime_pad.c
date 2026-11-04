@@ -368,6 +368,7 @@ static volatile uint64_t look_blend_until_us; /* the look-around camera (V) is b
 static volatile int look_held;            /* R3 is held: first-person look around, which turns like the aim */
 static float follow_target;               /* wanted heading (degrees) */
 static uint64_t follow_moved_us;          /* last frame the mouse moved */
+static uint64_t follow_tilt_us;           /* last frame the mouse moved vertically (follow_moved_us is the turn) */
 static float follow_prev_total;           /* degrees the previous frame turned the direction by (0 after a gap, a pause or the joypad route) */
 static volatile float follow_correction;  /* degrees the direction is short of the wanted heading */
 static volatile float follow_push;        /* the right stick while the direction turns (-0.3, 0, 0.3) */
@@ -426,6 +427,7 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
     follow_call_us=now;
     float dx, dy;
     camera_take(0,&dx,&dy);
+    if (dy!=0.0f) follow_tilt_us=now;
     /* While a cover camera runs the walking camera is kept at the cover camera's yaw by the same turns it makes for a mouse turn (a few degrees
      * a frame, with the push that makes the game keep them): the game puts the old direction back every frame otherwise, and the picture jumped
      * there when the cover ended. Measured: writing the direction does not hold. The mouse goes to the cover camera meanwhile. */
@@ -586,8 +588,11 @@ static void u1b_free_view_spring(uint64_t camera, uint64_t image) {
         static int rigid=-1;
         if (rigid<0) { const char *e=getenv("BB_SPRING_RIGID"); rigid=!(e && atoi(e)==0); }
         /* only while the mouse moves (0.15 s after): longer, the player's small moves against a wall showed unsmoothed after the mouse had stopped */
-        const int mouse_moving=follow_moved_us && spring_now>=follow_moved_us && spring_now-follow_moved_us<150000;
-        if (rigid && !input.free_view_smoothing && input.mouse_look && !pad_only_mode && mouse_moving) {
+        /* each axis on its own: the heading is made up while the mouse turns, the height while it tilts. Making up the height during a turn too
+         * passed the wall's small up and down pushes to the picture (the tremble came back). */
+        const int turning=follow_moved_us && spring_now>=follow_moved_us && spring_now-follow_moved_us<150000;
+        const int tilting=follow_tilt_us && spring_now>=follow_tilt_us && spring_now-follow_tilt_us<150000;
+        if (rigid && !input.free_view_smoothing && input.mouse_look && !pad_only_mode && (turning || tilting)) {
             /* What the data say (BB_U1_WALKPROBE + BB_CAMERA_LOG): +0x1230 is the camera's wanted position, which turns about the player's point
              * (+0x12f0) at a fixed radius (3.65 m) when the mouse turns it and is pushed towards the player by a wall; +0x1250 is the position
              * the game's spring shows, +0x1240 its velocity. The spring's lag behind a turn is what made the mouse feel smoothed; its lag in the
@@ -597,18 +602,25 @@ static void u1b_free_view_spring(uint64_t camera, uint64_t image) {
             if (safe_read(t,camera+0x1230,12) && safe_read(s,camera+0x1250,12) && safe_read(v,camera+0x1240,12) && safe_read(p,camera+0x12f0,12)) {
                 int ok=1;
                 for (int i=0;i<3;++i) ok&=(t[i]>-5000.0f && t[i]<5000.0f && s[i]>-5000.0f && s[i]<5000.0f && p[i]>-5000.0f && p[i]<5000.0f && v[i]>-500.0f && v[i]<500.0f);
-                const float tx=t[0]-p[0], tz=t[2]-p[2], sx=s[0]-p[0], sz=s[2]-p[2];
-                const float tr2=tx*tx+tz*tz, sr2=sx*sx+sz*sz;
+                const float tx=t[0]-p[0], ty=t[1]-p[1], tz=t[2]-p[2], sx=s[0]-p[0], sy=s[1]-p[1], sz=s[2]-p[2];
+                const float tr2=tx*tx+ty*ty+tz*tz, sr2=sx*sx+sy*sy+sz*sz;
                 if (ok && tr2>0.09f && tr2<400.0f && sr2>0.09f && sr2<400.0f) {   /* beyond ~20 m or under 0.3 m it is a cut: left alone */
-                    float da=SDL_atan2f(tz,tx)-SDL_atan2f(sz,sx);
-                    da=da>3.14159265f ? da-6.2831853f : da<-3.14159265f ? da+6.2831853f : da;
-                    if (da>-1.5f && da<1.5f) {
-                        const float c=SDL_cosf(da), sn=SDL_sinf(da);
-                        const float ns[3]={p[0]+sx*c-sz*sn, s[1], p[2]+sx*sn+sz*c};
+                    /* the state takes the wanted position's heading (while turning) and elevation (while tilting) about the player's point, and keeps its own distance */
+                    const float tl=SDL_sqrtf(tr2), sl=SDL_sqrtf(sr2);
+                    const float th=SDL_sqrtf(tx*tx+tz*tz), sh=SDL_sqrtf(sx*sx+sz*sz);
+                    float saz=SDL_atan2f(sz,sx), taz=SDL_atan2f(tz,tx);
+                    const float sel=SDL_atan2f(sy,sh), tel=SDL_atan2f(ty,th);
+                    float daz=turning && th>0.1f && sh>0.1f ? taz-saz : 0.0f;
+                    daz=daz>3.14159265f ? daz-6.2831853f : daz<-3.14159265f ? daz+6.2831853f : daz;
+                    const float del=tilting ? tel-sel : 0.0f;
+                    if (daz>-1.5f && daz<1.5f && del>-0.8f && del<0.8f && (daz!=0.0f || del!=0.0f)) {   /* larger is a cut */
+                        const float naz=saz+daz, nel=sel+del, ch=SDL_cosf(nel);
+                        const float ns[3]={p[0]+sl*ch*SDL_cosf(naz), p[1]+sl*SDL_sinf(nel), p[2]+sl*ch*SDL_sinf(naz)};
+                        const float c=SDL_cosf(daz), sn=SDL_sinf(daz);   /* the velocity is turned in heading only */
                         const float nv[3]={v[0]*c-v[2]*sn, v[1], v[0]*sn+v[2]*c};
                         safe_write(camera+0x1250,ns,12);
                         safe_write(camera+0x1240,nv,12);
-                        if (mouse_debug()) { static unsigned n; if ((n++&63)==0) printf("Mouse: u1 spring turned %.2f deg (radius state %.2f wanted %.2f)\n",da*57.29578f,SDL_sqrtf(sr2),SDL_sqrtf(tr2)); }
+                        if (mouse_debug()) { static unsigned n; if ((n++&63)==0) printf("Mouse: u1 spring turned %.2f tilted %.2f deg (distance state %.2f wanted %.2f)\n",daz*57.29578f,del*57.29578f,sl,tl); }
                     }
                 }
             }
