@@ -25,6 +25,8 @@ Controls are remapped on the Controls page. At a valve or wheel, hold A or D (R 
 
 Saves are backed up on the Saves page, and automatically before each launch (the last 10 are kept). Its Edit button unlocks all chapters, Crushing and Brutal, and Uncharted 1's rewards; close the game first. Every edit makes a backup first.
 
+Earned trophies show a notice in the game and are listed on the Trophies page. For a sound with the notice, put `trophy.mp3` (or `trophy.wav`) in `user\custom_trophy`.
+
 ## Reporting problems
 
 [Open an issue](https://github.com/drakolordx7/uncharted_pc/issues/new/choose) with `user\last_run.log` from the session where it happened (the four runs before it are kept as `last_run.1.log` to `last_run.4.log`). Releases on this page are the only source of fixes; don't run commands posted in issues.

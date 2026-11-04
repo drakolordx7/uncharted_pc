@@ -84,7 +84,8 @@ WINDOW_SIZES = [('1280x720', '1280 × 720'), ('1600x900', '1600 × 900'),
 # The size the games themselves render and show (BB_GAME_RES: run.py, src/runtime_display.c): a real
 # higher resolution, not an enlarged 1080p picture. The height here and the shape below make the
 # width; the games keep their memory for it, so the sizes stop where it runs out.
-RENDER_HEIGHTS = [('1080', '1080p (original)'), ('1440', '1440p'), ('1620', '1620p'), ('2160', '2160p (4K)')]
+RENDER_HEIGHTS = [('1080', '1080p (original)'), ('1440', '1440p'), ('1620', '1620p'),
+                  ('2160', "2160p (4K; the games' memory stops at 3200x1800)")]
 ASPECTS = [('16:9', '16:9 (original)'), ('21:9', '21:9 ultrawide'), ('32:9', '32:9 super ultrawide'),
            ('window', 'Match the window or screen')]
 ASPECT_RATIOS = {'16:9': 16 / 9, '21:9': 64 / 27, '32:9': 32 / 9}
