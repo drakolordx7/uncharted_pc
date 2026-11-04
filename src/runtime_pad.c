@@ -1282,6 +1282,25 @@ static void __attribute__((ms_abi)) u1_gesture_query(uint64_t argc, uint64_t arg
     wheel_dir=dir;
     wheel_asked_us=now;
 }
+/* Tagged heap out of blocks (log only). The per-frame CPU-to-GPU allocators ("Render To GPU", "Game To GPU", ...;
+ * corelib/memory/allocator-tagged-heap.cpp, Allocate) take 1 MiB blocks from a shared tagged heap. When the heap
+ * has none left, TaggedHeap::Allocate returns 0, the (retail-silent) assertion "pBlockMem" is skipped and the
+ * allocator hands out addresses from 0: the next use of such a pointer faults. Suspected behind the U2 cutscene
+ * crash at 0x67b5c8 (particle DrawRegJob, gparams+0x78 null; issues #749, #757). The hook sits right after the
+ * call: rax the block (0 = none), rbx the allocator (its name at +0x48), r13 the requested bytes. Found in
+ * U1/U2/U3 1.00 (U2 1.00 at 0x86076b); the 1.02 builds differ and are not covered. */
+static void __attribute__((ms_abi)) tagged_heap_block(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14, const RuntimeGuestRegs *regs) {
+    (void)rdi; (void)rsi; (void)r14;
+    if (regs->rax) return;
+    static volatile int reported;
+    if (__atomic_fetch_add(&reported,1,__ATOMIC_RELAXED)>=5) return;
+    const char *name="?";
+    const uint64_t at=regs->rbx ? *(const uint64_t *)(uintptr_t)(regs->rbx+0x48) : 0;
+    if (at>=image && at<image+0x4000000) name=(const char *)(uintptr_t)at;
+    printf("Memory: tagged heap allocator \"%.40s\" out of blocks (request %llu bytes) - the game will crash next\n",
+           name,(unsigned long long)regs->r13);
+    fflush(stdout);
+}
 static const RuntimeGuestCallback guest_callbacks[]={
     /* U1 script native pad-get-gesture-interval (1.00 at 0x2f3130, 1.02 at 0x2f37c0) */
     {"U1 wheel gesture query",
@@ -1489,6 +1508,13 @@ static const RuntimeGuestCallback guest_callbacks[]={
 
     /* The 7 bytes after the mov r9 are `mov qword [rdi], 0`: link_modules.py (patches/redzone.json, PR #403) replaces that
      * store with a jump to a red-zone-safe copy on Windows, so they are masked and the hook is found either way. */
+    /* Tagged heap out of blocks (log only), builds 100: mov rdi,[rbx+0x400]; mov rcx,[rbx+0x418]; shl rcx,32;
+     * or rcx,[rbx+0x428]; mov r13,rsi; mov edx,r14d; call TaggedHeap::Allocate; the hook: mov rsi,rbx;
+     * mov ebx,r14d; mov r14,rax (moved); test r14,r14; jnz */
+    {"Tagged heap out of blocks (log)",
+      "48 8b bb 00 04 00 00 48 8b 8b 18 04 00 00 48 c1 e1 20 48 0b 8b 28 04 00 00 49 89 f5 44 89 f2 e8 ?? ?? ?? ?? "
+      "48 89 de 44 89 f3 49 89 c6 4d 85 f6 75",
+      0x24, 9, tagged_heap_block, NULL},
     {"CUE table fill",
       "55 41 57 41 56 41 55 41 54 53 49 b9 00 24 00 0d 10 00 00 00 ?? ?? ?? ?? ?? ?? ?? 45 31 f6",
       0, 5, cue_table_pretouch, NULL},
