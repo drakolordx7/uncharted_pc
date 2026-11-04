@@ -390,7 +390,6 @@ void ControlsWindow() {
     bool invert_y = std::atoi(IniGet("mouse_invert_y", "0").c_str()) != 0;
     bool mouse_look = std::atoi(IniGet("mouse_look", "1").c_str()) != 0;
     bool free_smoothing = std::atoi(IniGet("free_view_smoothing", "0").c_str()) != 0;
-    bool aim_raw = std::atoi(IniGet("aim_raw", "0").c_str()) != 0;
     bool changed = false;
     if (ImGui::SliderFloat(T("Sensitivity", "Sensibilité", "Sensibilidad", "Sensibilidade"), &sensitivity, 0.1f, 5.0f, "%.2f")) {
         char text[32];
@@ -417,15 +416,6 @@ void ControlsWindow() {
         IniSet("free_view_smoothing", free_smoothing ? "1" : "0");
         changed = true;
     }
-    if (ImGui::Checkbox(T("Raw aiming (no smoothing)", "Visée brute (sans lissage)", "Apuntado sin procesar (sin suavizado)",
-                          "Mira bruta (sem suavização)"), &aim_raw)) {
-        IniSet("aim_raw", aim_raw ? "1" : "0");
-        changed = true;
-    }
-    ImGui::TextDisabled("%s", T("Raw aiming removes the dynamic smoothing: slow mouse movements will show stepping.",
-                                "La visée brute supprime le lissage dynamique : les mouvements lents de la souris feront du stepping (paliers).",
-                                "El apuntado sin procesar quita el suavizado dinámico: los movimientos lentos del mouse irán a saltos.",
-                                "A mira bruta remove a suavização dinâmica: movimentos lentos do mouse ficarão em degraus."));
     if (changed) {
         IniSave();
     }
@@ -868,7 +858,7 @@ void Menu() {
     Checkbox("FPS counter in the corner", s.show_fps);
     Checkbox("Raw mouse aiming and cover camera", s.gyro_aim);
     ImGui::SameLine();
-    ImGui::TextDisabled("(Uncharted 1; also for a gyro set up in Steam as a mouse)");
+    ImGui::TextDisabled("(off: the mouse moves the right stick; also for a gyro set up in Steam as a mouse)");
 
     ImGui::Spacing();
     if (ImGui::Button("Close")) {

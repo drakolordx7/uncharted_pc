@@ -141,4 +141,7 @@ void runtime_guest_callback_installed(const RuntimeGuestCallback *callback);
  * and not reported missing), and the notice right before it is installed at `offset`. Entries that a
  * launcher setting switches (aim assist) answer by their setting, all others are wanted. */
 int runtime_guest_callback_wanted(const RuntimeGuestCallback *c, uint64_t offset);
+/* Before the search: verified[i] is 1 where entry i has a fixed offset whose code equals its signature in this image
+ * (runtime_pad.c picks each game's mouse camera from it). */
+void runtime_guest_callbacks_verified(const uint8_t *verified, size_t count);
 #endif

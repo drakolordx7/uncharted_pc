@@ -5055,7 +5055,34 @@ static void __attribute__((ms_abi)) u1_gesture_query(uint64_t argc, uint64_t arg
  * no register block. */
 #define AT(name,off,sig,sig_size,moved_bytes,cb,patch_bytes) \
     {name,NULL,0,moved_bytes,(RuntimeGuestFn)(void (*)(void))(cb),patch_bytes,off,sig,sig_size}
+/* ---- which mouse camera each game uses ------------------------------------------------------
+ * antikmewzik's 1:1 camera (the AT entries below) sits at fixed offsets of CUSA02320 1.02: a game takes it only when every
+ * one of its camera hooks there verifies (runtime_guest_callbacks_verified, before the search). Any other build (EU, 1.00,
+ * a signature that differs) keeps the pattern path of runtime_pad_ours.inc: follow cameras, joypad sticks, the U2 1.02
+ * camera manager, U1 raw aim and cover camera. */
+#include "runtime_pad_ours.inc"
+static int mouse_ours;              /* 1 once a pattern-path camera hook is installed: the pad read uses o_mouse_block */
+static int fork_camera[3];          /* U1 U2 U3: antikmewzik's camera hooks all verified in this image */
+static int game_index(const char *name) {
+    return name[0]=='U' && name[1]>='1' && name[1]<='3' && name[2]==' ' ? name[1]-'1' : -1;
+}
+/* An entry of antikmewzik's camera (fixed offset): its name says camera, sticks or the pad update (the menus, treasures and
+ * prompts are not camera entries and are wanted on every build where they verify). */
+static int fork_camera_entry(const RuntimeGuestCallback *c) {
+    if (c->pattern || game_index(c->name)<0) return 0;
+    static const char *const words[]={"camera","joypad sticks","pad update (mouse","stick filter","layer blend"};
+    for (size_t i=0;i<sizeof(words)/sizeof(*words);++i) if (strstr(c->name,words[i])) return 1;
+    return 0;
+}
+/* The ones a game needs for the 1:1 camera (U1: its 1.02 set; the 1.00 follow camera, pad update and sticks are not enough) */
+static int fork_camera_required(const RuntimeGuestCallback *c) {
+    return fork_camera_entry(c) && (strncmp(c->name,"U1 ",3) || strstr(c->name,"1.02"));
+}
+static int ours_camera_entry(const RuntimeGuestCallback *c) {
+    return c->pattern && game_index(c->name)>=0 && strstr(c->name,"pattern)");
+}
 static const RuntimeGuestCallback guest_callbacks[]={
+    O_GUEST_CALLBACKS
     /* U1 script native pad-get-gesture-interval (1.00 at 0x2f3130, 1.02 at 0x2f37c0) */
     {"U1 wheel gesture query",
       "55 48 89 e5 41 57 41 56 41 54 53 48 83 ec 10 83 ff 02 0f 8c ?? ?? ?? ?? 48 63 06 41 be 01 00 "
@@ -5184,14 +5211,47 @@ static const RuntimeGuestCallback guest_callbacks[]={
      sizeof(u1_photo_row_3_patch),NULL,u1_photo_row_3_patch),
 
 };
+void runtime_guest_callbacks_verified(const uint8_t *verified, size_t count) {
+    int required[3]={0,0,0}, ok[3]={0,0,0};
+    for (size_t i=0;i<count && i<sizeof(guest_callbacks)/sizeof(*guest_callbacks);++i) {
+        const RuntimeGuestCallback *c=&guest_callbacks[i];
+        if (!fork_camera_required(c)) continue;
+        const int g=game_index(c->name);
+        ++required[g];
+        if (verified[i]) ++ok[g];
+    }
+    static const char *const games[]={"Uncharted 1","Uncharted 2","Uncharted 3"};
+    for (int g=0;g<3;++g) {
+        fork_camera[g]=required[g] && ok[g]==required[g];
+        if (fork_camera[g]) printf("Mouse: %s uses the 1:1 mouse camera (antikmewzik)\n",games[g]);
+        else if (ok[g]) printf("Mouse: %s: %d of %d hooks of the 1:1 camera verify, not used\n",games[g],ok[g],required[g]);
+    }
+}
 int runtime_guest_callback_wanted(const RuntimeGuestCallback *c, uint64_t offset) {
+    const int g=game_index(c->name);
+    if (fork_camera_entry(c)) return fork_camera[g];
+    if (ours_camera_entry(c)) {
+        if (fork_camera[g]) return 0;
+        if (offset) {
+            static int said[3];
+            mouse_ours=1;
+            if (!said[g]) {
+                static const char *const games[]={"Uncharted 1","Uncharted 2","Uncharted 3"};
+                said[g]=1;
+                printf("Mouse: %s uses raw aim (build not covered by the 1:1 camera)\n",games[g]);
+            }
+        }
+        return 1;
+    }
     return aim_assist_gate(c,offset);
 }
 const RuntimeGuestCallback *runtime_guest_callbacks(size_t *count) {
     *count=sizeof(guest_callbacks)/sizeof(*guest_callbacks);
     return guest_callbacks;
 }
-void runtime_guest_callback_installed(const RuntimeGuestCallback *callback) { (void)callback; }
+void runtime_guest_callback_installed(const RuntimeGuestCallback *callback) {
+    if (callback->callback==(RuntimeGuestFn)o_u1_aim_controller) o_aim_hooked=1;
+}
 
 /* ---- menu objects (U1 1.02, found in the disassembly) ---------------------------------------
  * (the callback is defined with its table below) A game menu object: item count (int) at +0x98, the item pointers from +0xa0, the selected item (int) at
@@ -7671,6 +7731,11 @@ static void sample_host(PadData *d) {
             }
         }
     }
+    {   /* the button pictures of the prompts (ButtonPrompts, where the key icons are off): the device used last */
+        static int prompts_device=-1;
+        const int device=bbgpu_input_mode();
+        if (device!=prompts_device) { prompts_device=device; bbgpu_prompts_controller(device); }
+    }
     /* Keyboard and mouse, together with the controller. */
     menu_update(k,mouse);
     for (int a=0;a<16;++a) if (key_action_down(a,k,mouse,now)) d->buttons|=actions[a].ps;
@@ -7780,13 +7845,17 @@ static void sample_host(PadData *d) {
      * with the mouse (vertically too where its arc is known), with the right stick held a little the
      * same way (follow_push); aiming, other cameras and a follow camera that keeps no turns get the
      * mouse as a right stick here. */
+    if (mouse_ours) { o_mouse_block(d,captured,mdx,mdy,now,rx,ry); return; }   /* a build the 1:1 camera does not cover */
+    /* The menu's "Raw mouse aiming" (bbport.ini gyro_aim, the launcher's too): off, the 1:1 camera takes no mouse and the
+     * mouse is the emulated right stick */
+    const int one_to_one=bbgpu_gyro_aim();
     pthread_mutex_lock(&camera_lock);
-    const int following=camera_hook_us && now-camera_hook_us<3000000;   /* (was 100 ms: in the chapter 12 fight of U3 the camera update comes 100-150 ms apart (52 of 63 switches to the emulated stick measured), with stalls of 0.4-2 s; the mouse then was not 1:1) */
-    const int joypad=sticks_hook_us && now-sticks_hook_us<100000;
-    const int native=(u2_native_us && now-u2_native_us<100000) || /* U2: the cover / look-around camera turns with the mouse */
-                     (aim_held && u3_aim_active_us && now-u3_aim_active_us<400000); /* U3: a roll with the aim held leaves no camera for ~0.15 s: the mouse waits in queue 2, not on the emulated stick */
+    const int following=one_to_one && camera_hook_us && now-camera_hook_us<3000000;   /* (was 100 ms: in the chapter 12 fight of U3 the camera update comes 100-150 ms apart (52 of 63 switches to the emulated stick measured), with stalls of 0.4-2 s; the mouse then was not 1:1) */
+    const int joypad=one_to_one && sticks_hook_us && now-sticks_hook_us<100000;
+    const int native=one_to_one && ((u2_native_us && now-u2_native_us<100000) || /* U2: the cover / look-around camera turns with the mouse */
+                     (aim_held && u3_aim_active_us && now-u3_aim_active_us<400000)); /* U3: a roll with the aim held leaves no camera for ~0.15 s: the mouse waits in queue 2, not on the emulated stick */
     /* The animation camera (0x4383d0) takes the mouse while the walking camera is away, when BB_U2_BASE is on. */
-    const int base_gap=u2_base_on() && !(u2_follow_seen_us && now-u2_follow_seen_us<U2_FOLLOW_RESYNC_US);
+    const int base_gap=one_to_one && u2_base_on() && !(u2_follow_seen_us && now-u2_follow_seen_us<U2_FOLLOW_RESYNC_US);
     if (mouse_debug()) { /* does the picture turn while no camera update runs (an animation holds the view)? */
         static int was_following, seen;
         static float yaw0;
@@ -8063,6 +8132,7 @@ static void sample(PadData *d) {
         if (dt>0.5f) dt=0.5f; /* a loaded PC polls the pad rarely: the scripted motion is not lost */
         pthread_mutex_lock(&camera_lock);
         for (int q=0;q<CAMERA_QUEUES;++q) { camera_dx[q]+=injected.mouse[0]*dt; camera_dy[q]+=injected.mouse[1]*dt; }
+        if (mouse_ours) { pthread_mutex_unlock(&camera_lock); o_inject(injected.mouse[0]*dt,injected.mouse[1]*dt,inject_now); pthread_mutex_lock(&camera_lock); }
         pthread_mutex_unlock(&camera_lock);
     }
     mouse_inject_us=inject_now;
@@ -8080,6 +8150,7 @@ static void sample(PadData *d) {
     look_held=(d->buttons & (BTN_R3|BTN_UP))!=0; /* U1: the d-pad up (V) looks around */
     if (look_held) look_blend_until_us=now_us()+1300000;
     if (!aim_held) { aim_target_total=0.0f; aim_session_reset=1; }
+    if (mouse_ours) o_sample_state(d);
     if (mouse_debug()) { /* the pad the game gets, when it changes (jetski: which buttons stop it) */
         static uint32_t last_buttons=~0u; static uint8_t last_l2, last_r2, last_ly=128;
         if (d->buttons!=last_buttons || d->l2!=last_l2 || d->r2!=last_r2 || (d->left_y>128+30)!=(last_ly>128+30) || (d->left_y<128-30)!=(last_ly<128-30)) {
@@ -8115,6 +8186,7 @@ static void sample(PadData *d) {
     if (!pad_only_mode && follow_push!=0.0f && camera_hook_us && now-camera_hook_us<100000 &&
         !(sticks_hook_us && now-sticks_hook_us<100000) && !aim_native && !look_held && d->right_x>=118 && d->right_x<=138)
         d->right_x=(uint8_t)(128.0f+follow_push*127.5f);
+    if (mouse_ours && !pad_only_mode) o_follow_push_stick(d,now);
     if (hold_after_capture) {
         if (d->buttons) d->buttons=0;
         else hold_after_capture=0;

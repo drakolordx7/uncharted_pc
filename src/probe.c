@@ -856,6 +856,11 @@ static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t imag
         const RuntimeGuestCallback *c=&callbacks[i];
         if (!c->pattern && c->signature && !strncmp(c->name,"U1 ",3) && AT_OFFSET(c)) is_u1=1;
     }
+    {   /* which fixed-offset entries verify here, before anything is asked for or installed */
+        uint8_t verified[count ? count : 1];
+        for (size_t i=0;i<count;++i) verified[i]=!callbacks[i].pattern && callbacks[i].signature && AT_OFFSET(&callbacks[i]);
+        runtime_guest_callbacks_verified(verified,count);
+    }
     for (size_t i=0;i<count;++i) {
         const RuntimeGuestCallback *c=&callbacks[i];
         if (skip && *skip && strstr(c->name,skip)) continue;

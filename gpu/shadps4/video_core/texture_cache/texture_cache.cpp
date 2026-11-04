@@ -1156,6 +1156,8 @@ void TextureCache::RefreshImage(Image& image) {
 
     if (BbKeyIcons::Enabled()) {
         PatchKeyIcons(image);
+    } else {
+        ReplaceButtonPrompts(runtime, image); // key icons off (launcher): the keyboard / Xbox button pictures
     }
     if (TexDumpDir()) {
         DumpImage(image);
