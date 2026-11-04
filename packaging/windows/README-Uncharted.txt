@@ -43,7 +43,8 @@ Starting
 - Trophies: the three games' trophy lists are read from sce_sys\trophy\trophy01-03.trp in the game
   folder. A trophy the game awards shows as a notice at the top of the screen and on the launcher's
   Trophies page (BB_TROPHY_POPUP=0 in Advanced -> Environment hides the notice). Earned trophies
-  are kept in user\trophy\ with the saves, one list per game.
+  are kept in user\trophy\ with the saves, one list per game. A sound for the notice:
+  user\custom_trophy\trophy.mp3 (or trophy.wav).
 
 Data
 - Saves and shader caches: user\ next to Uncharted.exe (the launcher can pick another folder).

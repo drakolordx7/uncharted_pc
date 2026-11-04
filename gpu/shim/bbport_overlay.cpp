@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <deque>
+#include <filesystem>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -17,6 +18,7 @@
 #include <SDL3/SDL.h>
 #include "bbport_settings.h"
 #include "../bbgpu.h"
+#include "common/path_util.h"
 #include <miniz.h>
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -54,6 +56,12 @@ extern "C" const unsigned char bb_font_ttf_end[];
 
 extern "C" void runtime_restart(void); // bb-probe (probe.c)
 extern "C" int runtime_savedata_wait_idle(unsigned timeout_ms); // bb-probe (runtime_savedata.c)
+#ifdef _WIN32
+// winmm (linked): MCI plays the custom trophy sound, MP3 or WAV. Declared here to keep <windows.h> out.
+extern "C" __declspec(dllimport) unsigned long __stdcall mciSendStringW(const wchar_t* command,
+                                                                       wchar_t* reply, unsigned size,
+                                                                       void* window);
+#endif
 
 namespace BbOverlay {
 
@@ -771,6 +779,37 @@ void SetToastIcon(const std::vector<unsigned char>& png) {
     }
 }
 
+// The sound of a notice: user/custom_trophy/trophy.mp3, else trophy.wav (none without either). It plays on
+// its own thread, each one under its own MCI alias so a long sound does not block the next notice's.
+void PlayTrophySound() {
+#ifdef _WIN32
+    const auto dir = Common::FS::GetUserPath(Common::FS::PathType::CustomTrophy);
+    std::filesystem::path file;
+    for (const char* name : {"trophy.mp3", "trophy.wav"}) {
+        std::error_code ec;
+        if (std::filesystem::is_regular_file(dir / name, ec)) {
+            file = dir / name;
+            break;
+        }
+    }
+    if (file.empty()) {
+        return;
+    }
+    static std::atomic<unsigned> count{0};
+    const std::wstring alias = L"bb_trophy" + std::to_wstring(count++);
+    std::thread([file, alias] {
+        const std::wstring open = L"open \"" + file.wstring() + L"\" type mpegvideo alias " + alias;
+        if (const unsigned long error = mciSendStringW(open.c_str(), nullptr, 0, nullptr)) {
+            std::printf("Trophies: cannot play %s (MCI error %lu)\n",
+                        Common::FS::PathToUTF8String(file).c_str(), error);
+            return;
+        }
+        mciSendStringW((L"play " + alias + L" wait").c_str(), nullptr, 0, nullptr);
+        mciSendStringW((L"close " + alias).c_str(), nullptr, 0, nullptr);
+    }).detach();
+#endif
+}
+
 void TrophyToast() {
     const auto now = std::chrono::steady_clock::now();
     if (!toast_on) {
@@ -783,6 +822,7 @@ void TrophyToast() {
         toast_queue.pop_front();
         toast_on = true;
         toast_start = now;
+        PlayTrophySound();
         SetToastIcon(toast_now.png);
         toast_now.png = {};
     }
