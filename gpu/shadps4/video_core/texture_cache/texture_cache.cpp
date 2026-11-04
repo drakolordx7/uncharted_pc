@@ -1207,7 +1207,7 @@ void TextureCache::PatchKeyIcons(Image& image) {
     image.bb_prompt = is_atlas ? 0 : u8(BbKeyIcons::PromptKind(hash));
     image.bb_key_hash = !is_atlas && BbKeyIcons::IsTextureTarget(hash) ? hash : 0;
     image.bb_pulse = !is_atlas && BbKeyIcons::IsPulseMask(hash);
-    image.bb_atlas = is_atlas && hash == BbKeyIcons::U1AtlasHash;
+    image.bb_atlas = is_atlas && BbKeyIcons::IsAtlasHash(hash);
     image.bb_atlas_generation = BbKeyIcons::MenuGeneration();
     image.bb_mode_generation = BbKeyIcons::ModeGeneration();
     if (!is_atlas && !BbKeyIcons::IsTextureTarget(hash) && (info.pixel_format == vk::Format::eBc1RgbUnormBlock ||
@@ -1215,7 +1215,7 @@ void TextureCache::PatchKeyIcons(Image& image) {
         BbKeyIcons::NoteUnknownTexture(hash, info.size.width, info.size.height,
                                        std::bit_cast<const u8*>(info.guest_address), info.guest_size);
     }
-    if (is_atlas ? hash != BbKeyIcons::U1AtlasHash : !BbKeyIcons::IsTextureTarget(hash)) {
+    if (is_atlas ? !BbKeyIcons::IsAtlasHash(hash) : !BbKeyIcons::IsTextureTarget(hash)) {
         return;
     }
 

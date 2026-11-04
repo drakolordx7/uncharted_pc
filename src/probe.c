@@ -818,9 +818,14 @@ static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t imag
     /* A/B tests: BB_CALLBACKS=0 installs none, BB_CALLBACKS_SKIP=<text> none whose name contains the text */
     const char *off=getenv("BB_CALLBACKS"), *skip=getenv("BB_CALLBACKS_SKIP");
     if (off && off[0]=='0') { printf("Callbacks: disabled (BB_CALLBACKS=0)\n"); return; }
+    int is_u1=0;   /* the image is Uncharted 1's when one of the U1 hooks matches: the U2 list widget hook (8 bytes of prologue) also matches a function of U1 and must not go there */
+    for (size_t i=0;i<count && !is_u1;++i) {
+        const RuntimeGuestCallback *c=&callbacks[i];
+        if (!strncmp(c->name,"U1 ",3) && mapped(segments,ns,c->offset,c->signature_size) && !memcmp(image+c->offset,c->signature,c->signature_size)) is_u1=1;
+    }
     for (size_t i=0;i<count;++i) {
         const RuntimeGuestCallback *c=&callbacks[i];
-        if (getenv("BB_SKIP_U2_WIDGET") && strstr(c->name,"U2 list widget")) continue;   /* diagnosis: this hook also matches a function of U1 */
+        if ((is_u1 || getenv("BB_SKIP_U2_WIDGET")) && strstr(c->name,"U2 list widget")) continue;
         if (!mapped(segments,ns,c->offset,c->signature_size) ||
             memcmp(image+c->offset,c->signature,c->signature_size)) continue;
         if (!c->callback) {

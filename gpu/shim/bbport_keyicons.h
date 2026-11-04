@@ -12,6 +12,11 @@ bool Enabled();
 
 /// U1: XXH3-64 of the guest bytes of the 512x512 RGBA8 atlas that holds the button icons.
 constexpr uint64_t U1AtlasHash = 0xad5ada34fd34c76bull;
+/// U2: the same atlas (same layout, other bytes).
+constexpr uint64_t U2AtlasHash = 0x97779d0906f16551ull;
+constexpr bool IsAtlasHash(uint64_t hash) {
+    return hash == U1AtlasHash || hash == U2AtlasHash;
+}
 
 /// The device the player used last (the window calls this): 0 keyboard and mouse (the key and mouse pastilles, the reworded
 /// hints, the zoomed prompts), 1 PlayStation controller (the game's own icons, texts and prompts), 2 Xbox controller (the atlas

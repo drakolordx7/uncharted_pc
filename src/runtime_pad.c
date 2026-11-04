@@ -691,6 +691,7 @@ static void u2_zoom_camera(uint64_t camera, uint64_t image) {
     u2_native_us=now_us();
     if (step==0.0f && step_pitch==0.0f) return;
     float *d=(float *)(uintptr_t)(camera+0x1f30);
+    if (!(d[0]>-1.5f && d[0]<1.5f && d[1]>-1.5f && d[1]<1.5f && d[2]>-1.5f && d[2]<1.5f)) return; /* a new camera: not set yet */
     if (step!=0.0f) {
         const float a=step*0.017453293f, c=SDL_cosf(a), s=SDL_sinf(a);
         const float x=d[0], z=d[2];
@@ -736,7 +737,39 @@ static void __attribute__((ms_abi)) u2b_camera_hook(uint64_t unused0, uint64_t u
     case U2B_UPDATE_COVER: u2_cover_camera(camera,image); break;
     case U2B_UPDATE_LOOK: u2_look_camera(camera,image); break;
     case U2B_UPDATE_FOLLOW: /* walking: the follow camera's direction (+0x9ec0) and vertical arc (+0x9e60), as in the earlier U2 build */
-        follow_camera(camera,0x9ec0,0x9e60,135.0f,!(u2_frame_dt(image)>0.0f));
+    {
+        /* A walking camera that has just been made (museum start, chapter or level change) holds numbers that are not set yet
+         * (NaN, huge): writing the position from them made the game stop on IsFinite(m_smoothedCameraPos) / the camera
+         * translation limit. So the camera is left alone for its first frames and while any of its numbers is unusable. */
+        static uint64_t seen_camera; static unsigned seen_frames;
+        const uint64_t t_now=now_us();
+        static uint64_t seen_us;
+        if (camera!=seen_camera || t_now-seen_us>100000) { seen_camera=camera; seen_frames=0; }
+        seen_us=t_now;
+        if (seen_frames<8) ++seen_frames;
+        const float *chk_dir=(const float *)(uintptr_t)(camera+0x9ec0), *chk_pos=(const float *)(uintptr_t)(camera+0x9d70);
+        const float *chk_pivot=(const float *)(uintptr_t)(camera+0x9e70), *chk_t1=(const float *)(uintptr_t)(camera+0x9d50);
+        const float *chk_t0=(const float *)(uintptr_t)(camera+0x9eb0);
+        int usable=seen_frames>=8;
+        for (int i=0;usable && i<3;++i) {
+            if (!(chk_dir[i]>-2.0f && chk_dir[i]<2.0f) || !(chk_pos[i]>-5000.0f && chk_pos[i]<5000.0f) ||
+                !(chk_pivot[i]>-5000.0f && chk_pivot[i]<5000.0f) || !(chk_t1[i]>-5000.0f && chk_t1[i]<5000.0f) ||
+                !(chk_t0[i]>-5000.0f && chk_t0[i]<5000.0f)) usable=0;
+        }
+        if (usable) {
+            const float gx=chk_pos[0]-chk_pivot[0], gy=chk_pos[1]-chk_pivot[1], gz=chk_pos[2]-chk_pivot[2];
+            if (!(gx*gx+gy*gy+gz*gz<400.0f*400.0f)) usable=0;
+        }
+        if (!usable) {
+            float ignore_x, ignore_y;
+            camera_take(0,&ignore_x,&ignore_y);
+            follow_applied=0.0f; follow_arc_moved=0;
+            if (mouse_debug()) { static unsigned skipped; if ((skipped++&63)==0) printf("Mouse: u2 follow camera %#llx skipped (frames=%u)\n",(unsigned long long)camera,seen_frames); }
+            break;
+        }
+    }
+        { const float frame_dt=u2_frame_dt(image);
+          follow_camera(camera,0x9ec0,0x9e60,135.0f,!(frame_dt>0.0f && frame_dt<0.25f)); }
         if ((follow_applied!=0.0f || follow_arc_moved) && !input.free_view_smoothing) {
             /* The camera's target position (+0x9d50, the one before it at +0x9eb0) follows the direction at once, on a circle about
              * the player (+0x9e70), but the position it shows (+0x9d70) follows that target through a spring and trails it by 6 to
@@ -766,7 +799,9 @@ static void __attribute__((ms_abi)) u2b_camera_hook(uint64_t unused0, uint64_t u
                 px=x*c-pz*s;
                 pz=x*s+pz*c;
             }
-            pos[0]=pivot[0]+px; pos[1]=pivot[1]+py; pos[2]=pivot[2]+pz;
+            if (px>-400.0f && px<400.0f && py>-400.0f && py<400.0f && pz>-400.0f && pz<400.0f) { /* false for NaN too */
+                pos[0]=pivot[0]+px; pos[1]=pivot[1]+py; pos[2]=pivot[2]+pz;
+            }
         }
         if (mouse_debug()) {
             static unsigned n;
@@ -1306,20 +1341,6 @@ static uint64_t aim_native_us;        /* last frame the zoom camera was turned b
 static volatile int aim_session_reset = 1; /* set while not aiming: the next aim starts from a zero turn */
 static float aim_pending_degrees;     /* the mouse's yaw not given to the zoom camera yet */
 static float aim_pending_pitch;       /* its pitch (degrees, positive looks down) */
-/* The share of the mouse's pending turn given to the aiming / look-around camera this frame. A slow mouse reports a pixel or
- * two now and then, which would turn the camera in steps, so a small pending turn is spread over about 20 ms; the time constant
- * falls smoothly towards 0 as the pending turn grows (no threshold, or the camera would seem to accelerate), so quick
- * movements are followed at once. aim_raw gives it all at once (the steps of a slow mouse are then visible). The angle turned
- * in total is the same in every case. */
-#define AIM_SMOOTH_SECONDS 0.02f
-#define AIM_SMOOTH_PIXELS 6.0f
-static float aim_follow(float dt, float pending_yaw, float pending_pitch) {
-    if (input.aim_raw) return 1.0f;
-    const float pixels=SDL_sqrtf(pending_yaw*pending_yaw+pending_pitch*pending_pitch)/
-                       (MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity*input.mouse_aim_sensitivity);
-    const float k=pixels/AIM_SMOOTH_PIXELS;
-    return 1.0f-SDL_expf(-dt*(1.0f+k*k)/AIM_SMOOTH_SECONDS);
-}
 static void __attribute__((ms_abi)) u1b_aim_camera(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t camera) {
     (void)unused0; (void)unused1;
     if (mouse_debug() && camera>=0x10000) { /* which cameras the manager updates, per input state (V, cover, aim) */
@@ -3326,6 +3347,7 @@ static int menu_mode, menu_guard;
  * follow camera of the play runs again, or the pause was left with Alt or Esc (resume). "Back to the main
  * menu" and the title screen after it are then in menu mode; resuming in a game section without the follow
  * camera (vehicles) leaves it at once through Alt/Esc. */
+static int u2_menu_on, u2_menu_key_guard;   /* defined with the U2 menus below; the guard keeps the four buttons released at a change until their keys are */
 static int menu_exit_key;             /* 1: the last menu key pressed was Alt or Esc (resume), 0: Enter */
 /* Play sections with a fixed camera (the German submarine) never run the follow camera: after a skipped cutscene the menu
  * keys would stay on for ever. 1: forced off because the clock runs and no menu item text has been drawn for a while;
@@ -3380,6 +3402,21 @@ static int menu_key_action_down(int a, const bool *k) {
 static int key_action_down(int a, const bool *k, uint32_t mouse, uint64_t now) {
     const int menu_button=a==A_CROSS || a==A_CIRCLE || a==A_TRIANGLE || a==A_R1 || a==A_OPTIONS;
     if (menu_button && menu_guard) return 0;
+    static int u2_keys_off=-1;   /* BB_U2_MENU_KEYS=0: the menus of U2 keep the keys of the play (diagnosis) */
+    if (u2_keys_off<0) { const char *e=getenv("BB_U2_MENU_KEYS"); u2_keys_off=e && atoi(e)==0; }
+    if (!menu_mode && !u1_image && !u2_keys_off) {   /* U2: the menus have the keys of the U1 menus (Enter, Esc, Alt, Backspace), the same ones the pastilles show */
+        if (u2_menu_key_guard && !menu_keys_held(k)) u2_menu_key_guard=0;
+        if (menu_button && u2_menu_key_guard) return 0;
+        if (u2_menu_on && menu_button) {
+            switch (a) {
+            case A_CROSS: return k && (k[SDL_SCANCODE_RETURN] || k[SDL_SCANCODE_KP_ENTER]);
+            case A_CIRCLE: return k && k[SDL_SCANCODE_ESCAPE];
+            case A_OPTIONS: return k && (k[SDL_SCANCODE_LALT] || k[SDL_SCANCODE_RALT]);
+            case A_R1: return k && k[SDL_SCANCODE_BACKSPACE];
+            default: return 0;
+            }
+        }
+    }
     if (!menu_mode) return action_down(a,k,mouse,now);
     /* The mouse in a menu: the wheel moves up and down (d-pad), the lower thumb button (Mouse 4, "back") goes
      * back (circle). The left click will validate (cross) once the cursor can select the text under it: not
@@ -4041,7 +4078,7 @@ static int u2_menu_active(uint64_t now) {
     const int carousel=u2_popup_us && now-u2_popup_us<700000 && u2_popup_us<=now+1000000;   /* (the carousel has no row to highlight either) */
     if (hi || layout || credits || carousel) seen=now;
     const int on=seen && now-seen<300000;
-    if (on!=u2_menu_on) { u2_menu_on=on; u2_menu_reset=on; bbgpu_game_menu_cursor(on); printf("Runtime: U2 menu mouse %s\n",on ? "on" : "off"); }
+    if (on!=u2_menu_on) { u2_menu_on=on; u2_menu_reset=on; u2_menu_key_guard=1; bbgpu_menu_state(on); printf("Runtime: U2 menu mouse %s\n",on ? "on" : "off"); }
     return on;
 }
 /* ---- U2 sliders set by position ---------------------------------------------------------------
@@ -4434,6 +4471,7 @@ static uint32_t u2_menu_buttons(const bool *k, uint32_t mouse, uint64_t now) {
         }
         pthread_mutex_unlock(&menu_text_lock);
     }
+    if (clicked && mouse_debug()) printf("Runtime: U2 click dbg: ux %.0f uy %.0f hov %d [x%.0f y%.0f w%.0f h%.1f s%.1f] sel %d cy %.1f dlg %d slid %d arrow %d popup %d model %d ls %d\n",ux,uy,have_hov,hov.x,hov.y,hov.w,hov.h,hov.s5,have_sel,sel.y+sel.h*0.5f,dlg,have_slid,arrow,popup,in_model,ls_q);
     if (arrow) {
         h.choice=arrow; h.choice_cy=arrow_cy; h.choice_until=now+1500000; h.choice_seen=0;
         h.active=1; h.presses=0; h.budget=0; h.stuck=0; h.last_dir=-1; h.click=0;

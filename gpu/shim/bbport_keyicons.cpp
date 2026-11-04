@@ -1446,6 +1446,15 @@ static bool PaintAtlas(uint8_t* rgba, int phase) {
             DrawCluster(rgba, 512, float(dpad.x) + float(dpad.w) * 0.5f, float(dpad.y) + float(dpad.h) * 0.5f, keys, font,
                         DpadClusterKey, -1, 1.0f);
             ++patched;
+        } else if (i == 1 && g_menu_mode && left_stick.size() == 4) {
+            // the menus: the left+right pad (a choice to change, Oui / Non of the pause of a cutscene) is the four keys of the stick, always:
+            // the wheel does not change a choice there
+            ClearFrame(rgba, 512, dpad, 6);
+            const std::string keys[4] = {left_stick.substr(0, 1), left_stick.substr(1, 1), left_stick.substr(2, 1),
+                                         left_stick.substr(3, 1)};
+            DrawCluster(rgba, 512, float(dpad.x) + float(dpad.w) * 0.5f, float(dpad.y) + float(dpad.h) * 0.5f, keys, font,
+                        DpadClusterKey, -1, 1.0f);
+            ++patched;
         } else if (i == 1 && !weapon_1.empty() && !weapon_2.empty()) {
             // the change-weapon prompt: the two weapon keys side by side (the wheel only when no key is bound)
             ClearFrame(rgba, 512, dpad, 6);
@@ -2689,6 +2698,15 @@ constexpr KeyTarget KeyTargets[] = {
     // The journal with the touchpad button on it: the touchpad button becomes the key, the journal stays.
     // The key fills the box of the button, so the halo of the original mask, left as it is, fits it.
     {0x8b9946c0528a3d88ull, 0, 0, 512, 256, 216.0f, 142.0f, 70.5f, 70.5f, "touchpad", 0.0f, 169.0f, 105.0f, true, 135, 93, 298, 192},
+    // Uncharted 2: the same pictures with other hashes (found by the texture dump of U2). The big button: the flat one
+    // (soft halo, hard disc), then its two press frames, each with a mask of its own (the glow is in the mask) ...
+    {0xc6e03b00d234a7cdull, 0x28097479d1e0fdd3ull, 0xa5f8293a037fa06eull, 256, 256, 128.5f, 126.5f, 70.5f, 70.5f, "triangle", 0.0f, 170.0f, 150.0f, false, 0, 0, 0, 0, 0, 0, BigKeyScale},
+    {0xf2829d9b5230cb2bull, 0, 0xe5ffdae4c88ca07dull, 512, 512, 256.5f, 250.0f, 98.5f, 59.0f, "triangle", -16.0f, 170.0f, 150.0f, false, 0, 0, 0, 0, 0, 0, FrameKeyScale, true},
+    {0x07fabd1a89bf9ddbull, 0x96eef6ee07602555ull, 0, 512, 512, 256.5f, 250.0f, 98.5f, 59.0f, "triangle", 36.0f, 170.0f, 150.0f, false, 0, 0, 0, 0, 0, 0, FrameKeyScale},
+    // ... and the d-pad, 256x256 here (128x128 in U1): twice the radius.
+    {0x2e528a3cffaf0059ull, 0x54c5ae40a5cb6d4eull, 0xbe699cb5e4c57461ull, 256, 256, 128.0f, 126.0f, 80.0f, 80.0f, "up", 0.0f, 170.0f, 150.0f, false, 0, 0, 0, 0, 0, 0, DpadKeyScale, true},
+    // ... and the journal (512x256, button in the same place as in U1; its soft halo is a5557ee8c3c38870): the book is grey here.
+    {0x10ee44c6ce616ee4ull, 0, 0, 512, 256, 216.0f, 142.0f, 70.5f, 70.5f, "touchpad", 0.0f, 169.0f, 105.0f, true, 135, 93, 298, 192},
 };
 
 enum class Role { Color, Halo, Disc };
@@ -2866,6 +2884,7 @@ bool PatchKeyTarget(const KeyTarget& t, Role role, uint64_t hash, uint8_t* data,
 // the book and the button together). Xbox: the hidden part of the book is filled in, the button goes, a round View button takes
 // its place, and the mask follows the new shape. All the coordinates are the textures' own (stored upside down).
 constexpr uint64_t JournalMaskHash = 0x098d0fef76921395ull;
+constexpr uint64_t JournalMaskHashU2 = 0xa5557ee8c3c38870ull; // the same soft mask in U2 (the drawn book has U1's outline: same mask picture)
 constexpr int JournalHullCount = 17;
 constexpr float JournalHull[JournalHullCount][2] = {{20, 100}, {30, 89},  {57, 77},   {86, 66},   {116, 55}, {142, 46}, {156, 44}, {167, 54}, {177, 74},
                                                     {232, 197}, {229, 213}, {203, 220}, {139, 232}, {116, 234}, {103, 217}, {40, 131}, {24, 109}};
@@ -3048,6 +3067,8 @@ bool XJournalMask(uint8_t* data, size_t size, uint32_t levels) {
 // the Xbox pad drawn by hand and the mask made from it.
 constexpr uint64_t SchemaHash = 0xcf2985e2610ea662ull;
 constexpr uint64_t SchemaMaskHash = 0x16bc917ddadab17cull;
+constexpr uint64_t SchemaMaskHashU2 = 0xb1f24fd1dd0f8d61ull; // U2 draws the same picture (same hash) with a mask of its own (PlayStation pad + touchpad
+                                                             // callout): it gets U1's Xbox mask, the validated one
 
 bool XSchemaColor(uint8_t* data, size_t size) {
     constexpr int W = 2048, H = 1024;
@@ -3099,12 +3120,12 @@ bool PatchXboxHud(const KeyTarget& t, Role role, uint8_t* data, size_t size, uin
     // the pictures drawn by hand, when they are there and of the right size
     uint32_t asset_id = 0;
     if (journal) {
-        asset_id = 4;
-    } else if (t.hash == 0xac68a6ce1c1540adull) {
+        asset_id = t.hash == 0x8b9946c0528a3d88ull ? 4 : 8; // U2's has its own (a grey book, drawn by hand); both go with the same mask (5)
+    } else if (t.hash == 0xac68a6ce1c1540adull || t.hash == 0xc6e03b00d234a7cdull) {
         asset_id = 1;
-    } else if (t.hash == 0x4ae942741bdae0d1ull) {
+    } else if (t.hash == 0x4ae942741bdae0d1ull || t.hash == 0x07fabd1a89bf9ddbull) {
         asset_id = 2;
-    } else if (t.hash == 0x02c213a5ba6c6d49ull) {
+    } else if (t.hash == 0x02c213a5ba6c6d49ull || t.hash == 0xf2829d9b5230cb2bull) {
         asset_id = 3;
     }
     XAsset asset;
@@ -3283,7 +3304,7 @@ void NoteUnknownTexture(uint64_t hash, uint32_t width, uint32_t height, const ui
 bool IsTextureTarget(uint64_t hash) {
     bool is_mask;
     Role role;
-    return FindKeyTarget(hash, &role) != nullptr || FindStickFrame(hash, &is_mask) != nullptr || hash == JournalMaskHash || hash == SchemaHash || hash == SchemaMaskHash;
+    return FindKeyTarget(hash, &role) != nullptr || FindStickFrame(hash, &is_mask) != nullptr || hash == JournalMaskHash || hash == JournalMaskHashU2 || hash == SchemaHash || hash == SchemaMaskHash || hash == SchemaMaskHashU2;
 }
 
 bool IsPulseMask(uint64_t hash) {
@@ -3305,11 +3326,31 @@ int PromptKind(uint64_t hash) {
     if (!t) {
         return 0;
     }
-    return !std::strcmp(t->action, "up") ? 2 : !std::strcmp(t->action, "touchpad") ? 3 : (t->width == 512 && !std::strcmp(t->action, "triangle")) ? 4 : 0;
+    return !std::strcmp(t->action, "up") ? (t->width == 256 ? 5 : 2) : !std::strcmp(t->action, "touchpad") ? 3 : (t->width == 512 && !std::strcmp(t->action, "triangle")) ? 4 : 0;
 }
 
 void PromptTransform(int kind, float* zoom, float* anchor_x, float* anchor_y, float* down, float* right) {
     *right = 0.0f;
+    if (kind == 5) {
+        // The "V" of U2 (measured in game on 2000x1125 captures): drawn 61 pixels wide, centered 312 from the left edge and 940
+        // from the top; it must be as big as the flat "E" (91 pixels, centered 306 from the right edge and 976 from the top).
+        // A zoom about the fixed point c of x' = c + zoom * (x - c) does both: c = (T - zoom * A) / (1 - zoom).
+        struct Values {
+            float zoom, x, y;
+        };
+        static const Values values = [] {
+            Values v{1.49f, 0.1621f, 0.630f};
+            if (const char* env = std::getenv("BB_U2_DPAD_ZOOM")) {
+                std::sscanf(env, "%f,%f,%f", &v.zoom, &v.x, &v.y);
+            }
+            return v;
+        }();
+        *zoom = values.zoom;
+        *anchor_x = values.x;
+        *anchor_y = values.y;
+        *down = 0.0f;
+        return;
+    }
     if (kind == 2 || kind == 3 || kind == 4) {
         // The "V" was at y = 925 of a 2000x1125 capture, the "E" prompts at 977; the bottom of the
         // journal at 993, the bottom of the "V" (now moved) at 1025. The right side of the "Tab" key
@@ -3363,13 +3404,13 @@ bool PatchU1Texture(uint64_t hash, uint8_t* data, size_t size, uint32_t levels) 
         return false; // a PlayStation controller: the HUD buttons stay the game's own
     }
     if (g_input_mode == 2) { // Xbox: the "interact" button and the journal's get the Xbox button; the rest (d-pad, stick) stays
-        if (hash == JournalMaskHash) {
+        if (hash == JournalMaskHash || hash == JournalMaskHashU2) {
             return XJournalMask(data, size, levels);
         }
         if (hash == SchemaHash) {
             return XSchemaColor(data, size);
         }
-        if (hash == SchemaMaskHash) {
+        if (hash == SchemaMaskHash || hash == SchemaMaskHashU2) {
             return XSchemaMask(data, size, levels);
         }
         Role role = Role::Color;

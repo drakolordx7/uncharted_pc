@@ -5212,14 +5212,24 @@ void Rasterizer::UpdateViewportScissorState() const {
     // bbport: the "rotate the stick" prompt (BbKeyIcons) is drawn about 3 times smaller than the
     // other prompts: a draw sampling one of its textures is zoomed about a fixed point of the target
     // (fractions of it: any resolution), by widening its viewport the same way.
-    if (BbKeyIcons::Enabled() && BbKeyIcons::InputMode() != 0) {
-        // a controller: the prompts keep the game's size and place
+    // With a controller the prompts keep the game's size and place, except the journal (kind 3), which is moved as it is for the
+    // keyboard: its pastille is then at the same place with the three devices.
+    const bool pad = BbKeyIcons::Enabled() && BbKeyIcons::InputMode() != 0;
+    bool pad_journal = false;
+    if (pad) {
+        for (const auto id : bound_images) {
+            pad_journal = pad_journal || texture_cache.PromptKind(id) == 3;
+        }
+    }
+    if (pad && !pad_journal) {
+        // a controller: nothing to move
     } else if (BbKeyIcons::Enabled() && !viewports.empty() && !regs.IsClipDisabled()) {
         int kind = 0;
         for (const auto id : bound_images) {
-            if ((kind = texture_cache.PromptKind(id)) != 0) {
+            if ((kind = texture_cache.PromptKind(id)) != 0 && (!pad || kind == 3)) {
                 break;
             }
+            kind = 0;
         }
         if (kind != 0) {
             float zoom, ax, ay, down, right;
