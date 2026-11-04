@@ -29,6 +29,11 @@ Starting
 - Display page -> Anti-aliasing: TAA, AMD FSR 3.1, AMD FSR 4, NVIDIA DLSS (DLAA) or Intel XeSS smooth the
   games' 1920x1080 picture with their own motion vectors, before their post-processing.
   DLSS needs a GeForce RTX. Upscaling to a larger window or screen stays with FSR 1.
+  NVIDIA's DLSS files (nvngx_dlss.dll, nvngx_dlssg.dll) are not in this zip: on a GeForce RTX the
+  launcher downloads them from NVIDIA's GitHub on first start (internet needed once) into the
+  bin folder (or the launcher's data folder). Until then the DLSS options stay greyed out.
+  NVIDIA DLSS. NVIDIA, the NVIDIA logo, NVIDIA RTX, GeForce RTX and DLSS are trademarks and/or
+  registered trademarks of NVIDIA Corporation in the U.S. and other countries.
 - Display page -> Frame generation: AMD FSR 3 Frame Generation (any GPU, 2x) or NVIDIA DLSS
   Frame Generation (GeForce RTX 40: 2x, RTX 50: up to 4x) shows frames made between two of the
   game's: 60 FPS becomes 120 (or 240). Use the Mailbox or Immediate presentation and a display

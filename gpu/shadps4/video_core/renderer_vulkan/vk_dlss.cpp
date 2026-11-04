@@ -40,6 +40,18 @@ std::filesystem::path ExecutableDirectory() {
     return std::filesystem::path{path}.parent_path();
 }
 
+// Where nvngx_dlss.dll / nvngx_dlssg.dll are: the launcher downloads them (NVIDIA's runtimes are not
+// in the package) next to bb-probe.exe, or into a folder it names in BB_DLSS_DIR.
+std::filesystem::path NgxDirectory() {
+    if (const wchar_t* folder = _wgetenv(L"BB_DLSS_DIR"); folder && folder[0]) {
+        std::filesystem::path path{folder};
+        if (std::filesystem::is_regular_file(path / NgxName)) {
+            return path;
+        }
+    }
+    return ExecutableDirectory();
+}
+
 void BridgeLog(int warning, const char* message) {
     std::printf("DLSS: %s%s\n", warning ? "warning: " : "", message);
 }
@@ -94,7 +106,7 @@ Dlss* Dlss::Get() {
         }
         const auto directory = ExecutableDirectory();
         if (!std::filesystem::is_regular_file(directory / BridgeName) ||
-            !std::filesystem::is_regular_file(directory / NgxName)) {
+            !std::filesystem::is_regular_file(NgxDirectory() / NgxName)) {
             return nullptr;
         }
         auto* created = new Dlss;
@@ -128,7 +140,7 @@ Dlss::Dlss() : impl{std::make_unique<Impl>()} {
     }
     std::error_code error;
     std::filesystem::create_directories(data, error);
-    if (!impl->api->Configure(directory.c_str(), data.c_str(), BridgeLog)) {
+    if (!impl->api->Configure(NgxDirectory().c_str(), data.c_str(), BridgeLog)) {
         impl->Disable("bridge configuration failed");
     }
 }

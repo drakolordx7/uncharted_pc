@@ -84,7 +84,9 @@ Fixes and features in this build, by contributor. Pull request links go to the o
 
 Testing and research: adrianeira, exyled, fidoboy, kloon15, tDevis, MrBboy95, rayer23, GameBunny77 and everyone who sent logs.
 
-Third-party: AMD FSR, NVIDIA DLSS, Intel XeSS, LibAtrac9, SDL3, FFmpeg, Dear ImGui, sirit, xbyak, Vulkan Memory Allocator, PyInstaller, Pillow, Cinzel font, Kenney Input Prompts, [ambientCG](https://ambientcg.com/a/Paper003) Paper003 texture (CC0). Licenses are in the `licenses` folder of the release.
+Third-party: AMD FSR, [NVIDIA DLSS](https://github.com/NVIDIA/DLSS), Intel XeSS, LibAtrac9, SDL3, FFmpeg, Dear ImGui, sirit, xbyak, Vulkan Memory Allocator, PyInstaller, Pillow, Cinzel font, Kenney Input Prompts, [ambientCG](https://ambientcg.com/a/Paper003) Paper003 texture (CC0). Licenses are in the `licenses` folder of the release.
+
+NVIDIA DLSS: DLSS and DLSS Frame Generation use NVIDIA's DLSS SDK. The release contains only our MIT bridge (`bin/bbport_dlss.dll`, with NVIDIA's license text in `licenses`); NVIDIA's `nvngx_dlss.dll` and `nvngx_dlssg.dll` are not in the zip. On first start the launcher downloads them from NVIDIA's official GitHub repository (github.com/NVIDIA/DLSS, a pinned release, checked against a SHA-256) on GeForce RTX cards; without them, or on other cards, the DLSS options stay unavailable. NVIDIA, the NVIDIA logo, NVIDIA RTX, GeForce RTX and DLSS are trademarks and/or registered trademarks of NVIDIA Corporation in the U.S. and other countries.
 
 ## License
 
