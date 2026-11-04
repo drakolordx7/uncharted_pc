@@ -26,7 +26,7 @@ out/pyenv/Scripts/python.exe -m pip install -q --disable-pip-version-check pyins
 # The scripts run inside Uncharted.exe (--script): the standard modules they import come along.
 hidden=()
 for module in argparse base64 bisect collections datetime hashlib hmac json re shutil struct tempfile zlib ctypes.wintypes cheats \
-              uncharted_art uncharted_fonts uncharted_i18n uncharted_saves uncharted_slots uncharted_widgets bbport_steam PIL.ImageTk iced_x86; do
+              uncharted_art uncharted_dlss uncharted_fonts uncharted_i18n uncharted_saves uncharted_slots uncharted_widgets bbport_steam PIL.ImageTk iced_x86; do
     hidden+=(--hidden-import "$module")
 done
 out/pyenv/Scripts/python.exe -m PyInstaller --noconfirm --clean --log-level WARN --windowed \
@@ -69,16 +69,24 @@ for license in out/pyenv/Lib/site-packages/tkinterdnd2-*.dist-info/licenses/LICE
 done
 # FSR 4 (the v07 INT8 model) when its assets are in fsr4_shaders/ (tools/fetch_fsr4_assets.sh).
 if [[ -d fsr4_shaders ]]; then cp -r fsr4_shaders "$dest/"; fi
-# DLSS and DLSS Frame Generation (NVIDIA RTX): the MSVC-built bridge and NVIDIA's runtimes, next
-# to bb-probe.exe (packaging/windows/build_dlss.sh). Without them those options stay unavailable.
-if [[ -f out/bbport_dlss.dll && -f out/nvngx_dlss.dll ]]; then
-    cp out/bbport_dlss.dll out/nvngx_dlss.dll "$dest/bin/"
-    if [[ -f out/nvngx_dlssg.dll ]]; then cp out/nvngx_dlssg.dll "$dest/bin/"; fi
-    cp out/NVIDIA-DLSS-LICENSE.txt "$dest/licenses/"
+# DLSS and DLSS Frame Generation (NVIDIA RTX): only our MIT bridge goes in, next to bb-probe.exe.
+# NVIDIA's nvngx_dlss.dll / nvngx_dlssg.dll are never put in the package: the launcher downloads
+# them from NVIDIA's GitHub on first start (launcher/uncharted_dlss.py). The bridge needs MSVC and
+# the SDK (packaging/windows/build_dlss.sh), so the prebuilt copy in BBPORT_DLSS_DIR is the fallback.
+dlss_dir=${BBPORT_DLSS_DIR:-/d/AI/Tools/DLSS/bbport_dlss_build}
+if [[ ! -f out/bbport_dlss.dll && -f $dlss_dir/bbport_dlss.dll ]]; then
+    dlss_src=$dlss_dir
+else
+    dlss_src=out
+fi
+if [[ -f $dlss_src/bbport_dlss.dll && -f $dlss_src/NVIDIA-DLSS-LICENSE.txt ]]; then
+    cp "$dlss_src/bbport_dlss.dll" "$dest/bin/"
+    cp "$dlss_src/NVIDIA-DLSS-LICENSE.txt" "$dest/licenses/"
     cp gpu/dlss_bridge/LICENSE.txt "$dest/licenses/bbport_dlss-LICENSE.txt"
 else
-    echo "DLSS bridge not built (packaging/windows/build_dlss.sh): no DLSS in this package" >&2
+    echo "DLSS bridge not built (packaging/windows/build_dlss.sh, or BBPORT_DLSS_DIR): no DLSS in this package" >&2
 fi
+rm -f "$dest/bin/nvngx_dlss.dll" "$dest/bin/nvngx_dlssg.dll"
 # Intel XeSS (any GPU): Intel's libxess.dll next to bb-probe.exe (packaging/windows/fetch_xess.sh).
 # Without it the XeSS option stays hidden.
 if [[ -f out/libxess.dll && -f out/Intel-XeSS-LICENSE.txt ]]; then

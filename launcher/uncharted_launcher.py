@@ -33,6 +33,7 @@ PORT_DIR = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).r
 sys.path.insert(0, str(PORT_DIR / 'scripts'))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import trophies  # noqa: E402  (scripts/trophies.py: the games' trophy lists)
+import uncharted_dlss
 import uncharted_i18n
 import uncharted_saves
 import uncharted_slots
@@ -669,6 +670,10 @@ def game_environment(s, start=None):
     env['BB_UPSCALER'] = str(s.get('anti_aliasing') or 'off')
     env['BB_FSR_SHARPNESS'] = str(s.get('aa_sharpness') or '0')
     env['BB_FRAME_GEN'] = str(s.get('frame_generation') or 'off')
+    probe = controller_probe_path()   # where the launcher put NVIDIA's DLSS DLLs (uncharted_dlss.py)
+    dlss_folder = probe and uncharted_dlss.runtime_folder(probe.parent, DATA_DIR / 'dlss')
+    if dlss_folder and 'BB_DLSS_DIR' not in env:
+        env['BB_DLSS_DIR'] = str(dlss_folder)
     env['BB_FRAME_GEN_MULTIPLIER'] = str(s.get('frame_gen_multiplier') or '2')
     for key, (_title, _hint, choices) in FIXES.items():
         env.update(choices.get(str(s.get(key) or 'auto'), {}))
@@ -793,6 +798,7 @@ class Launcher:
         if self.app.get('check_updates', True):
             threading.Thread(target=self.check_update, daemon=True).start()
         threading.Thread(target=self.download_art, daemon=True).start()
+        threading.Thread(target=self.download_dlss, daemon=True).start()
 
     def px(self, size):
         return int(size * self.dpi)
@@ -2671,6 +2677,19 @@ class Launcher:
             if uncharted_art.download_missing_art():
                 self.ui_calls.put(self.art_downloaded)
         except Exception:  # the painted scenes stay; the next start tries again
+            pass
+
+    def download_dlss(self):
+        """NVIDIA's DLSS DLLs are not in the package: fetch them on a GeForce RTX card (a thread)."""
+        try:
+            probe = controller_probe_path()
+            if probe is None:
+                return
+            lines = []
+            uncharted_dlss.download_dlss_runtime(probe.parent, DATA_DIR / 'dlss', log=lines.append)
+            for line in lines:
+                self.ui_calls.put(lambda text=line: self.append(text + chr(10)))
+        except Exception:  # DLSS stays unavailable; the next start tries again
             pass
 
     def art_downloaded(self):
