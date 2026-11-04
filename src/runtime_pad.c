@@ -5093,9 +5093,16 @@ static int fork_camera_entry(const RuntimeGuestCallback *c) {
     for (size_t i=0;i<sizeof(words)/sizeof(*words);++i) if (strstr(c->name,words[i])) return 1;
     return 0;
 }
-/* The ones a game needs for the 1:1 camera (U1: its 1.02 set; the 1.00 follow camera, pad update and sticks are not enough) */
+/* The ones a game needs for the 1:1 camera on CUSA02320 1.02. Five entries keep the offsets of the first port (0.3, before
+ * 1.02): the U1 follow camera, pad update and sticks, and the U2 (0x171fe0) and U3 (0x121b90) follow cameras. They never verify
+ * on 1.02, in the fork either: there it turns those cameras through its 1.02 hooks (U1 "(mouse, 1.02)", the U2 camera update,
+ * the U3 walking camera). */
 static int fork_camera_required(const RuntimeGuestCallback *c) {
-    return fork_camera_entry(c) && (strncmp(c->name,"U1 ",3) || strstr(c->name,"1.02"));
+    static const char *const first_port[]={"U1 follow camera (mouse)","U1 pad update (mouse)","U1 joypad sticks (mouse)",
+                                           "U2 follow camera (mouse)","U3 follow camera (mouse)"};
+    if (!fork_camera_entry(c)) return 0;
+    for (size_t i=0;i<sizeof(first_port)/sizeof(*first_port);++i) if (!strcmp(c->name,first_port[i])) return 0;
+    return 1;
 }
 static int ours_camera_entry(const RuntimeGuestCallback *c) {
     return c->pattern && game_index(c->name)>=0 && strstr(c->name,"pattern)");
@@ -5250,7 +5257,13 @@ void runtime_guest_callbacks_verified(const uint8_t *verified, size_t count) {
     for (int g=0;g<3;++g) {
         fork_camera[g]=required[g] && ok[g]==required[g];
         if (fork_camera[g]) printf("Mouse: %s uses the 1:1 mouse camera (antikmewzik)\n",games[g]);
-        else if (ok[g]) printf("Mouse: %s: %d of %d hooks of the 1:1 camera verify, not used\n",games[g],ok[g],required[g]);
+        else if (ok[g]) {
+            printf("Mouse: %s: %d of %d hooks of the 1:1 camera verify, not used; failed:",games[g],ok[g],required[g]);
+            for (size_t i=0;i<count && i<sizeof(guest_callbacks)/sizeof(*guest_callbacks);++i)
+                if (fork_camera_required(&guest_callbacks[i]) && game_index(guest_callbacks[i].name)==g && !verified[i])
+                    printf(" \"%s\" (%#llx)",guest_callbacks[i].name,(unsigned long long)guest_callbacks[i].offset);
+            printf("\n");
+        }
     }
 }
 int runtime_guest_callback_wanted(const RuntimeGuestCallback *c, uint64_t offset) {
