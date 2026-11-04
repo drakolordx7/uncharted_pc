@@ -1409,6 +1409,48 @@ static void patch_job_lock_wait(uint64_t image_size) {
     printf("Job wait: workers with a render context open wait for a job counter in place for up to %u ms before suspending their job (0x%" PRIx64 ")\n",
            job_lock_wait_ms,(uint64_t)at);
 }
+/* Particle spawner job (U3 US 1.02 0xf88f10; the same ndlib code in U2 US 1.02): its job data is
+ * {GlobalParams, GlobalParams+0x78}, read by stage 2 of the particle preupdate job (0xf6c9d0) when it
+ * queues the job. GlobalParams is made zeroed each frame by the game-side particle update (0xf69590);
+ * +0x78 is set and filled by the particle render job (ParticleManagerUpdateRenderJobEntryPoint,
+ * 0xeb73f0), which then drops a counter. At 60 FPS, as a pre-rendered cutscene starts, stage 2 ran
+ * before the render job and queued a null pointer: "read access to 0x20 at 0xf88f74"
+ * (mov rax,[r10+8]; mov rcx,[rax+0x20]). The job now leaves through its own epilogue (allocator pop,
+ * cookie check) when the pointer is null, skipping that frame's spawner pass. */
+static volatile long particle_skips;
+static ABI void particle_skip_note(void) {
+    const long n=__atomic_add_fetch(&particle_skips,1,__ATOMIC_RELAXED);
+    if (n<=5) printf("Movie: particle spawner job had no render data (GlobalParams+0x78 null), skipped it (%ld)\n",n);
+}
+static void patch_particle_spawner_null(uint64_t image_size) {
+    /* mov r10,r14; mov qword [r10+0x48],0; mov rax,[rip+x]; mov [r10+0x10],rax; mov rax,[r10+8];
+     * mov rcx,[rax+0x20]; mov [r10+0x18],rcx; mov rcx,[rax+0x18] */
+    const int64_t at=find_masked("4d89f2 49c7424800000000 488b05???????? 49894210 498b4208 488b4820 49894a18 488b4818",
+                                 image_size);
+    if (at<0) return;  /* other games and versions: not this code */
+    unsigned char *p=image+at+22;                       /* mov rax,[r10+8] */
+    static const unsigned char epilogue[]={0x64,0x48,0x8b,0x04,0x25,0,0,0,0};  /* mov rax,fs:0 (PopAllocator) */
+    static const unsigned char epilogue_next[]={0x48,0x8b,0x18,0x48,0x85,0xdb}; /* mov rbx,[rax]; test rbx,rbx */
+    const unsigned char *e=p+0xaa9;
+    if ((uint64_t)(e+22-image)>image_size || memcmp(e,epilogue,sizeof(epilogue)) || memcmp(e+16,epilogue_next,sizeof(epilogue_next))) {
+        printf("Particles: spawner job epilogue not found, not patched\n");
+        return;
+    }
+    unsigned char *t=near_image_memory(64);
+    if (!t) { printf("Particles: no thunk memory, not patched\n"); return; }
+    const uint64_t back=(uint64_t)(uintptr_t)(p+8), leave=(uint64_t)(uintptr_t)e;
+    const uintptr_t host=(uintptr_t)particle_skip_note;
+    size_t k=0;
+    static const unsigned char head[]={0x49,0x8b,0x42,0x08, 0x48,0x85,0xc0, 0x74,0x12, 0x48,0x8b,0x48,0x20};
+    memcpy(t+k,head,sizeof(head)); k+=sizeof(head);     /* mov rax,[r10+8]; test rax,rax; jz null; mov rcx,[rax+0x20] */
+    t[k++]=0xff; t[k++]=0x25; memset(t+k,0,4); k+=4; memcpy(t+k,&back,8); k+=8;    /* jmp [rip]: back */
+    t[k++]=0x48; t[k++]=0xb8; memcpy(t+k,&host,8); k+=8;  /* null: movabs rax, particle_skip_note */
+    t[k++]=0xff; t[k++]=0xd0;                             /* call rax (rsp is 16-aligned in the body) */
+    t[k++]=0xff; t[k++]=0x25; memset(t+k,0,4); k+=4; memcpy(t+k,&leave,8); k+=8;   /* jmp [rip]: epilogue */
+    const int32_t to=(int32_t)((int64_t)(uintptr_t)t-(int64_t)(uintptr_t)(p+5));
+    p[0]=0xe9; memcpy(p+1,&to,4); memset(p+5,0x90,3);    /* replaces the two loads */
+    printf("Particles: spawner job null data guard at %#" PRIx64 "\n",(uint64_t)(p-image));
+}
 /* Uncharted 1 (EU and US 1.02): the rigid-body integrator holds still any body slower than "Sticky Speed
  * (nothing-moves speed)" or "Sticky Omega (nothing-rotates omega)", both 0.1 (EU 0x988674 / 0x988670, the game's own
  * names). A body at rest gains g*dt per step: 0.16 m/s at 60 FPS gets it moving, 0.07 m/s at 144 FPS does not, so
@@ -1921,6 +1963,7 @@ int main(int argc, char **argv) {
         patch_job_sleep(image_end);
         patch_null_binding_handler(image_end);
         patch_job_lock_wait(image_end);
+        patch_particle_spawner_null(image_end);
         patch_u1_sticky(image_end);
         patch_u2_convoy_ticks(image_end);
         patch_u2_convoy_sink(image_end);
