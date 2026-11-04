@@ -20,10 +20,13 @@
 #include "core/libraries/videoout/video_out.h"
 #include "core/libraries/videoout/videoout_error.h"
 #include "core/platform.h"
+#include "video_core/amdgpu/liverpool.h"
+#include "video_core/renderer_vulkan/vk_draw_pipe.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
+extern std::unique_ptr<AmdGpu::Liverpool> liverpool;
 
 namespace Libraries::VideoOut {
 
@@ -354,50 +357,6 @@ s32 PS4_SYSV_ABI sceVideoOutGetBufferLabelAddress(s32 handle, uintptr_t* label_a
     return 16;
 }
 
-namespace {
-/// bbport: submits end-of-pipe flips raised on the Vulkan recording thread (see below), in the
-/// order they were raised. Started on first use.
-class EopFlipWorker {
-public:
-    static void Post(std::function<void()> work) {
-        static EopFlipWorker worker;
-        static std::atomic<u32> posted{0};
-        if (posted.fetch_add(1, std::memory_order_relaxed) == 0) {
-            std::printf("VideoOut: an end-of-pipe flip was raised on the Vulkan recording thread: "
-                        "submitted by its own thread\n");
-        }
-        {
-            std::scoped_lock lock{worker.mutex};
-            worker.queue.push_back(std::move(work));
-        }
-        worker.cv.notify_one();
-    }
-
-private:
-    EopFlipWorker() {
-        thread = std::jthread([this](std::stop_token token) {
-            Common::SetCurrentThreadName("bb:EopFlip");
-            while (true) {
-                std::function<void()> work;
-                {
-                    std::unique_lock lock{mutex};
-                    if (!cv.wait(lock, token, [this] { return !queue.empty(); })) {
-                        return;
-                    }
-                    work = std::move(queue.front());
-                    queue.pop_front();
-                }
-                work();
-            }
-        });
-    }
-    std::mutex mutex;
-    std::condition_variable_any cv;
-    std::deque<std::function<void()>> queue;
-    std::jthread thread;
-};
-} // namespace
-
 s32 sceVideoOutSubmitEopFlip(s32 handle, u32 buf_id, u32 mode, s64 flip_arg, void** unk) {
     auto* port = driver->GetPort(handle);
     if (!port) {
@@ -438,12 +397,27 @@ s32 sceVideoOutSubmitEopFlip(s32 handle, u32 buf_id, u32 mode, s64 flip_arg, voi
             // recording thread (RecorderFences). The flip prepares a frame there, which waits
             // for that same thread to go idle: it waited for itself and the game froze (players'
             // U2 freezes on death and at cutscene/movie changes; stall report stacks). Such
-            // flips are submitted, in order, by a thread of their own, as the game's own
-            // sceVideoOutSubmitFlip calls are.
-            if (Vulkan::Scheduler::OnRecorderThread()) {
-                EopFlipWorker::Post(submit);
-            } else {
+            // flips go to the GPU command thread, as the game's own sceVideoOutSubmitFlip calls
+            // do: the frame is prepared with that thread's draw scheduler, which no other thread
+            // may record into. Deferred signals (SignalAfterHostCopies, async fences) also raise
+            // it on the GPU copy threads, the landing thread or a thread helping in
+            // BbCopy::WaitAll: PrepareFrame there recorded into the draw scheduler from a foreign
+            // thread (AMD driver crash reading 0x10 right after "Landing: a flip ready on the
+            // recording or a copy thread runs on the landing thread instead", U3 RX 6600) or
+            // deadlocked on the submit lock. Only the GPU command thread and the draw recording
+            // thread (stage B) flip in place. After Mevlock's 28cb99fc.
+            const bool in_place =
+                (AmdGpu::Liverpool::OnProcessorThread() || Vulkan::DrawPipe::OnStageB()) &&
+                !Vulkan::Scheduler::OnRecorderThread();
+            if (in_place) {
                 submit();
+            } else {
+                static std::atomic<u32> posted{0};
+                if (posted.fetch_add(1, std::memory_order_relaxed) == 0) {
+                    std::printf("VideoOut: an end-of-pipe flip was raised off the GPU command and "
+                                "draw recording threads: handed to the GPU command thread\n");
+                }
+                liverpool->SendCommand(submit);
             }
         });
 
