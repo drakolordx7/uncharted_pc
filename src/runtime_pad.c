@@ -5173,7 +5173,7 @@ static const RuntimeGuestCallback guest_callbacks[]={
     {"Tagged heap out of blocks (log)",
       "48 8b bb 00 04 00 00 48 8b 8b 18 04 00 00 48 c1 e1 20 48 0b 8b 28 04 00 00 49 89 f5 44 89 f2 e8 ?? ?? ?? ?? "
       "48 89 de 44 89 f3 49 89 c6 4d 85 f6 75",
-      0x24, 9, tagged_heap_block, NULL},
+      0x24, 9, tagged_heap_block, NULL, 0, NULL, 0},
     {"CUE table fill",
       "55 41 57 41 56 41 55 41 54 53 49 b9 00 24 00 0d 10 00 00 00 ?? ?? ?? ?? ?? ?? ?? 45 31 f6",
       0, 5, cue_table_pretouch, NULL, 0, NULL, 0},
