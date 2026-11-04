@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include "bbport_settings.h"
 #include "common/assert.h"
@@ -141,6 +144,21 @@ bool Swapchain::Present() {
         .pImageIndices = &image_index,
     };
 
+    {   // bbport diagnostic: BB_PRESENT_LOG=<file> writes the time (seconds, steady clock) of every present
+        static std::FILE* present_log = [] {
+            const char* p = std::getenv("BB_PRESENT_LOG");
+            return p && *p ? std::fopen(p, "wb") : nullptr;
+        }();
+        static unsigned present_count = 0;
+        if (present_log && present_count < 20000) {
+            const double t = std::chrono::duration<double>(
+                                 std::chrono::steady_clock::now().time_since_epoch()).count();
+            std::fwrite(&t, sizeof(t), 1, present_log);
+            if ((++present_count & 63) == 0) {
+                std::fflush(present_log);
+            }
+        }
+    }
     auto result = instance.GetPresentQueue().presentKHR(present_info);
     if (result == vk::Result::eErrorDeviceLost) {
         DeviceLost(instance.GetDevice()); // bbport: GPU crash report, not a bare assert

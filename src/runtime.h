@@ -117,14 +117,23 @@ const char *runtime_fiber_name_here(void);
 typedef struct {
     uint64_t r15, r13, r12, rbx, r11, r10, r9, r8, rdx, rcx, rax, rflags;
 } RuntimeGuestRegs;
+typedef void (__attribute__((ms_abi)) *RuntimeGuestFn)(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                       const RuntimeGuestRegs *regs);
+/* An entry with `pattern` NULL sits at a fixed `offset` of one build instead (antikmewzik's hooks for
+ * CUSA02320): the code there must equal `signature` (`signature_size` bytes). */
 typedef struct {
     const char *name;
     const char *pattern;
     size_t skip, moved;
-    void (__attribute__((ms_abi)) *callback)(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
-                                             const RuntimeGuestRegs *regs);
+    RuntimeGuestFn callback;
     const unsigned char *patch;
+    uint64_t offset;
+    const unsigned char *signature;
+    size_t signature_size;
 } RuntimeGuestCallback;
+/* 1 once a callback of the U3 image has been installed (the menus' markup differs from U2's: see runtime_pad.c) */
+extern volatile int runtime_u3_game;
+uint64_t runtime_image_base(void);   /* (diagnostic) where the guest image sits, to turn a vtable slot into an image offset */
 const RuntimeGuestCallback *runtime_guest_callbacks(size_t *count);
 /* Called for each entry of runtime_guest_callbacks() that was installed. */
 void runtime_guest_callback_installed(const RuntimeGuestCallback *callback);
@@ -132,4 +141,7 @@ void runtime_guest_callback_installed(const RuntimeGuestCallback *callback);
  * and not reported missing), and the notice right before it is installed at `offset`. Entries that a
  * launcher setting switches (aim assist) answer by their setting, all others are wanted. */
 int runtime_guest_callback_wanted(const RuntimeGuestCallback *c, uint64_t offset);
+/* Before the search: verified[i] is 1 where entry i has a fixed offset whose code equals its signature in this image
+ * (runtime_pad.c picks each game's mouse camera from it). */
+void runtime_guest_callbacks_verified(const uint8_t *verified, size_t count);
 #endif

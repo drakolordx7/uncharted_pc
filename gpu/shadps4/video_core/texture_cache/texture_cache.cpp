@@ -5,6 +5,16 @@
 #include <cstdlib>
 #include <xxhash.h>
 
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <mutex>
+#include <unordered_set>
+
+#include "bbport_keyicons.h"
 #include "bbport_toggles.h"
 #include "common/assert.h"
 #include "common/debug.h"
@@ -26,10 +36,17 @@
 #include "video_core/texture_cache/texture_cache.h"
 #include "video_core/texture_cache/tile_manager.h"
 
+#include <vulkan/vulkan_format_traits.hpp>
+
 namespace VideoCore {
 
 static constexpr u64 PageShift = 12;
 static constexpr u64 NumFramesBeforeRemoval = 32;
+
+namespace {
+/// bbport: BB_TEX_DUMP folder for the texture export, null when the export is off.
+const char* TexDumpDir();
+} // namespace
 
 TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
                            Vulkan::Runtime& runtime_, AmdGpu::Liverpool* liverpool_,
@@ -1136,7 +1153,307 @@ void TextureCache::RefreshImage(Image& image) {
     }
 
     runtime.UploadImage(&image, buffer, image_copies);
-    ReplaceButtonPrompts(runtime, image);
+
+    if (BbKeyIcons::Enabled()) {
+        PatchKeyIcons(image);
+    } else {
+        ReplaceButtonPrompts(runtime, image); // key icons off (launcher): the keyboard / Xbox button pictures
+    }
+    if (TexDumpDir()) {
+        DumpImage(image);
+    }
+}
+
+void TextureCache::PatchKeyIcons(Image& image) {
+    const auto& info = image.info;
+    if (info.num_samples > 1 || info.resources.layers != 1 || info.props.is_volume ||
+        True(image.flags & ImageFlagBits::GpuModified)) {
+        return;
+    }
+    // BC1 (the colors) and BC4 (the alpha masks): 8 bytes a block.
+    // (U3 stores its HUD button colors as BC1 sRGB)
+    const bool is_block = info.pixel_format == vk::Format::eBc1RgbUnormBlock ||
+                          info.pixel_format == vk::Format::eBc1RgbaUnormBlock ||
+                          info.pixel_format == vk::Format::eBc1RgbSrgbBlock ||
+                          info.pixel_format == vk::Format::eBc1RgbaSrgbBlock ||
+                          info.pixel_format == vk::Format::eBc4UnormBlock;
+    const bool is_atlas = info.size.width == 512 && info.size.height == 512 &&
+                          info.pixel_format == vk::Format::eR8G8B8A8Unorm;
+    // (the controller diagram of the Controls screen: an uncompressed 2048x1024 picture)
+    const bool is_diagram = info.size.width == 2048 && info.size.height == 1024 && info.pixel_format == vk::Format::eR8G8B8A8Unorm;
+    if (!is_atlas && !is_diagram && !(is_block && BbKeyIcons::IsTextureCandidate(info.size.width, info.size.height))) {
+        return;
+    }
+    // What this costs, for the games that stall: every candidate texture is hashed, the few that
+    // match are read back, repainted and uploaded (the GPU is waited for twice). Reported when it
+    // adds up (BB_KEY_ICONS_TIMING=1 reports every call).
+    struct CostReport {
+        std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+        ~CostReport() {
+            static std::atomic<u64> total_us{0}, calls{0}, reported_ms{0};
+            static const bool every = std::getenv("BB_KEY_ICONS_TIMING") != nullptr;
+            const u64 us = u64(std::chrono::duration_cast<std::chrono::microseconds>(
+                                   std::chrono::steady_clock::now() - start)
+                                   .count());
+            const u64 total = total_us += us;
+            const u64 n = ++calls;
+            if (every || us > 20000) {
+                std::printf("KeyIcons: one texture took %.1f ms\n", double(us) / 1000.0);
+            }
+            if (total / 500000 > reported_ms.load()) {
+                reported_ms = total / 500000;
+                std::printf("KeyIcons: %llu textures checked, %.0f ms in total\n", (unsigned long long)n,
+                            double(total) / 1000.0);
+            }
+        }
+    } cost;
+    // The textures are recognized by their content, as the texture dump names them.
+    const u64 hash = XXH3_64bits(std::bit_cast<u8*>(info.guest_address), info.guest_size);
+    image.bb_prompt = is_atlas ? 0 : u8(BbKeyIcons::PromptKind(hash));
+    image.bb_key_hash = !is_atlas && BbKeyIcons::IsTextureTarget(hash) ? hash : 0;
+    image.bb_pulse = !is_atlas && BbKeyIcons::IsPulseMask(hash);
+    image.bb_atlas = is_atlas && BbKeyIcons::IsAtlasHash(hash);
+    image.bb_atlas_generation = BbKeyIcons::MenuGeneration();
+    image.bb_mode_generation = BbKeyIcons::ModeGeneration();
+    if (!is_atlas && !BbKeyIcons::IsTextureTarget(hash) && (info.pixel_format == vk::Format::eBc1RgbUnormBlock ||
+                                                            info.pixel_format == vk::Format::eBc1RgbaUnormBlock)) {
+        BbKeyIcons::NoteUnknownTexture(hash, info.size.width, info.size.height,
+                                       std::bit_cast<const u8*>(info.guest_address), info.guest_size);
+    }
+    if (is_atlas ? !BbKeyIcons::IsAtlasHash(hash) : !BbKeyIcons::IsTextureTarget(hash)) {
+        return;
+    }
+
+    // Every mip level, back to back (only mip 0 of the atlas).
+    const u32 levels = is_atlas ? 1 : std::min<u32>(info.resources.levels, 12);
+    const u32 block_bytes = vk::blockSize(info.pixel_format);
+    const auto block_extent = vk::blockExtent(info.pixel_format);
+    const u32 block_w = block_extent[0], block_h = block_extent[1]; // DivCeil casts to its divisor's type
+    boost::container::small_vector<vk::BufferImageCopy, 12> copies;
+    u32 data_size = 0;
+    for (u32 m = 0; m < levels; ++m) {
+        const u32 width = std::max(info.size.width >> m, 1u), height = std::max(info.size.height >> m, 1u);
+        copies.push_back({
+            .bufferOffset = data_size,
+            .bufferRowLength = 0,
+            .bufferImageHeight = 0,
+            .imageSubresource =
+                {
+                    .aspectMask = vk::ImageAspectFlagBits::eColor,
+                    .mipLevel = m,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1,
+                },
+            .imageOffset = {0, 0, 0},
+            .imageExtent = {width, height, 1},
+        });
+        data_size += Common::DivCeil(width, block_w) * Common::DivCeil(height, block_h) * block_bytes;
+    }
+
+    if (data_size == 0) {
+        return;
+    }
+    const auto download = runtime.GetStagingPool().Request(data_size, MemoryType::HostCached, 16);
+    auto download_copies = copies;
+    for (auto& copy : download_copies) {
+        copy.bufferOffset += download.offset;
+    }
+    runtime.DownloadImage(&image, download.buffer, download_copies);
+    scheduler.Finish();
+    download.Invalidate();
+
+    std::vector<u8> data(download.mapped, download.mapped + data_size);
+    const bool u3_atlas = is_atlas && (hash == BbKeyIcons::U3AtlasHash || hash == BbKeyIcons::U3AtlasShapesHash);
+    const bool changed = u3_atlas ? BbKeyIcons::PatchU3Atlas(hash, data.data(), info.size.width, info.size.height)
+                         : is_atlas ? BbKeyIcons::PatchU1Atlas(data.data(), info.size.width, info.size.height)
+                                  : BbKeyIcons::PatchU1Texture(hash, data.data(), data.size(), levels);
+    if (!changed) {
+        return;
+    }
+
+    const auto upload = runtime.GetStagingPool().Request(data_size, MemoryType::HostUncached, 16);
+    std::memcpy(upload.mapped, data.data(), data_size);
+    upload.Flush();
+    for (auto& copy : copies) {
+        copy.bufferOffset += upload.offset;
+    }
+    runtime.UploadImage(&image, upload.buffer, copies);
+    scheduler.Finish();
+}
+
+namespace {
+
+const char* TexDumpDir() {
+    static const char* dir = [] {
+        const char* env = std::getenv("BB_TEX_DUMP");
+        return env && env[0] ? env : nullptr;
+    }();
+    return dir;
+}
+
+u32 TexDumpLimit(const char* name, u32 fallback) {
+    const char* env = std::getenv(name);
+    return env && env[0] ? u32(std::atoi(env)) : fallback;
+}
+
+/// DXGI_FORMAT for the formats the dump can write, 0 otherwise.
+u32 DxgiFormat(vk::Format format) {
+    switch (format) {
+    case vk::Format::eBc1RgbUnormBlock:
+    case vk::Format::eBc1RgbaUnormBlock:
+        return 71;
+    case vk::Format::eBc1RgbSrgbBlock:
+    case vk::Format::eBc1RgbaSrgbBlock:
+        return 72;
+    case vk::Format::eBc2UnormBlock:
+        return 74;
+    case vk::Format::eBc2SrgbBlock:
+        return 75;
+    case vk::Format::eBc3UnormBlock:
+        return 77;
+    case vk::Format::eBc3SrgbBlock:
+        return 78;
+    case vk::Format::eBc4UnormBlock:
+        return 80;
+    case vk::Format::eBc4SnormBlock:
+        return 81;
+    case vk::Format::eBc5UnormBlock:
+        return 83;
+    case vk::Format::eBc5SnormBlock:
+        return 84;
+    case vk::Format::eBc6HUfloatBlock:
+        return 95;
+    case vk::Format::eBc6HSfloatBlock:
+        return 96;
+    case vk::Format::eBc7UnormBlock:
+        return 98;
+    case vk::Format::eBc7SrgbBlock:
+        return 99;
+    case vk::Format::eR8G8B8A8Unorm:
+        return 28;
+    case vk::Format::eR8G8B8A8Srgb:
+        return 29;
+    case vk::Format::eB8G8R8A8Unorm:
+        return 87;
+    case vk::Format::eB8G8R8A8Srgb:
+        return 91;
+    case vk::Format::eR8Unorm:
+        return 61;
+    case vk::Format::eR8G8Unorm:
+        return 49;
+    default:
+        return 0;
+    }
+}
+
+} // namespace
+
+void TextureCache::DumpImage(Image& image) {
+    static std::mutex dump_mutex;
+    static std::unordered_set<u64> dumped;
+    static const u32 min_dim = TexDumpLimit("BB_TEX_DUMP_MIN", 8);
+    static const u32 max_dim = TexDumpLimit("BB_TEX_DUMP_MAX", 1024);
+
+    const auto& info = image.info;
+    const u32 dxgi = DxgiFormat(info.pixel_format);
+    if (dxgi == 0 || image.aspect_mask != vk::ImageAspectFlagBits::eColor ||
+        info.num_samples > 1 || info.resources.layers != 1 || info.props.is_volume ||
+        True(image.flags & ImageFlagBits::GpuModified) || info.size.width < min_dim ||
+        info.size.height < min_dim || info.size.width > max_dim || info.size.height > max_dim) {
+        // BB_TEX_DUMP_VERBOSE=1: say what the export leaves out (small images only), once per kind.
+        static const bool verbose = std::getenv("BB_TEX_DUMP_VERBOSE") != nullptr;
+        if (verbose && info.size.width <= 512 && info.size.height <= 512) {
+            const std::string kind = fmt::format(
+                "{} {}x{} layers={} samples={} volume={} gpu_modified={} aspect={}",
+                vk::to_string(info.pixel_format), info.size.width, info.size.height,
+                info.resources.layers, info.num_samples, info.props.is_volume,
+                True(image.flags & ImageFlagBits::GpuModified), vk::to_string(image.aspect_mask));
+            static std::mutex skipped_mutex;
+            static std::unordered_set<std::string> skipped;
+            std::scoped_lock lock{skipped_mutex};
+            if (skipped.insert(kind).second) {
+                std::printf("TexDump skipped: %s\n", kind.c_str());
+            }
+        }
+        return;
+    }
+
+    // Same identity the replacement will use: the guest bytes of the whole image.
+    const u64 hash = XXH3_64bits(std::bit_cast<u8*>(info.guest_address), info.guest_size);
+    {
+        std::scoped_lock lock{dump_mutex};
+        static const bool skip_loaded = [] {
+            // BB_TEX_DUMP_SKIP=<folder of an earlier dump>: its textures are not written again.
+            const char* skip = std::getenv("BB_TEX_DUMP_SKIP");
+            if (skip && skip[0]) {
+                std::error_code ec;
+                for (const auto& entry : std::filesystem::directory_iterator(skip, ec)) {
+                    const std::string name = entry.path().filename().string();
+                    if (name.size() > 16) {
+                        dumped.insert(std::strtoull(name.substr(0, 16).c_str(), nullptr, 16));
+                    }
+                }
+            }
+            return true;
+        }();
+        (void)skip_loaded;
+        if (!dumped.insert(hash).second) {
+            return;
+        }
+    }
+
+    const u32 width = info.size.width;
+    const u32 height = info.size.height;
+    const auto block = vk::blockExtent(info.pixel_format);
+    const u32 block_size = vk::blockSize(info.pixel_format);
+    const bool compressed = block[0] > 1;
+    const u32 row_bytes = ((width + block[0] - 1) / block[0]) * block_size;
+    const u32 data_size = row_bytes * ((height + block[1] - 1) / block[1]);
+
+    const auto download = runtime.GetStagingPool().Request(data_size, MemoryType::HostCached, 16);
+    const vk::BufferImageCopy copy = {
+        .bufferOffset = download.offset,
+        .bufferRowLength = 0,
+        .bufferImageHeight = 0,
+        .imageSubresource =
+            {
+                .aspectMask = vk::ImageAspectFlagBits::eColor,
+                .mipLevel = 0,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        .imageOffset = {0, 0, 0},
+        .imageExtent = {width, height, 1},
+    };
+    runtime.DownloadImage(&image, download.buffer, std::span{&copy, 1});
+    scheduler.Finish();
+    download.Invalidate();
+
+    u32 header[1 + 31 + 5]{};
+    header[0] = 0x20534444; // "DDS "
+    header[1] = 124;
+    header[2] = 0x1 | 0x2 | 0x4 | 0x1000 | (compressed ? 0x80000 : 0x8);
+    header[3] = height;
+    header[4] = width;
+    header[5] = compressed ? data_size : row_bytes;
+    header[7] = 1;               // mip count
+    header[19] = 32;             // pixel format size
+    header[20] = 0x4;            // DDPF_FOURCC
+    header[21] = 0x30315844;     // "DX10"
+    header[27] = 0x1000;         // DDSCAPS_TEXTURE
+    header[32] = dxgi;           // DX10 header: format
+    header[33] = 3;              // Texture2D
+    header[35] = 1;              // array size
+
+    const std::filesystem::path dir{TexDumpDir()};
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    const auto path = dir / fmt::format("{:016x}_{}x{}_f{}.dds", hash, width, height, dxgi);
+    if (std::ofstream out{path, std::ios::binary}) {
+        out.write(reinterpret_cast<const char*>(header), sizeof(header));
+        out.write(reinterpret_cast<const char*>(download.mapped), data_size);
+        std::printf("TexDump: %s\n", path.filename().string().c_str());
+    }
 }
 
 vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sampler,

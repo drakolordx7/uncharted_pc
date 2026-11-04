@@ -236,7 +236,8 @@ APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_
                 'window_size': '1920x1080', 'render_height': '1080', 'aspect': '16:9', 'speakers': 'auto', 'scaler': 'fsr1', 'sharpening': '500',
                 'anti_aliasing': 'off', 'aa_sharpness': '0.2', 'frame_generation': 'off',
                 'frame_gen_multiplier': '2', 'extra_env': '', 'close_on_play': False,
-                'mouse_look': True, 'mouse_sensitivity': '1.0', 'mouse_invert_y': False,
+                'mouse_look': True, 'mouse_sensitivity': '1.0', 'mouse_aim_sensitivity': '1.0', 'mouse_invert_y': False,
+                'free_view_smoothing': False, 'aim_raw': True, 'key_icons': True,
                 'pad_invert_y': False, 'art_banner': '', 'art_u1': '', 'art_u2': '', 'art_u3': '', 'steam_art': '', 'art_crops': {},
                 'shortcut_name': 'Uncharted: The Nathan Drake Collection', 'shortcut_icon': '', 'trophy_game': 'u1',
                 'auto_backup': True, 'backup_keep': '10', 'save_slots': {}, 'pad_vibration': True, 'pad_vibration_strength': '100', 'walk_speed': '45', 'button_prompts': 'auto', 'aim_assist': 'on', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True,
@@ -367,6 +368,17 @@ def set_ini(key, value):
     atomic_write_text(path, '\n'.join(out) + '\n')
 
 
+def get_ini(key):
+    """bbport.ini: a key's value, or None (the in-game menu may have changed it since the launcher saved)."""
+    try:
+        for line in ini_path().read_text(encoding='utf-8').splitlines():
+            if '=' in line and not line.lstrip().startswith('#') and line.split('=', 1)[0].strip() == key:
+                return line.split('=', 1)[1].strip()
+    except OSError:
+        pass
+    return None
+
+
 def game_info(folder):
     """{'title', 'id', 'version', 'games': [keys present]} of a game folder, or None."""
     folder = Path(folder or '.')
@@ -464,10 +476,10 @@ def load_save_editor():
     return _SAVE_EDITOR[0]
 
 
-def mouse_sensitivity(s):
+def mouse_sensitivity(s, key='mouse_sensitivity'):
     """The saved sensitivity as the game reads it: a number in the slider's range."""
     try:
-        return f"{min(MOUSE_SENS_MAX, max(MOUSE_SENS_MIN, float(s.get('mouse_sensitivity')))):.2f}"
+        return f"{min(MOUSE_SENS_MAX, max(MOUSE_SENS_MIN, float(s.get(key)))):.2f}"
     except (TypeError, ValueError):
         return '1.00'
 
@@ -577,7 +589,9 @@ def write_input_ini(s):
     lines = ['# Uncharted controls (written by the launcher, Controls page)',
              f"mouse_look={1 if s.get('mouse_look', True) else 0}",
              f"mouse_sensitivity={mouse_sensitivity(s)}",
+             f"mouse_aim_sensitivity={mouse_sensitivity(s, 'mouse_aim_sensitivity')}",
              f"mouse_invert_y={1 if s.get('mouse_invert_y') else 0}",
+             f"free_view_smoothing={1 if s.get('free_view_smoothing') else 0}",
              f"pad_invert_y={1 if s.get('pad_invert_y') else 0}",
              f"pad_vibration={1 if s.get('pad_vibration', True) else 0}",
              f"pad_vibration_strength={vibration_strength(s)}",
@@ -683,6 +697,7 @@ def game_environment(s, start=None):
         env['BB_AIM_ASSIST'] = '0'
     env['BB_CHEATS'] = ','.join(f'{game}:{cheat}' for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')
                                 if s.get(f'{game}_infinite_{cheat}'))
+    env['BB_KEY_ICONS'] = '1' if s.get('key_icons', True) else '0'
     for item in str(s['extra_env']).split():
         if '=' in item:
             key, value = item.split('=', 1)
@@ -765,6 +780,10 @@ class Launcher:
         self.tk, self.ttk, self.filedialog, self.messagebox = tk, ttk, filedialog, messagebox
         self.root = root
         self.app = {**APP_DEFAULTS, **load_json(CONFIG_FILE, {})}
+        # Raw mouse aiming is one setting with the in-game menu's (bbport.ini gyro_aim): its value there wins
+        gyro = get_ini('gyro_aim')
+        if gyro in ('0', '1'):
+            self.app['aim_raw'] = gyro == '1'
         UI_LANGUAGE = uncharted_i18n.language_code(self.app.get('ui_language', ''))
         self.configure_art()
         self.vars = {}
@@ -1671,7 +1690,21 @@ class Launcher:
                  Slider(self.tk, self.target(f), self.var('mouse_sensitivity'), MOUSE_SENS_MIN, MOUSE_SENS_MAX, 0.05,
                         COLORS, self.px, self.font_ui_md, width=300, log=True, entry=True),
                  _('Default is 1.00.'))
+        self.row(f, _('Aim sensitivity'),
+                 Slider(self.tk, self.target(f), self.var('mouse_aim_sensitivity'), MOUSE_SENS_MIN, MOUSE_SENS_MAX, 0.05,
+                        COLORS, self.px, self.font_ui_md, width=300, log=True, entry=True),
+                 _('Multiplies the mouse sensitivity while aiming (right button held); 1.00 turns as fast as free look.'))
         self.check(f, 'mouse_invert_y', _('Invert the mouse vertically'))
+        self.check(f, 'free_view_smoothing', _('Smooth the free camera (game smoothing)'),
+                   _('Uncharted 1: off by default, the walking camera follows the mouse at once. Turn it on for the '
+                     "game's own slow, smoothed camera."))
+        self.check(f, 'aim_raw', _('Raw mouse aiming'),
+                   _('The same setting as the in-game menu\'s. Builds with the 1:1 mouse camera: off, the mouse moves '
+                     'the right stick. Other builds: raw aiming and the cover camera; off, aiming and cover use the '
+                     'right stick.'))
+        self.check(f, 'key_icons', _('Show keyboard and mouse keys in the prompts'),
+                   _('Uncharted 1: the buttons of the prompts (Press ✕, ▲, L1...) become the keys and mouse buttons '
+                     'set below. Turn it off to see the controller buttons.'))
 
         self.section(f, _('Aiming'))
         self.row(f, _('Aim assist'), self.choice(f, 'aim_assist', AIM_ASSIST_CHOICES, 24),
@@ -2717,6 +2750,7 @@ class Launcher:
         atomic_write_text(CONFIG_FILE, json.dumps(self.app, indent=2) + '\n')
         try:
             set_ini('show_fps', '1' if self.app['show_fps'] else '0')
+            set_ini('gyro_aim', '1' if self.app['aim_raw'] else '0')
         except OSError:
             pass
 

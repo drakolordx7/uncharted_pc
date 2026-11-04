@@ -831,6 +831,9 @@ static size_t find_pattern(Segment *segments, uint64_t ns, const char *pattern, 
     }
     return matches;
 }
+volatile uint64_t guest_callback_rsp;   /* the guest's rsp when a callback was entered (read by the callback) */
+volatile int runtime_u3_game;           /* 1 once a U3 callback was installed: the U3 menus mark their selected row differently */
+uint64_t runtime_image_base(void) { return (uint64_t)(uintptr_t)image; }
 static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t image_size) {
     size_t count=0;
     const RuntimeGuestCallback *callbacks=runtime_guest_callbacks(&count);
@@ -846,20 +849,41 @@ static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t imag
     /* A/B tests: BB_CALLBACKS=0 installs none, BB_CALLBACKS_SKIP=<text> none whose name contains the text */
     const char *off=getenv("BB_CALLBACKS"), *skip=getenv("BB_CALLBACKS_SKIP");
     if (off && off[0]=='0') { printf("Callbacks: disabled (BB_CALLBACKS=0)\n"); return; }
+    /* Entries without a pattern sit at a fixed `offset` of one build (the code there must equal `signature`). */
+#define AT_OFFSET(c) (mapped(segments,ns,(c)->offset,(c)->signature_size) && !memcmp(image+(c)->offset,(c)->signature,(c)->signature_size))
+    int is_u1=0;   /* the image is Uncharted 1's when one of the U1 hooks matches: the U2 list widget hook (8 bytes of prologue) also matches a function of U1 and must not go there */
+    for (size_t i=0;i<count && !is_u1;++i) {
+        const RuntimeGuestCallback *c=&callbacks[i];
+        if (!c->pattern && c->signature && !strncmp(c->name,"U1 ",3) && AT_OFFSET(c)) is_u1=1;
+    }
+    {   /* which fixed-offset entries verify here, before anything is asked for or installed */
+        uint8_t verified[count ? count : 1];
+        for (size_t i=0;i<count;++i) verified[i]=!callbacks[i].pattern && callbacks[i].signature && AT_OFFSET(&callbacks[i]);
+        runtime_guest_callbacks_verified(verified,count);
+    }
     for (size_t i=0;i<count;++i) {
         const RuntimeGuestCallback *c=&callbacks[i];
         if (skip && *skip && strstr(c->name,skip)) continue;
         if (!runtime_guest_callback_wanted(c,0)) continue;              /* switched off (launcher setting) */
-        uint64_t found=0;
-        size_t length=0, matches=find_pattern(segments,ns,c->pattern,&found,&length);
-        if (matches>1) { printf("Callbacks: %s: %zu matches, not installed\n",c->name,matches); continue; }
-        if (!matches) continue;
-        const uint64_t offset=found+c->skip;
+        if ((is_u1 || getenv("BB_SKIP_U2_WIDGET")) && strstr(c->name,"U2 list widget")) continue;
+        if (!runtime_u3_game && strstr(c->name,"U3 list widget")) continue;   /* only once an unmistakable U3 hook (the text probe) is in */
+        uint64_t offset=0;
+        if (c->pattern) {
+            uint64_t found=0;
+            size_t length=0, matches=find_pattern(segments,ns,c->pattern,&found,&length);
+            if (matches>1) { printf("Callbacks: %s: %zu matches, not installed\n",c->name,matches); continue; }
+            if (!matches) continue;
+            offset=found+c->skip;
+        } else {
+            if (!c->signature || !AT_OFFSET(c)) continue;
+            offset=c->offset;
+        }
         int hooked=0;
         for (size_t j=0;j<hooks_done;++j) if (hook_offsets[j]==offset) hooked=1;
         if (hooked) continue;                                          /* an earlier entry took this site */
         hook_offsets[hooks_done++]=offset;
         runtime_guest_callback_wanted(c,offset);
+        if (!c->pattern && !strncmp(c->name,"U3 ",3)) runtime_u3_game=1;
         if (!c->callback) {
             memcpy(image+offset,c->patch,c->moved);
             installed[i]=1;
@@ -894,6 +918,11 @@ static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t imag
         t[k++]=0x49; t[k++]=0xb8; memcpy(t+k,&base,8); k+=8;        /* movabs r8, image */
         t[k++]=0x4d; t[k++]=0x89; t[k++]=0xf1;                      /* mov r9, r14 */
         t[k++]=0x48; t[k++]=0x89; t[k++]=0x5c; t[k++]=0x24; t[k++]=0x20; /* mov [rsp+0x20], rbx (regs) */
+        /* the guest's rsp before the thunk (12 pushes below rbx) goes to guest_callback_rsp */
+        const uintptr_t rsp_slot=(uintptr_t)&guest_callback_rsp;
+        t[k++]=0x48; t[k++]=0x8d; t[k++]=0x43; t[k++]=0x60;         /* lea rax, [rbx+0x60] */
+        t[k++]=0x49; t[k++]=0xba; memcpy(t+k,&rsp_slot,8); k+=8;    /* movabs r10, &guest_callback_rsp */
+        t[k++]=0x49; t[k++]=0x89; t[k++]=0x02;                      /* mov [r10], rax */
         t[k++]=0x48; t[k++]=0xb8; memcpy(t+k,&host,8); k+=8;        /* movabs rax, callback */
         t[k++]=0xff; t[k++]=0xd0;                                   /* call rax */
         for (int x=0;x<8;++x) {                                     /* movdqu xmmx, [rsp+0x30+16x] */
