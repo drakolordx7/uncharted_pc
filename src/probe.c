@@ -1456,13 +1456,19 @@ static void patch_particle_spawner_null(uint64_t image_size) {
      * mov rcx,[rax+0x20]; mov [r10+0x18],rcx; mov rcx,[rax+0x18] */
     const int64_t at=find_masked("4d89f2 49c7424800000000 488b05???????? 49894210 498b4208 488b4820 49894a18 488b4818",
                                  image_size);
-    if (at<0) return;  /* other games and versions: not this code */
+    if (at<0) {  /* other games and versions: not this code */
+        printf("Particles: spawner job pattern %s, not patched\n",at==-2 ? "not unique" : "not found");
+        return;
+    }
     unsigned char *p=image+at+22;                       /* mov rax,[r10+8] */
-    static const unsigned char epilogue[]={0x64,0x48,0x8b,0x04,0x25,0,0,0,0};  /* mov rax,fs:0 (PopAllocator) */
+    /* mov rax,fs:0 (PopAllocator); link_*.py has made it gs:0 (0x65) before this runs */
+    static const unsigned char epilogue[]={0x48,0x8b,0x04,0x25,0,0,0,0};
     static const unsigned char epilogue_next[]={0x48,0x8b,0x18,0x48,0x85,0xdb}; /* mov rbx,[rax]; test rbx,rbx */
     const unsigned char *e=p+0xaa9;
-    if ((uint64_t)(e+22-image)>image_size || memcmp(e,epilogue,sizeof(epilogue)) || memcmp(e+16,epilogue_next,sizeof(epilogue_next))) {
-        printf("Particles: spawner job epilogue not found, not patched\n");
+    if ((uint64_t)(e+22-image)>image_size || (e[0]!=0x64 && e[0]!=0x65) || memcmp(e+1,epilogue,sizeof(epilogue)) ||
+        memcmp(e+16,epilogue_next,sizeof(epilogue_next))) {
+        printf("Particles: spawner job pattern at %#" PRIx64 " but no epilogue at %#" PRIx64 " (%02x %02x %02x %02x), not patched\n",
+               (uint64_t)at,(uint64_t)(e-image),e[0],e[1],e[2],e[3]);
         return;
     }
     unsigned char *t=near_image_memory(64);
