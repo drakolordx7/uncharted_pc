@@ -1205,6 +1205,11 @@ static void u2_base_camera(uint64_t camera, int gap) {
 static void __attribute__((ms_abi)) u2b_camera_hook(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t unused3) {
     (void)unused0; (void)unused1; (void)unused3;
     const uint64_t update=saved_register(5), camera=saved_register(7);
+    {   /* The register sometimes holds no camera (0x2c7ffffff: a crash reading camera+0x9ec0 / +0x1c0, drakolordx7 issue #30).
+         * A camera is aligned and its fields up to +0x9f00 are readable; anything else is left to the game. */
+        uint8_t probe;
+        if (camera<0x10000 || (camera&7) || !safe_read(&probe,camera,1) || !safe_read(&probe,camera+0x9f00,1)) return;
+    }
     const uint64_t t0=now_us();
     const int gap=!(u2_follow_seen_us && t0-u2_follow_seen_us<U2_FOLLOW_RESYNC_US); /* the walking camera is away: an animation holds the picture */
     if (mouse_debug()) { /* map of a gap: which camera updates run while the walking camera is away, and does the picture turn? */
