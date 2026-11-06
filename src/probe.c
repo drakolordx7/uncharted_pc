@@ -831,7 +831,11 @@ static size_t find_pattern(Segment *segments, uint64_t ns, const char *pattern, 
     }
     return matches;
 }
-volatile uint64_t guest_callback_rsp;   /* the guest's rsp when a callback was entered (read by the callback) */
+/* The guest's rsp when a callback was entered (read by the callback). Per thread: the job workers enter hooks at the same time,
+ * and with one shared value a callback read another thread's stack (the U2 camera hook took stray data for a camera and wrote
+ * into it: the crashes at guest offset 0xb3efb9, drakolordx7 issues #28-#30, and later faults in the game's own code). */
+_Thread_local volatile uint64_t guest_callback_rsp;
+static void __attribute__((ms_abi)) set_guest_callback_rsp(uint64_t rsp) { guest_callback_rsp=rsp; }
 volatile int runtime_u3_game;           /* 1 once a U3 callback was installed: the U3 menus mark their selected row differently */
 uint64_t runtime_image_base(void) { return (uint64_t)(uintptr_t)image; }
 static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t image_size) {
@@ -912,17 +916,17 @@ static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t imag
             t[k++]=0xf3; t[k++]=0x0f; t[k++]=0x7f; t[k++]=(unsigned char)(0x84|x<<3); t[k++]=0x24;
             memcpy(t+k,&disp,4); k+=4;
         }
+        /* the guest's rsp before the thunk (12 pushes below rbx) goes to this thread's guest_callback_rsp (rdi, rsi, r14 and rbx survive the call) */
+        const uintptr_t setter=(uintptr_t)set_guest_callback_rsp;
+        t[k++]=0x48; t[k++]=0x8d; t[k++]=0x4b; t[k++]=0x60;         /* lea rcx, [rbx+0x60] */
+        t[k++]=0x48; t[k++]=0xb8; memcpy(t+k,&setter,8); k+=8;      /* movabs rax, set_guest_callback_rsp */
+        t[k++]=0xff; t[k++]=0xd0;                                   /* call rax */
         t[k++]=0x48; t[k++]=0x89; t[k++]=0xf9;                      /* mov rcx, rdi */
         t[k++]=0x48; t[k++]=0x89; t[k++]=0xf2;                      /* mov rdx, rsi */
         const uintptr_t base=(uintptr_t)image, host=(uintptr_t)c->callback;
         t[k++]=0x49; t[k++]=0xb8; memcpy(t+k,&base,8); k+=8;        /* movabs r8, image */
         t[k++]=0x4d; t[k++]=0x89; t[k++]=0xf1;                      /* mov r9, r14 */
         t[k++]=0x48; t[k++]=0x89; t[k++]=0x5c; t[k++]=0x24; t[k++]=0x20; /* mov [rsp+0x20], rbx (regs) */
-        /* the guest's rsp before the thunk (12 pushes below rbx) goes to guest_callback_rsp */
-        const uintptr_t rsp_slot=(uintptr_t)&guest_callback_rsp;
-        t[k++]=0x48; t[k++]=0x8d; t[k++]=0x43; t[k++]=0x60;         /* lea rax, [rbx+0x60] */
-        t[k++]=0x49; t[k++]=0xba; memcpy(t+k,&rsp_slot,8); k+=8;    /* movabs r10, &guest_callback_rsp */
-        t[k++]=0x49; t[k++]=0x89; t[k++]=0x02;                      /* mov [r10], rax */
         t[k++]=0x48; t[k++]=0xb8; memcpy(t+k,&host,8); k+=8;        /* movabs rax, callback */
         t[k++]=0xff; t[k++]=0xd0;                                   /* call rax */
         for (int x=0;x<8;++x) {                                     /* movdqu xmmx, [rsp+0x30+16x] */
