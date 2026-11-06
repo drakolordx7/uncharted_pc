@@ -40,7 +40,7 @@
 void stickwatch_arm(uint64_t a0, uint64_t a1, uint64_t image);   /* runtime_stickwatch.c, TEMPORARY */
 void stickwatch_enable(int on);
 void stickwatch_summary(void);
-extern volatile uint64_t guest_callback_rsp;   /* probe.c: the guest's rsp when a callback was entered */
+extern _Thread_local volatile uint64_t guest_callback_rsp;   /* probe.c: the guest's rsp when a callback was entered */
 
 #define ERR_INVALID_ARG ((int32_t)0x80920001)
 #define ERR_INVALID_HANDLE ((int32_t)0x80920003)
@@ -1219,7 +1219,8 @@ static void __attribute__((ms_abi)) u2b_camera_hook(uint64_t unused0, uint64_t u
          * A camera is aligned and mapped up to the last field its update uses. Mapped, not readable: pages the GPU tracks
          * are briefly inaccessible until the fault handler lets the access through, and a read probe skipped real cameras. */
         const uint64_t uid=update-image, last=uid==U2B_UPDATE_FOLLOW ? 0x9ed0 : uid==U2B_UPDATE_COVER ? 0x12a0 : uid==0x4496b0 ? 0x1f40 : 0x10;
-        if (camera<0x10000 || (camera&7) || !u2_guest_mapped(camera) || !u2_guest_mapped(camera+last)) {
+        /* Guest objects lie above the guest image: 0x100000 is a mapped host page (a write to the chase camera's +0x188 crashed). */
+        if (camera<image || (camera&7) || !u2_guest_mapped(camera) || !u2_guest_mapped(camera+last)) {
             static unsigned noted;
             if (noted++<10) printf("Mouse: U2 camera update %#llx skipped: %#llx is no camera\n",(unsigned long long)uid,(unsigned long long)camera);
             return;
@@ -2159,7 +2160,7 @@ static const unsigned char u1_photo_row_3_patch[]={0x48,0x8b,0xbd,0x08,0xff,0xff
 #ifdef _WIN32
 #include <windows.h>
 #endif
-extern volatile uint64_t guest_callback_rsp;
+extern _Thread_local volatile uint64_t guest_callback_rsp;
 static int safe_read(void *dst, uint64_t src, size_t size) {
     if (src<0x10000 || src>0x00007fffffffffffull) return 0;
 #ifdef _WIN32
