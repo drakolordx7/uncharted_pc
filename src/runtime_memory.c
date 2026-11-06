@@ -253,11 +253,26 @@ static size_t carve_host(uintptr_t a, uintptr_t b) {
     free(runs);
     return at;
 }
+/* Large mappings become one view per 16 MiB (address-aligned): a partial unmap remaps the rest of
+ * its view (carve_host), and games free video memory in 1 MiB pieces from the start of a 3 GB
+ * mapping (U3's cutscenes: ~16 ms each, seconds in total). */
+#define VIEW_CHUNK (UINT64_C(16)<<20)
 static int host_map(uintptr_t address, uint64_t size, int prot, int reserved, uint64_t phys) {
     size_t i=carve_host(address,address+size);
     if (reserved) return 0;
-    regions[i].phys=phys; regions[i].mapped=1;
-    view_map(&regions[i],win_prot(prot));
+    const uintptr_t end=address+size;
+    for (uintptr_t at=address; at<end; ++i) {
+        uintptr_t next=(at+VIEW_CHUNK)&~(uintptr_t)(VIEW_CHUNK-1);
+        if (next>=end) next=end;
+        else {
+            if (!VirtualFree((void *)at,next-at,MEM_RELEASE|MEM_PRESERVE_PLACEHOLDER)) win_fail("splitting a placeholder",at,next-at);
+            regions[i].end=next;
+            region_insert(i+1,(HostRegion){next,end,0,0});
+        }
+        regions[i].phys=phys+(at-address); regions[i].mapped=1;
+        view_map(&regions[i],win_prot(prot));
+        at=next;
+    }
     return 0;
 }
 static int host_unmap(uintptr_t address, uint64_t size) { carve_host(address,address+size); return 0; }
@@ -531,15 +546,17 @@ static int memory_log(void) {
     if (value<0) { const char *v=getenv("BB_MEMORY_LOG"); value=v && v[0]=='1'; }
     return value;
 }
+static double memory_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return t.tv_sec*1e3+t.tv_nsec/1e6; }
 static ABI int32_t direct_map(void **out, uint64_t size, int prot, int flags, int64_t physical, uint64_t alignment) {
+    const double t0=memory_ms();
     void *requested=out ? *out : NULL;
     write_lock();
     int32_t result=map_direct_locked(out,size,prot,flags,physical,alignment);
     write_unlock();
     flush_hooks();
     if (memory_log())
-        printf("Memory: map direct want=%p size=0x%" PRIx64 " prot=0x%x flags=0x%x phys=0x%" PRIx64 " align=0x%" PRIx64 " -> %p result=0x%x\n",
-               requested,size,prot,flags,(uint64_t)physical,alignment,out ? *out : NULL,(unsigned)result);
+        printf("Memory: map direct want=%p size=0x%" PRIx64 " prot=0x%x flags=0x%x phys=0x%" PRIx64 " align=0x%" PRIx64 " -> %p result=0x%x %.3f ms\n",
+               requested,size,prot,flags,(uint64_t)physical,alignment,out ? *out : NULL,(unsigned)result,memory_ms()-t0);
     else if (!result) printf("Runtime: mapped direct memory %p, size=%" PRIu64 ", prot=0x%x\n", *out, size, prot);
     return result;
 }
@@ -563,6 +580,7 @@ static int32_t unmap_locked(uintptr_t start, uint64_t size) {
     return 0;
 }
 static ABI int32_t direct_unmap(void *address, uint64_t size) {
+    const double t0=memory_ms();
     /* The GPU forgets the range before it disappears (as shadPS4's early GPU unmap). */
     if (hook_unmap && !((uintptr_t)address%PAGE) && size) hook_unmap((uintptr_t)address,align_up(size,PAGE));
     write_lock();
@@ -570,7 +588,7 @@ static ABI int32_t direct_unmap(void *address, uint64_t size) {
     int32_t result=unmap_locked((uintptr_t)address,size);
     pending_count=before; /* already notified above */
     write_unlock();
-    if (memory_log()) printf("Memory: unmap %p size=0x%" PRIx64 " result=0x%x\n",address,size,(unsigned)result);
+    if (memory_log()) printf("Memory: unmap %p size=0x%" PRIx64 " result=0x%x %.3f ms\n",address,size,(unsigned)result,memory_ms()-t0);
     return result;
 }
 static ABI int32_t direct_release(uint64_t start, uint64_t size) {
