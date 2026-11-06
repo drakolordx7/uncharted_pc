@@ -1202,15 +1202,28 @@ static void u2_base_camera(uint64_t camera, int gap) {
         }
     }
 }
+/* Committed memory, whatever its protection at the moment (GPU write tracking takes access away for a while). */
+static int u2_guest_mapped(uint64_t address) {
+    if (address<0x10000 || address>0x00007fffffffffffull) return 0;
+#ifdef _WIN32
+    MEMORY_BASIC_INFORMATION info;
+    return VirtualQuery((LPCVOID)(uintptr_t)address,&info,sizeof(info))==sizeof(info) && info.State==MEM_COMMIT;
+#else
+    return 1;
+#endif
+}
 static void __attribute__((ms_abi)) u2b_camera_hook(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t unused3) {
     (void)unused0; (void)unused1; (void)unused3;
     const uint64_t update=saved_register(5), camera=saved_register(7);
     {   /* The register sometimes holds no camera (0x2c7ffffff: a crash reading camera+0x9ec0 / +0x1c0, drakolordx7 issue #30).
-         * A camera is aligned and readable; each update below also checks the last field it uses. */
-        uint8_t probe;
-        if (camera<0x10000 || (camera&7) || !safe_read(&probe,camera,1)) return;
-        const uint64_t uid=update-image, last=uid==U2B_UPDATE_FOLLOW ? 0x9ed0 : uid==U2B_UPDATE_COVER ? 0x12a0 : uid==0x4496b0 ? 0x1f40 : 0;
-        if (last && !safe_read(&probe,camera+last,1)) return;
+         * A camera is aligned and mapped up to the last field its update uses. Mapped, not readable: pages the GPU tracks
+         * are briefly inaccessible until the fault handler lets the access through, and a read probe skipped real cameras. */
+        const uint64_t uid=update-image, last=uid==U2B_UPDATE_FOLLOW ? 0x9ed0 : uid==U2B_UPDATE_COVER ? 0x12a0 : uid==0x4496b0 ? 0x1f40 : 0x10;
+        if (camera<0x10000 || (camera&7) || !u2_guest_mapped(camera) || !u2_guest_mapped(camera+last)) {
+            static unsigned noted;
+            if (noted++<10) printf("Mouse: U2 camera update %#llx skipped: %#llx is no camera\n",(unsigned long long)uid,(unsigned long long)camera);
+            return;
+        }
     }
     const uint64_t t0=now_us();
     const int gap=!(u2_follow_seen_us && t0-u2_follow_seen_us<U2_FOLLOW_RESYNC_US); /* the walking camera is away: an animation holds the picture */
